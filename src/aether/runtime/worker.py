@@ -260,9 +260,7 @@ class WorkerPool:
     def _cancel_disposition(self, running: _Running) -> tuple[_Disposition | None, bool]:
         attempt = running.lease.attempt
         if running.cancel_reason == "cancel":
-            disposition = _Disposition(
-                TaskStatus.CANCELLED, "task.cancelled", {"attempt": attempt}
-            )
+            disposition = _Disposition(TaskStatus.CANCELLED, "task.cancelled", {"attempt": attempt})
             return disposition, False
         if running.cancel_reason == "lease_lost":
             return None, False

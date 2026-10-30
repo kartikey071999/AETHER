@@ -245,9 +245,7 @@ class LeaseManager:
                     _matches(TaskRecord.lease_owner, seen_owner),
                     _matches(TaskRecord.lease_expires_at, seen_expiry),
                 )
-                .values(
-                    state=final.value, lease_owner=None, lease_expires_at=None, updated_at=now
-                )
+                .values(state=final.value, lease_owner=None, lease_expires_at=None, updated_at=now)
                 .execution_options(synchronize_session=False)
             )
             if result.rowcount != 1:

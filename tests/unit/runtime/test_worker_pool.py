@@ -2,7 +2,7 @@ import asyncio
 from datetime import timedelta
 
 import pytest
-from runtime_helpers import StubAgent, event_counts, get_task, make_task, stub_for
+from runtime_helpers import StubAgent, event_counts, get_task, make_task, stub_for, wait_until
 
 from aether.agents.base import AgentContext, TaskResult, TaskResultStatus
 from aether.communication.bus import MessageBus
@@ -64,6 +64,7 @@ async def test_global_concurrency_limit_is_enforced(sessions, objective_id) -> N
     assert await pool.submit(ids[2], agent) is False
     assert (await get_task(sessions, ids[2])).state == TaskStatus.READY
 
+    await wait_until(lambda: asyncio.sleep(0, len(agent.started_tasks) == 2))
     gate.event.set()
     await pool.join()
     assert agent.max_active == 2

@@ -122,6 +122,7 @@ class Engine:
         self._loops: list[asyncio.Task[None]] = []
         self._stop_requested = asyncio.Event()
         self._stopped = asyncio.Event()
+        self._loops_stopping = asyncio.Event()
         self.recovery_report: RecoveryReport | None = None
 
     @property
@@ -204,7 +205,7 @@ class Engine:
         for agent_id, agent in self._agents.items():
             try:
                 report[agent_id] = await agent.health_check()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - a broken agent must not break health
                 report[agent_id] = AgentHealth(
                     agent_id=agent_id, status=HealthStatus.UNHEALTHY, detail=str(exc)
                 )
@@ -269,11 +270,24 @@ class Engine:
     def _spawn(self, coroutine: Any, name: str) -> None:
         self._loops.append(asyncio.create_task(coroutine, name=name))
 
-    async def _teardown(self, grace: float) -> int:
+    async def _stop_loops(self, grace: float) -> None:
+        """Let loops finish their current iteration; cancelling mid-query can wedge SQLite."""
         loops, self._loops = self._loops, []
-        for loop_task in loops:
-            loop_task.cancel()
-        await asyncio.gather(*loops, return_exceptions=True)
+        self._loops_stopping.set()
+        if loops:
+            _, pending = await asyncio.wait(loops, timeout=grace)
+            for loop_task in pending:
+                loop_task.cancel()
+            await asyncio.gather(*loops, return_exceptions=True)
+
+    async def _pause(self, seconds: float) -> None:
+        try:
+            await asyncio.wait_for(self._loops_stopping.wait(), seconds)
+        except TimeoutError:
+            pass
+
+    async def _teardown(self, grace: float) -> int:
+        await self._stop_loops(grace)
         await self._pool.shutdown(grace)
         released = 0
         for task_id, owner in await self._leases.owned_by(self._owner):
@@ -298,7 +312,7 @@ class Engine:
         return released
 
     async def _agent_loop(self, agent: BaseAgent) -> None:
-        while True:
+        while not self._loops_stopping.is_set():
             try:
                 if not await self._bus.wait_for_messages(
                     agent.agent_id, self._limits.message_poll_seconds
@@ -313,7 +327,7 @@ class Engine:
                 raise
             except Exception:
                 self._logger.exception("message loop for %s failed", agent.agent_id)
-                await asyncio.sleep(min(self._limits.message_poll_seconds, 1.0))
+                await self._pause(min(self._limits.message_poll_seconds, 1.0))
 
     async def _process_message(self, agent: BaseAgent, message: AgentMessage) -> None:
         await self._bus.mark_processing(message.message_id, consumer=self._owner)
@@ -328,18 +342,20 @@ class Engine:
             await self._bus.mark_processed(message.message_id)
 
     async def _scheduler_loop(self) -> None:
-        while True:
+        while not self._loops_stopping.is_set():
             try:
                 await self.schedule_once()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 self._logger.exception("scheduler tick failed")
-            await asyncio.sleep(self._limits.scheduler_interval_seconds)
+            await self._pause(self._limits.scheduler_interval_seconds)
 
     async def _recovery_loop(self) -> None:
         while True:
-            await asyncio.sleep(self._limits.recovery_interval_seconds)
+            await self._pause(self._limits.recovery_interval_seconds)
+            if self._loops_stopping.is_set():
+                return
             try:
                 await self._leases.recover_expired()
             except asyncio.CancelledError:
