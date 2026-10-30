@@ -153,6 +153,21 @@ PAYLOAD_EXAMPLES = {
         "cost": 0.001,
         "latency_ms": 20,
     },
+    # --- security / tools events (T-020) ---
+    "security.operation_authorized": {
+        "operation": "subprocess:git",
+        "kind": "subprocess",
+        "input_hash": "0" * 64,
+        "grant_id": str(uuid4()),
+        "expires_at": "2026-01-01T00:00:00+00:00",
+    },
+    "security.user_authorization_requested": {
+        "operation": "config_change:settings",
+        "input_hash": "0" * 64,
+        "request_id": str(uuid4()),
+        "decision_id": str(uuid4()),
+        "question": "Allow the change?",
+    },
 }
 
 

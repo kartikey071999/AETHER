@@ -317,3 +317,38 @@ def build_event(event_type: str, **kwargs: Any) -> AetherEvent:
         raise ValueError(f"unknown event type: {event_type}")
     kwargs.setdefault("category", EVENT_CATEGORIES[event_type])
     return AetherEvent(event_type=event_type, **kwargs)
+
+
+# --- security / tools events (T-020) ---
+
+
+class SecurityOperationAuthorizedPayload(EventPayload):
+    operation: str
+    kind: str
+    input_hash: str = Field(min_length=64, max_length=64)
+    grant_id: UUID
+    expires_at: datetime
+    decision_id: UUID | None = None
+    user_request_id: UUID | None = None
+
+
+class SecurityUserAuthorizationRequestedPayload(EventPayload):
+    operation: str
+    input_hash: str = Field(min_length=64, max_length=64)
+    request_id: UUID
+    decision_id: UUID
+    question: str
+
+
+EVENT_TYPES.update(
+    {
+        "security.operation_authorized": SecurityOperationAuthorizedPayload,
+        "security.user_authorization_requested": SecurityUserAuthorizationRequestedPayload,
+    }
+)
+EVENT_CATEGORIES.update(
+    {
+        "security.operation_authorized": EventCategory.SECURITY,
+        "security.user_authorization_requested": EventCategory.SECURITY,
+    }
+)
