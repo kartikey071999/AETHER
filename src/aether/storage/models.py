@@ -827,7 +827,7 @@ class ProviderUsageRecord(Base):
     request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=Decimal("0"))
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=Decimal(0))
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="succeeded")
     occurred_at: Mapped[datetime] = mapped_column(

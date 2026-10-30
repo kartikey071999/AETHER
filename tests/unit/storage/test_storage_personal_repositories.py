@@ -176,8 +176,8 @@ async def test_provider_usage_totals_and_events(database, events_for):
 
     assert await usage.total_cost() == Decimal("0.75")
     assert await usage.total_cost(provider="openai") == Decimal("0.75")
-    assert await usage.total_cost(provider="local") == Decimal("0")
-    assert await usage.total_cost(provider="missing") == Decimal("0")
+    assert await usage.total_cost(provider="local") == Decimal(0)
+    assert await usage.total_cost(provider="missing") == Decimal(0)
     events = await events_for(first)
     assert [event.event_type for event in events] == ["provider.usage_recorded"]
     assert events[0].payload["cost_usd"] == "0.25"

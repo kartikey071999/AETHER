@@ -25,7 +25,7 @@ class ProviderUsageRepository:
         request_count: int = 1,
         input_tokens: int = 0,
         output_tokens: int = 0,
-        cost_usd: Decimal | float | str = Decimal("0"),
+        cost_usd: Decimal | float | str = Decimal(0),
         latency_ms: int | None = None,
         status: str = "succeeded",
         correlation_id: UUID | None = None,
