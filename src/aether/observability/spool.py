@@ -11,11 +11,19 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aether.observability.events import AetherEvent
+from aether.observability.recorder import split_legacy_payload
 from aether.observability.redaction import redact, redact_string
 from aether.storage.models import EventRecord
 
@@ -39,12 +47,33 @@ class _SpoolRecord(BaseModel):
 
     id: UUID
     event_type: str = Field(min_length=1, max_length=64)
+    category: str = Field(default="general", min_length=1, max_length=32)
     aggregate_type: str = Field(min_length=1, max_length=32)
     aggregate_id: UUID
     actor: str = Field(min_length=1, max_length=24)
+    source: str | None = Field(default=None, max_length=64)
+    correlation_id: UUID | None = None
+    objective_id: UUID | None = None
+    task_id: UUID | None = None
     payload: dict[str, Any]
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
     created_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def lift_legacy_metadata(cls, value: Any) -> Any:
+        """Entries spooled before the dedicated event columns wrapped metadata in the payload."""
+        if not isinstance(value, dict) or not isinstance(value.get("payload"), dict):
+            return value
+        meta, data = split_legacy_payload(value["payload"])
+        if not meta:
+            return value
+        lifted = {
+            name: meta[name]
+            for name in ("category", "source", "correlation_id", "objective_id", "task_id")
+            if meta.get(name) is not None and name not in value
+        }
+        return {**value, **lifted, "payload": data}
 
     @field_validator("created_at")
     @classmethod
@@ -81,9 +110,14 @@ class EventSpool:
         document = _SpoolRecord(
             id=record.id,
             event_type=record.event_type,
+            category=record.category,
             aggregate_type=record.aggregate_type,
             aggregate_id=record.aggregate_id,
             actor=record.actor,
+            source=record.source,
+            correlation_id=record.correlation_id,
+            objective_id=record.objective_id,
+            task_id=record.task_id,
             payload=record.payload,
             idempotency_key=record.idempotency_key,
             created_at=record.created_at,

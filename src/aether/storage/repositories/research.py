@@ -176,7 +176,11 @@ class ResearchFindingRepository:
                 aggregate_type="research_finding",
                 aggregate_id=finding.id,
                 actor=actor,
-                payload={"from": old_status, "to": new_status, "rationale": rationale},
+                payload={
+                    "from_status": old_status,
+                    "to_status": new_status,
+                    "rationale": rationale,
+                },
                 category=EventCategory.RESEARCH,
                 correlation_id=correlation_id,
                 objective_id=finding.objective_id,
