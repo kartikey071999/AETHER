@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,6 +16,9 @@ from aether.agents.registry import AgentDefinition, get_agent
 from aether.communication.bus import MessageBus
 from aether.communication.messages import AgentId, AgentMessage, MessageType
 from aether.storage.models import TaskRecord
+
+if TYPE_CHECKING:
+    from aether.tools.registry import ToolRegistry
 
 
 class PermissionService(Protocol):
@@ -33,6 +36,8 @@ class AgentContext:
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("aether.agent"))
     permission_service: PermissionService | None = None
+    # Privileged actions (shell, HTTP, files) are only reachable through this registry.
+    tools: "ToolRegistry | None" = None
     services: dict[str, Any] = field(default_factory=dict)
 
 
