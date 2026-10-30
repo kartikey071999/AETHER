@@ -64,8 +64,15 @@ class EventSpool:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).resolve()
+        lock_path = str(self.path)
+        # Windows resolve() can return either spelling as a missing file appears.
+        if os.name == "nt":
+            if lock_path.upper().startswith("\\\\?\\UNC\\"):
+                lock_path = "\\\\" + lock_path[8:]
+            elif lock_path.startswith("\\\\?\\"):
+                lock_path = lock_path[4:]
         with _LOCKS_GUARD:
-            self._lock = _LOCKS.setdefault(self.path, threading.Lock())
+            self._lock = _LOCKS.setdefault(Path(lock_path), threading.Lock())
 
     def append(self, event: AetherEvent) -> None:
         from aether.observability.recorder import _to_record

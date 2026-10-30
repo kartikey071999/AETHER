@@ -151,9 +151,7 @@ def test_errors_reach_error_log_even_at_critical_threshold(tmp_path: Path) -> No
 @pytest.mark.usefixtures("isolated_logging")
 def test_extra_fields_cannot_override_core_json_fields(tmp_path: Path) -> None:
     configure_logging(tmp_path)
-    get_logger("runtime").info(
-        "Actual message", extra={"timestamp": "not-a-time", "level": "fake"}
-    )
+    get_logger("runtime").info("Actual message", extra={"timestamp": "not-a-time", "level": "fake"})
     line = read_lines(tmp_path / "runtime.log")[0]
     assert line["level"] == "INFO"
     assert datetime.fromisoformat(line["timestamp"]).utcoffset() == timedelta(0)
@@ -180,9 +178,7 @@ def test_retention_archives_only_old_rotated_files_and_expires_archives(tmp_path
     unrelated = archive_dir / "important.gz"
     unrelated.write_bytes(b"not managed")
     age(unrelated, now, 40)
-    result = apply_retention(
-        tmp_path, archive_after_days=7, delete_archives_after_days=30, now=now
-    )
+    result = apply_retention(tmp_path, archive_after_days=7, delete_archives_after_days=30, now=now)
     assert result == RetentionResult(archived=2, deleted=1)
     assert not expired.exists()
     assert unrelated.exists()

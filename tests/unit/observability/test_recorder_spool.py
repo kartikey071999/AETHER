@@ -1,4 +1,5 @@
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -145,6 +146,7 @@ async def test_failed_spool_is_explicit(
 ) -> None:
     recorder = EventRecorder(EventSpool(tmp_path / "events.jsonl"))
     monkeypatch.setattr(AsyncSession, "flush", AsyncMock(side_effect=SQLAlchemyError("offline")))
+
     def failed_append(event: AetherEvent) -> None:
         raise OSError("Spool unavailable")
 
@@ -225,15 +227,35 @@ async def test_missing_spool_replay_is_empty(database: Database, tmp_path: Path)
     assert not spool.path.exists()
 
 
+@pytest.mark.parametrize("trial", range(5))
 def test_spool_concurrent_appends_are_complete_json_lines(
-    event: AetherEvent, tmp_path: Path
+    event: AetherEvent, tmp_path: Path, trial: int
 ) -> None:
-    path = tmp_path / "nested" / "events.jsonl"
+    path = tmp_path / str(trial) / "nested" / "events.jsonl"
     with ThreadPoolExecutor(max_workers=8) as executor:
         list(executor.map(lambda _: EventSpool(path).append(event), range(80)))
     lines = path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 80
     assert all(json.loads(line)["id"] == str(event.event_id) for line in lines)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows extended-length path aliases")
+@pytest.mark.parametrize(
+    "ordinary,extended",
+    [
+        (r"C:\spool\events.jsonl", r"\\?\C:\spool\events.jsonl"),
+        (r"\\server\share\events.jsonl", r"\\?\UNC\server\share\events.jsonl"),
+    ],
+)
+def test_windows_spool_path_aliases_share_lock(
+    ordinary: str, extended: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved = iter([Path(ordinary), Path(extended)])
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "resolve", lambda self: next(resolved))
+        first = EventSpool(ordinary)
+        second = EventSpool(ordinary)
+    assert first._lock is second._lock
 
 
 async def test_append_after_interrupted_line_preserves_next_event(
