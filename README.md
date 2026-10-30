@@ -58,6 +58,50 @@ running worker lifecycle, message delivery/recovery, a complete requirement
 workflow, independent test verification, personalization storage, API, and
 dashboard remain future phases. No arbitrary software installation or shell
 execution is exposed by this foundation.
+
+## Observability APIs
+
+`aether.observability.events.build_event(event_type, **fields)` validates a frozen
+event envelope and its registered payload. Supply `source`, `actor`,
+`aggregate_type`, `aggregate_id`, and `payload`; the category, UUIDs, and UTC
+timestamp are generated. Naive timestamps and unknown event types are rejected.
+Payload schemas live in `EVENT_TYPES`; provider measurements use `tokens`,
+`cost`, and `latency_ms`. Numeric token counts are retained, while credentials,
+authorization values, and secret-bearing fields are redacted recursively.
+
+Create `EventRecorder(EventSpool(log_dir / "events.jsonl"))` and use
+`recorder.add(session, event)` inside an existing transaction. It neither flushes
+nor commits: the caller owns rollback and database failures. Alternatively,
+`await recorder.record(database.sessions, event)` commits independently and
+returns the existing record for a duplicate event UUID or `idempotency_key`
+(first-write-wins). An independent database write failure appends a redacted,
+fsynced spool entry and raises `EventWriteError`; a failed spool also raises.
+`await spool.replay(database.sessions)` returns `replayed` and `failed` counts,
+retains corrupt/failed lines, and preserves appends made during replay.
+Spool replay must be serialized across processes by the runtime.
+
+Until dedicated event columns are added, event metadata is stored in
+`EventRecord.payload["meta"]`, with typed payload data in `payload["data"]`.
+The schema mapping is isolated in `_to_record()`. Existing repositories and the
+runtime are not yet wired to these APIs; their current audit behavior is unchanged.
+
+`configure_logging(log_dir, max_bytes=..., backup_count=..., level=...,
+console=False)` configures delayed, rotating JSON-lines files.
+`get_logger(category)` and `log_event(event)` route the nine operational
+categories to separate files; objective/task/message events use `runtime.log`,
+and capability events use `agent.log`. Every ERROR or higher also reaches
+`error.log`, even when the configured category threshold is higher. Messages,
+extras, and exception traces are redacted. Reconfiguration closes old owned
+handlers without adding duplicates; write failures raise `LoggingWriteError`.
+These file logs supplement, rather than replace, the durable database ledger.
+
+`apply_retention(log_dir, archive_after_days=..., delete_archives_after_days=...,
+now=...)` archives old numbered rotations into uniquely named gzip files under
+`archive/`, returning `archived` and `deleted` counts. Archive age starts at
+archiving time. Active logs, spool files, symlinks, and unrelated archives are
+excluded. Schedule retention between rotations; it is not a concurrent
+multi-process rotation coordinator.
+
 # AETHER — Master System Development Specification
 
 ## 1. Mission
