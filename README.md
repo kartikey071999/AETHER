@@ -80,10 +80,22 @@ fsynced spool entry and raises `EventWriteError`; a failed spool also raises.
 retains corrupt/failed lines, and preserves appends made during replay.
 Spool replay must be serialized across processes by the runtime.
 
-Until dedicated event columns are added, event metadata is stored in
-`EventRecord.payload["meta"]`, with typed payload data in `payload["data"]`.
-The schema mapping is isolated in `_to_record()`. Existing repositories and the
-runtime are not yet wired to these APIs; their current audit behavior is unchanged.
+Event metadata is stored in the dedicated `EventRecord` columns (category,
+source, actor, correlation/objective/task ids, aggregate, idempotency key) and
+`payload` holds only the redacted typed payload; `session_id` and `branch` are
+logged but have no columns yet. The mapping is isolated in `_to_record()`, and
+`split_legacy_payload()` still reads the older `{"meta", "data"}` shape. All
+repositories and the runtime stage events through
+`aether.observability.recorder.stage_event` (`build_event` +
+`EventRecorder.add`) in the same transaction as the state change; constructing
+`EventRecord` outside `aether.observability` is rejected by a test.
+
+`aether run [--once] [--duration SECONDS]` builds the runtime from settings
+(spool at `data_dir/spool/events.jsonl`, rotating logs in `log_dir`), applies log
+retention once, replays the spool, then starts the engine, which emits
+`runtime.started`. The seven agents are inert placeholders until their behaviour
+is implemented. `aether events tail [--limit N]` prints the latest redacted
+events from the database.
 
 `configure_logging(log_dir, max_bytes=..., backup_count=..., level=...,
 console=False)` configures delayed, rotating JSON-lines files.
