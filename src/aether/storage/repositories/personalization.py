@@ -106,7 +106,7 @@ class PersonRepository:
                 actor=actor,
                 payload={
                     "person_id": person_id,
-                    "key": key,
+                    "name": key,
                     "previous": previous,
                     "value": value,
                     "source": source,

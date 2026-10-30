@@ -88,7 +88,7 @@ class RequirementRepository:
                 aggregate_type="requirement",
                 aggregate_id=requirement.id,
                 actor=actor,
-                payload={"from": old_status, "to": status, "reason": reason},
+                payload={"from_status": old_status, "to_status": status, "reason": reason},
                 category=EventCategory.REQUIREMENT,
                 correlation_id=correlation_id,
                 objective_id=requirement.objective_id,

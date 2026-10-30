@@ -141,8 +141,8 @@ class CapabilityRepository:
                 aggregate_id=capability.id,
                 actor=actor,
                 payload={
-                    "from": old_status,
-                    "to": new_status,
+                    "from_status": old_status,
+                    "to_status": new_status,
                     "details": details or {},
                 },
                 category=EventCategory.CAPABILITY,
