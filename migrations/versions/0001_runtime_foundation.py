@@ -10,7 +10,8 @@ branch_labels = None
 depends_on = None
 
 UUID = sa.Uuid(as_uuid=True)
-JSON_DOCUMENT = postgresql.JSONB(astext_type=sa.Text())
+# JSONB on PostgreSQL; plain JSON elsewhere so the migration chain also runs on SQLite in tests.
+JSON_DOCUMENT = sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql")
 
 
 def upgrade() -> None:
