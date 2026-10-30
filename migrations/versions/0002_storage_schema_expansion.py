@@ -233,20 +233,22 @@ def _create_agent_tables() -> None:
         sa.PrimaryKeyConstraint("agent_id"),
     )
     seeded_at = datetime.now(UTC)
-    op.bulk_insert(
-        agents,
-        [
-            {
-                "agent_id": agent_id,
-                "responsibility": responsibility,
-                "enabled": True,
-                "model_preference": None,
-                "config": {},
-                "created_at": seeded_at,
-                "updated_at": seeded_at,
-            }
-            for agent_id, responsibility in AGENT_SEED
-        ],
+    # The JSON value is a SQL literal because JSON has no offline (--sql) literal renderer.
+    op.execute(
+        agents.insert().values(
+            [
+                {
+                    "agent_id": agent_id,
+                    "responsibility": responsibility,
+                    "enabled": True,
+                    "model_preference": None,
+                    "config": sa.literal_column("'{}'"),
+                    "created_at": seeded_at,
+                    "updated_at": seeded_at,
+                }
+                for agent_id, responsibility in AGENT_SEED
+            ]
+        )
     )
 
     op.create_table(
