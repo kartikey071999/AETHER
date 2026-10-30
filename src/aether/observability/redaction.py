@@ -20,7 +20,7 @@ _BEARER = re.compile(r"\b(Bearer)\s+[a-z0-9._~+/=-]+", re.IGNORECASE)
 _AUTHORIZATION = re.compile(
     r"\b(authorization\s*[:=]\s*)(?:Bearer|Basic)\s+[a-z0-9._~+/=-]+", re.IGNORECASE
 )
-_TOKEN = re.compile(r"\b(?:gh[pousr]_|github_pat_|sk-)[a-z0-9_-]+", re.IGNORECASE)
+_TOKEN = re.compile(r"\b(?:gh[pousr]_|github_pat_|gsk_|sk-)[a-z0-9_-]+", re.IGNORECASE)
 _ASSIGNMENT = re.compile(
     r"""(?P<label>\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|
     authorization|dsn|database[_-]?url)\b\s*[:=]\s*)
