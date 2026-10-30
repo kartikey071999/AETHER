@@ -47,6 +47,7 @@ def test_nonsecret_keys_and_token_measurements_are_preserved(key: str) -> None:
         ("Bearer abc.def_xyz-123", "Bearer ***"),
         ("bearer abc+/==", "bearer ***"),
         ("ghp_fake123 gho_fake456 sk-fake789 github_pat_fake", "*** *** *** ***"),
+        ("groq key gsk_fakeGroqKey123", "groq key ***"),
         ("password='two words' token=abcdef", "password=*** token=***"),
         ('API_KEY: "two words"', "API_KEY: ***"),
         ("Authorization: Basic dXNlcjpwYXNz", "Authorization: ***"),
