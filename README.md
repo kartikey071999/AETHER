@@ -53,11 +53,22 @@ same transaction. The scheduler selects from supplied ready-task candidates
 using dependencies, deadlines, CPU, RAM, disk reserve, concurrency limits, and
 wait-time aging; its decisions can be persisted as events.
 
-Central permission enforcement, safe execution adapters, a continuously
-running worker lifecycle, message delivery/recovery, a complete requirement
-workflow, independent test verification, personalization storage, API, and
-dashboard remain future phases. No arbitrary software installation or shell
-execution is exposed by this foundation.
+Central permission enforcement lives in `aether.security`: an immutable,
+default-deny `SecurityPolicy` (configured once at startup through
+`AETHER_SECURITY_*` settings such as JSON lists `AETHER_SECURITY_ALLOWED_EXECUTABLES`
+and `AETHER_SECURITY_ALLOWED_HOSTS`), WARDEN-only decisions bound to the SHA-256
+hash of the exact operation input, explicit user authorization for high-risk
+kinds, and single-use short-lived grants. `aether.tools.ToolRegistry` is the
+only path to privileged actions; its adapters (argv-only subprocess with
+timeouts, process-tree kill, and scrubbed environment; allowlisted HTTP;
+confined file I/O) refuse to act without a matching grant, and external output
+is returned as `UntrustedContent`. Every allow and block is an audit event.
+
+A continuously running worker lifecycle, wiring the tool registry into agent
+workflows, message delivery/recovery, a complete requirement workflow,
+independent test verification, personalization storage, API, and dashboard
+remain future phases. No arbitrary software installation or shell execution is
+exposed by this foundation.
 
 ## Observability APIs
 
