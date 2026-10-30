@@ -58,7 +58,7 @@ def _run_database_command(command: str) -> int:
         else:
             created = asyncio.run(bootstrap.create_database_if_missing(url))
             print("Database created." if created else "Database already exists.")
-    except Exception as error:  # report any connection failure without a traceback
+    except Exception as error:  # noqa: BLE001 - report any failure without a traceback
         print(f"Database {command} failed: {type(error).__name__}", file=sys.stderr)
         print(f"Database URL: {bootstrap.redact_url(url)}", file=sys.stderr)
         return 1
