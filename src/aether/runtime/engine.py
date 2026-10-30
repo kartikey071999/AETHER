@@ -1,0 +1,376 @@
+"""Shared runtime engine: agent loops, scheduler tick, worker pool, and graceful lifecycle."""
+
+import asyncio
+import json
+import logging
+from collections.abc import Sequence
+from datetime import timedelta
+from pathlib import Path
+from typing import Any, Protocol
+from uuid import UUID, uuid4
+
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from aether.agents.base import (
+    AgentContext,
+    AgentHealth,
+    BaseAgent,
+    HealthStatus,
+    PermissionService,
+    UnsupportedMessageType,
+)
+from aether.communication.bus import MessageBus
+from aether.communication.messages import AgentId, AgentMessage
+from aether.config import AetherSettings
+from aether.runtime._support import Clock, add_event, as_utc, utc_now
+from aether.runtime.leases import RUNTIME_ACTOR, LeaseManager
+from aether.runtime.lifecycle import Lifecycle, LifecycleState
+from aether.runtime.recovery import RecoveryReport, recover_runtime_state
+from aether.runtime.resource_monitor import HostResources
+from aether.runtime.scheduler import (
+    Scheduler,
+    SchedulerResources,
+    SchedulingCandidate,
+)
+from aether.runtime.shutdown import ShutdownSignalHandler
+from aether.runtime.worker import WorkerPool
+from aether.storage.models import TaskRecord, TaskStatus
+
+_MIB = 1024 * 1024
+
+
+class ResourceSnapshotter(Protocol):
+    def snapshot(self, disk_path: Path) -> HostResources: ...
+
+
+class EngineLimits(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    max_concurrent_tasks: int = Field(default=2, ge=1)
+    max_tasks_per_agent: int | None = Field(default=None, ge=1)
+    task_timeout_seconds: float = Field(default=1800.0, gt=0)
+    lease_ttl_seconds: float = Field(default=60.0, gt=0)
+    lease_renew_seconds: float | None = Field(default=None, gt=0)
+    scheduler_interval_seconds: float = Field(default=1.0, gt=0)
+    recovery_interval_seconds: float = Field(default=15.0, gt=0)
+    message_poll_seconds: float = Field(default=1.0, gt=0)
+    message_batch_size: int = Field(default=10, ge=1)
+    shutdown_timeout_seconds: float = Field(default=30.0, ge=0)
+    disk_path: Path = Path(".")
+
+    @classmethod
+    def from_settings(cls, settings: AetherSettings) -> "EngineLimits":
+        return cls(
+            max_concurrent_tasks=settings.max_concurrent_tasks,
+            task_timeout_seconds=settings.task_timeout_seconds,
+            disk_path=settings.data_dir,
+        )
+
+
+class Engine:
+    def __init__(
+        self,
+        database_sessions: async_sessionmaker[AsyncSession],
+        agents: Sequence[BaseAgent],
+        scheduler: Scheduler,
+        resource_monitor: ResourceSnapshotter,
+        limits: EngineLimits | None = None,
+        *,
+        bus: MessageBus | None = None,
+        clock: Clock = utc_now,
+        logger: logging.Logger | None = None,
+        permission_service: PermissionService | None = None,
+    ) -> None:
+        self._sessions = database_sessions
+        self._agents: dict[AgentId, BaseAgent] = {}
+        for agent in agents:
+            if agent.agent_id in self._agents:
+                raise ValueError(f"Duplicate agent registered: {agent.agent_id.value}")
+            self._agents[agent.agent_id] = agent
+        self._scheduler = scheduler
+        self._monitor = resource_monitor
+        self._limits = limits or EngineLimits()
+        self._clock = clock
+        self._logger = logger or logging.getLogger("aether.runtime.engine")
+        self._run_id = uuid4()
+        self._owner = f"engine-{self._run_id.hex[:8]}"
+        self._bus = bus or MessageBus(
+            database_sessions, clock=clock, poll_interval=self._limits.message_poll_seconds
+        )
+        self._leases = LeaseManager(database_sessions, clock=clock)
+        self._context = AgentContext(
+            sessions=database_sessions,
+            bus=self._bus,
+            clock=clock,
+            logger=self._logger,
+            permission_service=permission_service,
+        )
+        lease_ttl = timedelta(seconds=self._limits.lease_ttl_seconds)
+        self._pool = WorkerPool(
+            self._leases,
+            self._context,
+            max_concurrent=self._limits.max_concurrent_tasks,
+            per_agent_limit=self._limits.max_tasks_per_agent,
+            task_timeout=self._limits.task_timeout_seconds,
+            lease_ttl=lease_ttl,
+            renew_interval=self._limits.lease_renew_seconds,
+            owner=self._owner,
+        )
+        self._lifecycle = Lifecycle()
+        self._loops: list[asyncio.Task[None]] = []
+        self._stop_requested = asyncio.Event()
+        self._stopped = asyncio.Event()
+        self._loops_stopping = asyncio.Event()
+        self.recovery_report: RecoveryReport | None = None
+
+    @property
+    def state(self) -> LifecycleState:
+        return self._lifecycle.state
+
+    @property
+    def bus(self) -> MessageBus:
+        return self._bus
+
+    @property
+    def leases(self) -> LeaseManager:
+        return self._leases
+
+    @property
+    def pool(self) -> WorkerPool:
+        return self._pool
+
+    @property
+    def run_id(self) -> UUID:
+        return self._run_id
+
+    async def start(self) -> None:
+        self._lifecycle.transition(LifecycleState.STARTING)
+        try:
+            self.recovery_report = await recover_runtime_state(
+                self._leases, self._bus, list(self._agents)
+            )
+            for agent in self._agents.values():
+                await agent.start()
+            for agent in self._agents.values():
+                self._spawn(self._agent_loop(agent), f"agent-loop-{agent.agent_id.value}")
+            self._spawn(self._scheduler_loop(), "scheduler-loop")
+            self._spawn(self._recovery_loop(), "recovery-loop")
+            self._lifecycle.transition(LifecycleState.RUNNING)
+            await self._emit(
+                "runtime.started",
+                {
+                    "agents": [agent_id.value for agent_id in self._agents],
+                    "owner": self._owner,
+                    "recovery": self.recovery_report.summary(),
+                },
+            )
+        except BaseException:
+            await self._teardown(0.0)
+            raise
+
+    async def stop(self, timeout: float | None = None) -> None:
+        self._stop_requested.set()
+        if self._lifecycle.state is LifecycleState.CREATED:
+            self._lifecycle.transition(LifecycleState.STOPPED)
+            self._stopped.set()
+            return
+        if self._lifecycle.state in (LifecycleState.STOPPING, LifecycleState.STOPPED):
+            await self._stopped.wait()
+            return
+        grace = self._limits.shutdown_timeout_seconds if timeout is None else timeout
+        self._lifecycle.transition(LifecycleState.STOPPING)
+        await self._emit("runtime.stopping", {"running_tasks": self._pool.running_count})
+        released = await self._teardown(grace)
+        await self._emit("runtime.stopped", {"released_leases": released})
+
+    async def run_forever(self) -> None:
+        if self._lifecycle.state is LifecycleState.CREATED:
+            await self.start()
+        handler = ShutdownSignalHandler(self.request_stop)
+        handler.install(asyncio.get_running_loop())
+        try:
+            await self._stop_requested.wait()
+        finally:
+            handler.uninstall()
+            await self.stop()
+
+    def request_stop(self) -> None:
+        """Ask run_forever() to shut down; must be called on the event loop thread."""
+        self._stop_requested.set()
+
+    async def health(self) -> dict[AgentId, AgentHealth]:
+        report: dict[AgentId, AgentHealth] = {}
+        for agent_id, agent in self._agents.items():
+            try:
+                report[agent_id] = await agent.health_check()
+            except Exception as exc:  # noqa: BLE001 - a broken agent must not break health
+                report[agent_id] = AgentHealth(
+                    agent_id=agent_id, status=HealthStatus.UNHEALTHY, detail=str(exc)
+                )
+        return report
+
+    async def schedule_once(self) -> int:
+        """Run one scheduler tick; returns the number of tasks started."""
+        if not self._lifecycle.accepting_work:
+            return 0
+        statement = (
+            select(TaskRecord)
+            .where(
+                TaskRecord.state == TaskStatus.READY.value,
+                TaskRecord.assigned_agent.in_([agent_id.value for agent_id in self._agents]),
+            )
+            .order_by(TaskRecord.priority.desc(), TaskRecord.created_at, TaskRecord.id)
+        )
+        async with self._sessions() as session:
+            rows = (await session.scalars(statement)).all()
+        candidates = {
+            row.id: (
+                AgentId(row.assigned_agent),
+                SchedulingCandidate(
+                    task_id=row.id,
+                    priority=row.priority,
+                    waiting_since=as_utc(row.updated_at),
+                    estimated_ram_bytes=row.estimated_ram_mb * _MIB,
+                    estimated_disk_bytes=row.estimated_disk_mb * _MIB,
+                ),
+            )
+            for row in rows
+            if row.assigned_agent
+        }
+        started = 0
+        while candidates:
+            eligible = [
+                candidate
+                for agent_id, candidate in candidates.values()
+                if self._pool.has_capacity(agent_id)
+            ]
+            if not eligible:
+                break
+            decision = self._scheduler.choose_next(
+                eligible,
+                SchedulerResources(
+                    host=self._monitor.snapshot(self._limits.disk_path),
+                    running_tasks=self._pool.running_count,
+                ),
+                now=self._clock(),
+            )
+            if decision.selected_task_id is None:
+                break
+            try:
+                await self._scheduler.record_decision(decision)
+            except RuntimeError:
+                pass  # scheduler built without a session factory
+            agent_id, _ = candidates.pop(decision.selected_task_id)
+            if await self._pool.submit(decision.selected_task_id, self._agents[agent_id]):
+                started += 1
+        return started
+
+    def _spawn(self, coroutine: Any, name: str) -> None:
+        self._loops.append(asyncio.create_task(coroutine, name=name))
+
+    async def _stop_loops(self, grace: float) -> None:
+        """Let loops finish their current iteration; cancelling mid-query can wedge SQLite."""
+        loops, self._loops = self._loops, []
+        self._loops_stopping.set()
+        if loops:
+            _, pending = await asyncio.wait(loops, timeout=grace)
+            for loop_task in pending:
+                loop_task.cancel()
+            await asyncio.gather(*loops, return_exceptions=True)
+
+    async def _pause(self, seconds: float) -> None:
+        try:
+            await asyncio.wait_for(self._loops_stopping.wait(), seconds)
+        except TimeoutError:
+            pass
+
+    async def _teardown(self, grace: float) -> int:
+        await self._stop_loops(grace)
+        await self._pool.shutdown(grace)
+        released = 0
+        for task_id, owner in await self._leases.owned_by(self._owner):
+            if await self._leases.release(
+                task_id,
+                owner,
+                TaskStatus.READY,
+                details={"reason": "shutdown"},
+                outcome_event="task.interrupted",
+                refund_attempt=True,
+            ):
+                released += 1
+        for agent in self._agents.values():
+            try:
+                await agent.stop()
+            except Exception:
+                self._logger.exception("agent %s failed to stop cleanly", agent.agent_id)
+        if self._lifecycle.state is not LifecycleState.STOPPING:
+            self._lifecycle.transition(LifecycleState.STOPPING)
+        self._lifecycle.transition(LifecycleState.STOPPED)
+        self._stopped.set()
+        return released
+
+    async def _agent_loop(self, agent: BaseAgent) -> None:
+        while not self._loops_stopping.is_set():
+            try:
+                if not await self._bus.wait_for_messages(
+                    agent.agent_id, self._limits.message_poll_seconds
+                ):
+                    continue
+                messages = await self._bus.claim(
+                    agent.agent_id, self._limits.message_batch_size, consumer=self._owner
+                )
+                for message in messages:
+                    await self._process_message(agent, message)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._logger.exception("message loop for %s failed", agent.agent_id)
+                await self._pause(min(self._limits.message_poll_seconds, 1.0))
+
+    async def _process_message(self, agent: BaseAgent, message: AgentMessage) -> None:
+        await self._bus.mark_processing(message.message_id, consumer=self._owner)
+        try:
+            await agent.dispatch_message(message, self._context)
+        except UnsupportedMessageType as exc:
+            await self._bus.mark_failed(message.message_id, json.dumps(exc.to_dict()))
+        except Exception as exc:
+            self._logger.exception("%s failed to handle %s", agent.agent_id, message.message_id)
+            await self._bus.mark_failed(message.message_id, f"{type(exc).__name__}: {exc}")
+        else:
+            await self._bus.mark_processed(message.message_id)
+
+    async def _scheduler_loop(self) -> None:
+        while not self._loops_stopping.is_set():
+            try:
+                await self.schedule_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._logger.exception("scheduler tick failed")
+            await self._pause(self._limits.scheduler_interval_seconds)
+
+    async def _recovery_loop(self) -> None:
+        while True:
+            await self._pause(self._limits.recovery_interval_seconds)
+            if self._loops_stopping.is_set():
+                return
+            try:
+                await self._leases.recover_expired()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._logger.exception("lease recovery sweep failed")
+
+    async def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
+        async with self._sessions() as session, session.begin():
+            add_event(
+                session,
+                event_type=event_type,
+                aggregate_type="runtime",
+                aggregate_id=self._run_id,
+                actor=RUNTIME_ACTOR,
+                payload=payload,
+                created_at=self._clock(),
+            )
