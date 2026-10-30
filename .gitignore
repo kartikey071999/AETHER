@@ -7,3 +7,16 @@ data/
 logs/
 artifacts/
 workspaces/
+
+# AI agent files (Claude / Copilot) - never commit
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.github/copilot-instructions.md
+.github/instructions/
+.github/prompts/
+.github/agents/
+.github/skills/
+.copilot/
+AGENTS.md
+copilot-session-*.md

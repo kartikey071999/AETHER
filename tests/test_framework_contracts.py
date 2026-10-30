@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -50,6 +50,39 @@ def test_message_envelope_generates_ids_and_rejects_naive_timestamps() -> None:
             timestamp=datetime(2026, 1, 1),
             payload={},
         )
+
+
+@pytest.mark.parametrize(
+    "deadline",
+    [
+        None,
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 1, 1, tzinfo=timezone(timedelta(hours=5, minutes=30))),
+    ],
+)
+def test_message_accepts_missing_or_timezone_aware_deadline(deadline: datetime | None) -> None:
+    message = AgentMessage(
+        source_agent=AgentId.ORCHESTR,
+        target_agent=AgentId.FORGE,
+        message_type=MessageType.TASK_ASSIGN,
+        payload={},
+        deadline=deadline,
+    )
+
+    assert message.deadline == deadline
+
+
+def test_message_rejects_naive_deadline() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        AgentMessage(
+            source_agent=AgentId.ORCHESTR,
+            target_agent=AgentId.FORGE,
+            message_type=MessageType.TASK_ASSIGN,
+            payload={},
+            deadline=datetime(2026, 1, 1),
+        )
+
+    assert [error["loc"] for error in exc_info.value.errors()] == [("deadline",)]
 
 
 def test_scheduler_limits_are_validated() -> None:
