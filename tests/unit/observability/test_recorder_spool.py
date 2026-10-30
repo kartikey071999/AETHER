@@ -33,9 +33,10 @@ async def test_add_does_not_flush_commit_or_spool(
         record = recorder.add(session, event)
         assert record in session.new
         assert record.id == event.event_id
-        assert record.payload["data"]["details"]["api_key"] == "***"
-        assert record.payload["meta"]["category"] == "error"
-        assert record.payload["meta"]["correlation_id"] == str(event.correlation_id)
+        assert record.payload["details"]["api_key"] == "***"
+        assert record.category == "error"
+        assert record.source == event.source
+        assert record.correlation_id == event.correlation_id
         assert await event_count(database) == 0
         await session.flush()
         await session.rollback()
@@ -70,7 +71,7 @@ async def test_record_is_durable_and_returns_accessible_detached_record(
     record = await recorder.record(sessions, event)
     assert record.id == event.event_id
     assert record.created_at == event.timestamp
-    assert record.payload["data"]["details"]["nested"]["password"] == "***"
+    assert record.payload["details"]["nested"]["password"] == "***"
     async with database.sessions() as session:
         stored = await session.get(EventRecord, event.event_id)
         assert stored is not None
@@ -96,7 +97,7 @@ async def test_idempotency_is_first_write_wins(
     assert (await recorder.record(database.sessions, first)).id == first.event_id
     duplicate = await recorder.record(database.sessions, second)
     assert duplicate.id == first.event_id
-    assert duplicate.payload["data"]["message"] == "safe diagnostic"
+    assert duplicate.payload["message"] == "safe diagnostic"
     assert await event_count(database) == 1
     assert not recorder.spool.path.exists()
     with pytest.raises(IntegrityError):
@@ -122,6 +123,16 @@ async def test_concurrent_duplicate_lookup_recovers_integrity_error(
     assert (await recorder.record(database.sessions, event)).id == event.event_id
     assert calls == 2
     assert await event_count(database) == 1
+
+
+async def test_database_failure_without_spool_raises_event_write_error(
+    database: Database, event: AetherEvent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with monkeypatch.context() as patch:
+        patch.setattr(AsyncSession, "flush", AsyncMock(side_effect=SQLAlchemyError("offline")))
+        with pytest.raises(EventWriteError, match="no fallback spool"):
+            await EventRecorder().record(database.sessions, event)
+    assert await event_count(database) == 0
 
 
 async def test_database_failure_spools_redacted_event_and_raises(

@@ -1,6 +1,7 @@
 """Deterministic, validated contracts for operational events."""
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
@@ -33,6 +34,12 @@ class EventCategory(StrEnum):
     TASK = "task"
     MESSAGE = "message"
     CAPABILITY = "capability"
+    REQUIREMENT = "requirement"
+    RESEARCH = "research"
+    AUTHORIZATION = "authorization"
+    PERSONALIZATION = "personalization"
+    KNOWLEDGE = "knowledge"
+    PROVIDER = "provider"
 
 
 class EventPayload(BaseModel):
@@ -44,6 +51,8 @@ class ObjectiveCreatedPayload(EventPayload):
     description: str = ""
     priority: int = Field(default=50, ge=0, le=100)
     completion_criteria: list[str] = Field(default_factory=list)
+    parent_objective_id: UUID | None = None
+    generated_by_agent: bool = False
 
 
 class ObjectiveUpdatedPayload(EventPayload):
@@ -51,24 +60,72 @@ class ObjectiveUpdatedPayload(EventPayload):
     rationale: str
 
 
+class ObjectivePriorityChangedPayload(EventPayload):
+    from_priority: int = Field(ge=0, le=100)
+    to_priority: int = Field(ge=0, le=100)
+    reason: str
+
+
+class ObjectiveStatusChangedPayload(EventPayload):
+    from_status: str | None = None
+    to_status: str
+    reason: str | None = None
+
+
 class TaskCreatedPayload(EventPayload):
     title: str = Field(min_length=1, max_length=200)
     description: str = ""
     priority: int = Field(default=50, ge=0, le=100)
     assigned_agent: AgentId | None = None
+    objective_id: UUID | None = None
+    parent_task_id: UUID | None = None
+    requirement_id: UUID | None = None
 
 
 class TaskTransitionedPayload(EventPayload):
     from_status: TaskStatus
     to_status: TaskStatus
-    reason: str
+    reason: str = ""
     details: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
 
 
 class TaskAssignedPayload(EventPayload):
     assigned_agent: AgentId
     previous_agent: AgentId | None = None
     reason: str
+
+
+class TaskDependencyPayload(EventPayload):
+    depends_on_task_id: UUID
+
+
+class TaskLeaseAcquiredPayload(EventPayload):
+    owner: str
+    attempt: int = Field(ge=0)
+    expires_at: datetime
+
+
+class TaskLeaseReleasedPayload(EventPayload):
+    owner: str
+    final_status: TaskStatus
+
+
+class TaskLeaseExpiredPayload(EventPayload):
+    owner: str | None = None
+    expired_at: datetime | None = None
+
+
+class TaskOutcomePayload(EventPayload):
+    """Final disposition of one task attempt (completed, failed, timed out, interrupted...)."""
+
+    attempt: int | None = Field(default=None, ge=0)
+    max_attempts: int | None = Field(default=None, ge=0)
+    error: str | None = None
+    will_retry: bool | None = None
+    reason: str | None = None
+    result: dict[str, Any] | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class MessagePublishedPayload(EventPayload):
@@ -81,10 +138,20 @@ class MessagePublishedPayload(EventPayload):
 class MessageDeliveredPayload(EventPayload):
     message_id: UUID
     target_agent: AgentId
+    message_type: str | None = None
+    consumer: str | None = None
+
+
+class MessageProcessingPayload(MessageDeliveredPayload):
+    pass
+
+
+class MessageRequeuedPayload(MessageDeliveredPayload):
+    previous_status: str
 
 
 class MessageProcessedPayload(MessageDeliveredPayload):
-    outcome: str
+    outcome: str = "processed"
 
 
 class MessageFailedPayload(MessageDeliveredPayload):
@@ -144,12 +211,32 @@ class ResourceMeasuredPayload(EventPayload):
 class SchedulerDecisionPayload(EventPayload):
     selected_task_id: UUID | None = None
     reason: str
+    score: float | None = None
     deferred: dict[UUID, str] = Field(default_factory=dict)
 
 
 class AgentHeartbeatPayload(EventPayload):
-    agent_id: AgentId
+    agent_id: str = Field(min_length=1)
     status: str
+    current_task_id: UUID | None = None
+    heartbeat_id: UUID | None = None
+
+
+class AgentRegisteredPayload(EventPayload):
+    agent_id: str = Field(min_length=1)
+    enabled: bool
+    model_preference: str | None = None
+
+
+class AgentEnabledPayload(EventPayload):
+    agent_id: str = Field(min_length=1)
+
+
+class AgentStatusChangedPayload(EventPayload):
+    agent_id: str = Field(min_length=1)
+    from_status: str | None = None
+    to_status: str
+    heartbeat_id: UUID | None = None
     current_task_id: UUID | None = None
 
 
@@ -159,11 +246,31 @@ class ErrorRaisedPayload(EventPayload):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+class ErrorRecordedPayload(EventPayload):
+    error_type: str
+    message: str
+    aggregate_type: str | None = None
+    aggregate_id: UUID | None = None
+
+
+class ErrorRecoveryAttemptedPayload(EventPayload):
+    recovery_attempt_id: UUID
+    action: str
+    outcome: str
+    resolved: bool
+
+
+class ErrorResolvedPayload(EventPayload):
+    note: str | None = None
+
+
 class RecoveryAttemptedPayload(EventPayload):
     operation: str
-    attempt: int = Field(ge=1)
+    attempt: int = Field(ge=0)
     success: bool
     reason: str
+    max_attempts: int | None = Field(default=None, ge=0)
+    previous_owner: str | None = None
 
 
 class DecisionRecordedPayload(EventPayload):
@@ -221,14 +328,148 @@ class ProviderRequestCompletedPayload(EventPayload):
     output_tokens: int | None = Field(default=None, ge=0)
 
 
+class ProviderUsageRecordedPayload(EventPayload):
+    provider: str
+    model: str
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    cost_usd: Decimal = Field(ge=0)
+    status: str
+
+
+class CapabilityDiscoveredPayload(EventPayload):
+    name: str
+    provider: str | None = None
+    version: str | None = None
+
+
+class CapabilityTransitionedPayload(EventPayload):
+    from_status: str
+    to_status: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class RequirementCreatedPayload(EventPayload):
+    title: str
+    requirement_type: str
+    source_finding_id: UUID | None = None
+    security_review_required: bool = False
+
+
+class RequirementStatusChangedPayload(EventPayload):
+    from_status: str
+    to_status: str
+    reason: str | None = None
+
+
+class FindingSubmittedPayload(EventPayload):
+    question: str
+    classification: str
+    confidence: float = Field(ge=0, le=1)
+    evidence_count: int = Field(ge=0)
+
+
+class FindingEvidenceAddedPayload(EventPayload):
+    evidence_id: UUID
+    source_uri: str | None = None
+    trust_level: str | None = None
+
+
+class FindingStatusChangedPayload(EventPayload):
+    from_status: str
+    to_status: str
+    rationale: str | None = None
+
+
+class AuthorizationRequestedPayload(EventPayload):
+    question: str
+    security_decision_id: UUID | None = None
+    expires_at: datetime | None = None
+
+
+class AuthorizationAnsweredPayload(EventPayload):
+    response: str | None = None
+
+
+class AuthorizationExpiredPayload(EventPayload):
+    expires_at: datetime | None = None
+
+
+class PersonCreatedPayload(EventPayload):
+    relationship: str | None = None
+    access_level: str
+
+
+class PersonDeletedPayload(EventPayload):
+    pass
+
+
+class PreferenceSetPayload(EventPayload):
+    person_id: UUID
+    name: str
+    previous: Any = None
+    value: Any = None
+    source: str
+
+
+class InteractionRecordedPayload(EventPayload):
+    person_id: UUID | None = None
+    channel: str
+    direction: str
+    authorization_request_id: UUID | None = None
+
+
+class KnowledgeEntityPayload(EventPayload):
+    entity_type: str
+    name: str
+
+
+class KnowledgeRelationCreatedPayload(EventPayload):
+    source_entity_id: UUID
+    target_entity_id: UUID
+    relation_type: str
+
+
+class RuntimeStartedPayload(EventPayload):
+    agents: list[str] = Field(default_factory=list)
+    owner: str
+    recovery: dict[str, Any] = Field(default_factory=dict)
+    spool_replayed: int | None = Field(default=None, ge=0)
+    spool_failed: int | None = Field(default=None, ge=0)
+
+
+class RuntimeStoppingPayload(EventPayload):
+    running_tasks: int = Field(ge=0)
+
+
+class RuntimeStoppedPayload(EventPayload):
+    released_leases: int = Field(ge=0)
+
+
 EVENT_TYPES: dict[str, type[BaseModel]] = {
     "objective.created": ObjectiveCreatedPayload,
     "objective.updated": ObjectiveUpdatedPayload,
+    "objective.priority_changed": ObjectivePriorityChangedPayload,
+    "objective.status_changed": ObjectiveStatusChangedPayload,
     "task.created": TaskCreatedPayload,
     "task.transitioned": TaskTransitionedPayload,
     "task.assigned": TaskAssignedPayload,
+    "task.dependency_added": TaskDependencyPayload,
+    "task.dependency_removed": TaskDependencyPayload,
+    "task.lease_acquired": TaskLeaseAcquiredPayload,
+    "task.lease_released": TaskLeaseReleasedPayload,
+    "task.lease_expired": TaskLeaseExpiredPayload,
+    "task.completed": TaskOutcomePayload,
+    "task.blocked": TaskOutcomePayload,
+    "task.waiting_for_approval": TaskOutcomePayload,
+    "task.failed": TaskOutcomePayload,
+    "task.timed_out": TaskOutcomePayload,
+    "task.cancelled": TaskOutcomePayload,
+    "task.interrupted": TaskOutcomePayload,
     "message.published": MessagePublishedPayload,
     "message.delivered": MessageDeliveredPayload,
+    "message.processing": MessageProcessingPayload,
+    "message.requeued": MessageRequeuedPayload,
     "message.processed": MessageProcessedPayload,
     "message.failed": MessageFailedPayload,
     "security.decision_recorded": SecurityDecisionPayload,
@@ -237,10 +478,40 @@ EVENT_TYPES: dict[str, type[BaseModel]] = {
     "execution.finished": ExecutionFinishedPayload,
     "test.run_finished": TestRunFinishedPayload,
     "capability.status_changed": CapabilityStatusChangedPayload,
+    "capability.discovered": CapabilityDiscoveredPayload,
+    "capability.transitioned": CapabilityTransitionedPayload,
+    "requirement.created": RequirementCreatedPayload,
+    "requirement.status_changed": RequirementStatusChangedPayload,
+    "finding.submitted": FindingSubmittedPayload,
+    "finding.evidence_added": FindingEvidenceAddedPayload,
+    "finding.status_changed": FindingStatusChangedPayload,
+    "authorization.requested": AuthorizationRequestedPayload,
+    "authorization.approved": AuthorizationAnsweredPayload,
+    "authorization.denied": AuthorizationAnsweredPayload,
+    "authorization.expired": AuthorizationExpiredPayload,
+    "person.created": PersonCreatedPayload,
+    "person.deleted": PersonDeletedPayload,
+    "preference.set": PreferenceSetPayload,
+    "interaction.recorded": InteractionRecordedPayload,
+    "kg.entity_created": KnowledgeEntityPayload,
+    "kg.entity_updated": KnowledgeEntityPayload,
+    "kg.relation_created": KnowledgeRelationCreatedPayload,
+    "provider.usage_recorded": ProviderUsageRecordedPayload,
+    "runtime.started": RuntimeStartedPayload,
+    "runtime.stopping": RuntimeStoppingPayload,
+    "runtime.stopped": RuntimeStoppedPayload,
     "resource.measured": ResourceMeasuredPayload,
     "scheduler.decision": SchedulerDecisionPayload,
     "agent.heartbeat": AgentHeartbeatPayload,
+    "agent.registered": AgentRegisteredPayload,
+    "agent.updated": AgentRegisteredPayload,
+    "agent.enabled": AgentEnabledPayload,
+    "agent.disabled": AgentEnabledPayload,
+    "agent.status_changed": AgentStatusChangedPayload,
     "error.raised": ErrorRaisedPayload,
+    "error.recorded": ErrorRecordedPayload,
+    "error.recovery_attempted": ErrorRecoveryAttemptedPayload,
+    "error.resolved": ErrorResolvedPayload,
     "recovery.attempted": RecoveryAttemptedPayload,
     "decision.recorded": DecisionRecordedPayload,
     "copilot.session_started": CopilotSessionStartedPayload,
@@ -265,6 +536,16 @@ EVENT_CATEGORIES.update(
         "scheduler.decision": EventCategory.DECISION,
         "recovery.attempted": EventCategory.RUNTIME,
         "provider.request_completed": EventCategory.RESOURCE,
+        "finding.submitted": EventCategory.RESEARCH,
+        "finding.evidence_added": EventCategory.RESEARCH,
+        "finding.status_changed": EventCategory.RESEARCH,
+        "person.created": EventCategory.PERSONALIZATION,
+        "person.deleted": EventCategory.PERSONALIZATION,
+        "preference.set": EventCategory.PERSONALIZATION,
+        "interaction.recorded": EventCategory.PERSONALIZATION,
+        "kg.entity_created": EventCategory.KNOWLEDGE,
+        "kg.entity_updated": EventCategory.KNOWLEDGE,
+        "kg.relation_created": EventCategory.KNOWLEDGE,
     }
 )
 
@@ -276,7 +557,7 @@ class AetherEvent(BaseModel):
     event_type: str = Field(min_length=1, max_length=64)
     category: EventCategory
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    source: str = Field(min_length=1, max_length=200)
+    source: str = Field(min_length=1, max_length=64)
     actor: AgentId | str = Field(min_length=1, max_length=24)
     aggregate_type: str = Field(min_length=1, max_length=32)
     aggregate_id: UUID

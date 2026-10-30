@@ -27,6 +27,12 @@ _ROUTES = {
     EventCategory.TASK: "runtime",
     EventCategory.MESSAGE: "runtime",
     EventCategory.CAPABILITY: "agent",
+    EventCategory.REQUIREMENT: "runtime",
+    EventCategory.RESEARCH: "agent",
+    EventCategory.AUTHORIZATION: "security",
+    EventCategory.PERSONALIZATION: "agent",
+    EventCategory.KNOWLEDGE: "agent",
+    EventCategory.PROVIDER: "resource",
 }
 _STANDARD_FIELDS = frozenset(logging.makeLogRecord({}).__dict__) | {
     "message",
