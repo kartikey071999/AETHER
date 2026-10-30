@@ -9,6 +9,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aether.observability.recorder import stage_event
 from aether.storage.models import EventRecord
 
 
@@ -49,21 +50,20 @@ def add_event(
     objective_id: UUID | None = None,
     task_id: UUID | None = None,
     idempotency_key: str | None = None,
-    source: str | None = None,
+    source: str = "storage.repositories",
 ) -> EventRecord:
-    """Stage an audit event; it commits or rolls back with the surrounding transaction."""
-    event = EventRecord(
-        event_type=event_type,
-        category=str(category),
+    """Stage a typed audit event; it commits or rolls back with the surrounding transaction."""
+    return stage_event(
+        session,
+        event_type,
+        source=source,
+        actor=actor,
         aggregate_type=aggregate_type,
         aggregate_id=aggregate_id,
-        actor=str(actor),
-        payload=to_json(payload),
+        payload=payload,
+        category=category,
         correlation_id=correlation_id,
         objective_id=objective_id,
         task_id=task_id,
         idempotency_key=idempotency_key,
-        source=source,
     )
-    session.add(event)
-    return event

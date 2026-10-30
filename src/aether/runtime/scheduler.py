@@ -8,8 +8,8 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from aether.observability.recorder import stage_event
 from aether.runtime.resource_monitor import HostResources
-from aether.storage.models import EventRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,24 +116,21 @@ class Scheduler:
             raise RuntimeError("Scheduler has no database session factory for decision recording")
         aggregate_id = decision.selected_task_id or UUID(int=0)
         payload = {
-            "selected_task_id": (
-                str(decision.selected_task_id) if decision.selected_task_id is not None else None
-            ),
+            "selected_task_id": decision.selected_task_id,
             "score": decision.score,
             "reason": decision.reason,
-            "deferred": [
-                {"task_id": str(item.task_id), "reason": item.reason} for item in decision.deferred
-            ],
+            "deferred": {item.task_id: item.reason for item in decision.deferred},
         }
         async with self._sessions() as session, session.begin():
-            session.add(
-                EventRecord(
-                    event_type="scheduler.decision",
-                    aggregate_type="scheduler",
-                    aggregate_id=aggregate_id,
-                    actor="ORCHESTR",
-                    payload=payload,
-                )
+            stage_event(
+                session,
+                "scheduler.decision",
+                source="runtime.scheduler",
+                actor="ORCHESTR",
+                aggregate_type="scheduler",
+                aggregate_id=aggregate_id,
+                payload=payload,
+                task_id=decision.selected_task_id,
             )
 
     def _ineligibility(

@@ -44,7 +44,7 @@ async def test_agent_without_declared_permission_is_blocked(permissions, events_
     assert len(blocked) == 1
     assert blocked[0].aggregate_id == operation.aggregate_id
     assert blocked[0].actor == "MUSE"
-    assert blocked[0].payload["data"]["reason"].startswith("agent_not_permitted")
+    assert blocked[0].payload["reason"].startswith("agent_not_permitted")
 
 
 async def test_non_allowlisted_executable_is_blocked_before_approval(permissions, approve) -> None:
@@ -213,7 +213,7 @@ async def test_decision_is_durably_recorded_with_event(approve, database, events
     assert len(events) == 1
     assert events[0].aggregate_id == decision.decision_id
     assert events[0].actor == "WARDEN"
-    assert events[0].payload["data"]["decision"] == "approved"
+    assert events[0].payload["decision"] == "approved"
 
 
 async def test_forged_decision_rows_are_not_trusted(permissions, database, clock) -> None:
@@ -241,7 +241,7 @@ async def test_allowed_operations_are_recorded(permissions, approve, events_of) 
     grant = await permissions.authorize(operation)
     events = await events_of("security.operation_authorized")
     assert len(events) == 1
-    data = events[0].payload["data"]
+    data = events[0].payload
     assert data["input_hash"] == operation.input_hash
     assert UUID(data["grant_id"]) == grant.grant_id
 

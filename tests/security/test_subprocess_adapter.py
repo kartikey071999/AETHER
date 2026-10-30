@@ -57,7 +57,7 @@ async def test_approved_subprocess_runs_and_is_recorded(
     assert run.security_decision_id is not None
     assert len(await events_of("execution.started")) == 1
     finished = await events_of("execution.finished")
-    assert finished[0].payload["data"]["success"] is True
+    assert finished[0].payload["success"] is True
 
 
 async def test_unapproved_subprocess_never_starts(registry, database) -> None:
@@ -95,7 +95,7 @@ async def test_adapter_refuses_without_authorization(
         await adapter.execute(operation, None)
     assert raised.value.reason is BlockReason.INVALID_AUTHORIZATION
     blocked = await events_of("security.operation_blocked")
-    assert "no authorization" in blocked[-1].payload["data"]["reason"]
+    assert "no authorization" in blocked[-1].payload["reason"]
 
 
 async def test_adapter_refuses_grant_for_a_different_operation(

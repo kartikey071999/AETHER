@@ -165,8 +165,8 @@ class TaskRepository:
                 aggregate_id=task.id,
                 actor=actor,
                 payload={
-                    "from": old_status.value,
-                    "to": new_status.value,
+                    "from_status": old_status.value,
+                    "to_status": new_status.value,
                     "details": details or {},
                     **({"error": error} if error is not None else {}),
                 },

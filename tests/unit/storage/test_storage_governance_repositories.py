@@ -295,7 +295,8 @@ async def test_every_heartbeat_is_audited_and_status_changes_are_distinct(databa
     heartbeat_events = [event for event in events if event.event_type == "agent.heartbeat"]
     changes = [event for event in events if event.event_type == "agent.status_changed"]
     assert len(heartbeat_events) == 2
-    assert sorted((event.payload["from"] or "", event.payload["to"]) for event in changes) == [
+    pairs = [(event.payload["from_status"] or "", event.payload["to_status"]) for event in changes]
+    assert sorted(pairs) == [
         ("", "idle"),
         ("busy", "idle"),
         ("idle", "busy"),

@@ -23,7 +23,7 @@ async def test_http_to_allowlisted_host_returns_untrusted_body(
     assert len(http_requests) == 1
     assert len(await events_of("execution.started")) == 1
     finished = await events_of("execution.finished")
-    assert finished[0].payload["data"]["success"] is True
+    assert finished[0].payload["success"] is True
 
 
 async def test_http_to_disallowed_host_is_blocked_without_a_request(
@@ -47,7 +47,7 @@ async def test_redirect_to_disallowed_host_is_refused(
     assert [str(request.url) for request in http_requests] == [url]
     assert all(request.url.host == "api.example.com" for request in http_requests)
     finished = await events_of("execution.finished")
-    assert finished[0].payload["data"]["success"] is False
+    assert finished[0].payload["success"] is False
 
 
 async def test_same_host_redirect_is_followed(registry, approve) -> None:

@@ -1,12 +1,16 @@
 """Event persistence without changing the caller's transaction boundary."""
 
-from typing import TYPE_CHECKING
+from collections.abc import Mapping
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
+from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from aether.observability.events import AetherEvent
+from aether.observability.events import AetherEvent, EventCategory, build_event
 from aether.observability.redaction import redact, redact_string
 from aether.storage.models import EventRecord
 
@@ -21,28 +25,29 @@ class EventWriteError(RuntimeError):
 def _to_record(event: AetherEvent) -> EventRecord:
     """The only mapping from typed envelopes to the current storage schema."""
     document = event.model_dump(mode="json")
-    meta = {
-        name: document[name]
-        for name in (
-            "category",
-            "source",
-            "objective_id",
-            "task_id",
-            "correlation_id",
-            "session_id",
-            "branch",
-        )
-    }
     return EventRecord(
         id=event.event_id,
         event_type=event.event_type,
+        category=event.category.value,
         aggregate_type=event.aggregate_type,
         aggregate_id=event.aggregate_id,
         actor=redact_string(str(event.actor)),
-        payload={"meta": redact(meta), "data": redact(document["payload"])},
+        source=redact_string(event.source),
+        correlation_id=event.correlation_id,
+        objective_id=event.objective_id,
+        task_id=event.task_id,
+        payload=redact(document["payload"]),
         idempotency_key=event.idempotency_key,
         created_at=event.timestamp,
     )
+
+
+def split_legacy_payload(payload: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return ``(metadata, data)``; older rows wrapped both in ``{"meta": ..., "data": ...}``."""
+    meta, data = payload.get("meta"), payload.get("data")
+    if set(payload) == {"meta", "data"} and isinstance(meta, dict) and isinstance(data, dict):
+        return meta, data
+    return {}, dict(payload)
 
 
 async def _find_existing(session: AsyncSession, record: EventRecord) -> EventRecord | None:
@@ -76,8 +81,48 @@ async def _persist_record(
         raise
 
 
+def stage_event(
+    session: AsyncSession,
+    event_type: str,
+    *,
+    source: str,
+    actor: str,
+    aggregate_type: str,
+    aggregate_id: UUID,
+    payload: Mapping[str, Any] | BaseModel | None = None,
+    category: str | None = None,
+    correlation_id: UUID | None = None,
+    objective_id: UUID | None = None,
+    task_id: UUID | None = None,
+    idempotency_key: str | None = None,
+    created_at: datetime | None = None,
+) -> EventRecord:
+    """Validate a catalogued event and stage it in the caller's transaction.
+
+    The event commits or rolls back with the surrounding state change; nothing is flushed here.
+    """
+    optional = {
+        "category": EventCategory(str(category)) if category is not None else None,
+        "correlation_id": correlation_id,
+        "objective_id": objective_id,
+        "task_id": task_id,
+        "idempotency_key": idempotency_key,
+        "timestamp": created_at,
+    }
+    event = build_event(
+        event_type,
+        source=source,
+        actor=str(actor),
+        aggregate_type=aggregate_type,
+        aggregate_id=aggregate_id,
+        payload=payload if payload is not None else {},
+        **{name: value for name, value in optional.items() if value is not None},
+    )
+    return EventRecorder().add(session, event)
+
+
 class EventRecorder:
-    def __init__(self, spool: "EventSpool") -> None:
+    def __init__(self, spool: "EventSpool | None" = None) -> None:
         self.spool = spool
 
     def add(self, session: AsyncSession, event: AetherEvent) -> EventRecord:
@@ -102,6 +147,10 @@ class EventRecorder:
         try:
             return await _persist_record(sessions, record)
         except SQLAlchemyError as database_error:
+            if self.spool is None:
+                raise EventWriteError(
+                    "Event database write failed and no fallback spool is configured"
+                ) from database_error
             try:
                 self.spool.append(event)
             except OSError as spool_error:

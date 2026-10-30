@@ -22,6 +22,7 @@ _ALLOWED_MESSAGE_TRANSITIONS: dict[MessageStatus, frozenset[MessageStatus]] = {
 }
 
 _IN_FLIGHT = (MessageStatus.DELIVERED.value, MessageStatus.PROCESSING.value)
+_SOURCE = "communication.bus"
 
 
 class InvalidMessageTransition(ValueError):
@@ -55,14 +56,17 @@ class MessageBus:
                         aggregate_id=message.message_id,
                         actor=message.source_agent.value,
                         payload={
-                            "source_agent": message.source_agent.value,
-                            "target_agent": message.target_agent.value,
-                            "message_type": message.message_type.value,
-                            "correlation_id": str(message.correlation_id),
-                            "task_id": str(message.task_id) if message.task_id else None,
+                            "message_id": message.message_id,
+                            "source_agent": message.source_agent,
+                            "target_agent": message.target_agent,
+                            "message_type": message.message_type,
                         },
                         idempotency_key=f"message.published:{message.message_id}",
                         created_at=self._clock(),
+                        source=_SOURCE,
+                        objective_id=message.objective_id,
+                        task_id=message.task_id,
+                        correlation_id=message.correlation_id,
                     )
                     created = True
         except IntegrityError:
@@ -178,7 +182,11 @@ class MessageBus:
                 if result.rowcount != 1:
                     continue
                 self._stage_status_event(
-                    session, row, "message.requeued", {"from": previous}, actor=row.target_agent
+                    session,
+                    row,
+                    "message.requeued",
+                    {"previous_status": previous},
+                    actor=row.target_agent,
                 )
                 requeued.append(row.target_agent)
         for target in set(requeued):
@@ -245,8 +253,17 @@ class MessageBus:
             aggregate_type="message",
             aggregate_id=row.id,
             actor=actor or row.target_agent,
-            payload={"message_type": row.message_type, **payload},
+            payload={
+                "message_id": row.id,
+                "target_agent": row.target_agent,
+                "message_type": row.message_type,
+                **payload,
+            },
             created_at=self._clock(),
+            source=_SOURCE,
+            objective_id=row.objective_id,
+            task_id=row.task_id,
+            correlation_id=row.correlation_id,
         )
 
     def _to_record(self, message: AgentMessage) -> MessageRecord:

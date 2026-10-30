@@ -24,7 +24,10 @@ from aether.agents.base import (
 from aether.communication.bus import MessageBus
 from aether.communication.messages import AgentId, AgentMessage
 from aether.config import AetherSettings
-from aether.runtime._support import Clock, add_event, as_utc, utc_now
+from aether.observability.events import build_event
+from aether.observability.logging import log_event
+from aether.observability.recorder import EventRecorder
+from aether.runtime._support import Clock, as_utc, utc_now
 from aether.runtime.leases import RUNTIME_ACTOR, LeaseManager
 from aether.runtime.lifecycle import Lifecycle, LifecycleState
 from aether.runtime.recovery import RecoveryReport, recover_runtime_state
@@ -124,6 +127,8 @@ class Engine:
         self._stopped = asyncio.Event()
         self._loops_stopping = asyncio.Event()
         self.recovery_report: RecoveryReport | None = None
+        # Extra typed fields (e.g. spool replay counts) merged into the runtime.started event.
+        self.startup_details: dict[str, Any] = {}
 
     @property
     def state(self) -> LifecycleState:
@@ -164,6 +169,7 @@ class Engine:
                     "agents": [agent_id.value for agent_id in self._agents],
                     "owner": self._owner,
                     "recovery": self.recovery_report.summary(),
+                    **self.startup_details,
                 },
             )
         except BaseException:
@@ -364,13 +370,15 @@ class Engine:
                 self._logger.exception("lease recovery sweep failed")
 
     async def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
+        event = build_event(
+            event_type,
+            source="runtime.engine",
+            actor=RUNTIME_ACTOR,
+            aggregate_type="runtime",
+            aggregate_id=self._run_id,
+            payload=payload,
+            timestamp=self._clock(),
+        )
         async with self._sessions() as session, session.begin():
-            add_event(
-                session,
-                event_type=event_type,
-                aggregate_type="runtime",
-                aggregate_id=self._run_id,
-                actor=RUNTIME_ACTOR,
-                payload=payload,
-                created_at=self._clock(),
-            )
+            EventRecorder().add(session, event)
+        log_event(event)

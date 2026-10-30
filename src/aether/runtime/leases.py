@@ -8,11 +8,22 @@ from uuid import UUID
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from aether.observability.events import TaskOutcomePayload
 from aether.runtime._support import Clock, add_event, as_utc, utc_now
 from aether.storage.models import TaskRecord, TaskStatus
 from aether.storage.repositories import ALLOWED_TASK_TRANSITIONS, InvalidTaskTransition
 
 RUNTIME_ACTOR = "RUNTIME"
+_SOURCE = "runtime.leases"
+_OUTCOME_FIELDS = frozenset(TaskOutcomePayload.model_fields) - {"details"}
+
+
+def _outcome_payload(details: dict[str, Any]) -> dict[str, Any]:
+    """Split worker details into the typed outcome fields plus a free-form remainder."""
+    payload = {name: value for name, value in details.items() if name in _OUTCOME_FIELDS}
+    payload["details"] = {name: v for name, v in details.items() if name not in _OUTCOME_FIELDS}
+    return payload
+
 
 # Terminal-ish targets that need several hops to respect the allowed transition graph.
 _ROUTES: dict[TaskStatus, tuple[TaskStatus, ...]] = {
@@ -96,7 +107,14 @@ class LeaseManager:
             if seen_state is TaskStatus.READY:
                 hops.insert(0, TaskStatus.SCHEDULED)
             self._stage_transitions(
-                session, task_id, seen_state, hops, owner, now, {"attempt": attempt}
+                session,
+                task_id,
+                task.objective_id,
+                seen_state,
+                hops,
+                owner,
+                now,
+                {"attempt": attempt},
             )
             add_event(
                 session,
@@ -104,12 +122,11 @@ class LeaseManager:
                 aggregate_type="task",
                 aggregate_id=task_id,
                 actor=self._actor,
-                payload={
-                    "owner": owner,
-                    "attempt": attempt,
-                    "expires_at": expires_at.isoformat(),
-                },
+                payload={"owner": owner, "attempt": attempt, "expires_at": expires_at},
                 created_at=now,
+                source=_SOURCE,
+                task_id=task_id,
+                objective_id=task.objective_id,
             )
         return Lease(task_id=task_id, owner=owner, expires_at=expires_at, attempt=attempt)
 
@@ -169,8 +186,18 @@ class LeaseManager:
             )
             if result.rowcount != 1:
                 return False
+            objective_id = await session.scalar(
+                select(TaskRecord.objective_id).where(TaskRecord.id == task_id)
+            )
             self._stage_transitions(
-                session, task_id, TaskStatus.RUNNING, list(route), owner, now, details or {}
+                session,
+                task_id,
+                objective_id,
+                TaskStatus.RUNNING,
+                list(route),
+                owner,
+                now,
+                details or {},
             )
             add_event(
                 session,
@@ -180,6 +207,9 @@ class LeaseManager:
                 actor=self._actor,
                 payload={"owner": owner, "final_status": route[-1].value},
                 created_at=now,
+                source=_SOURCE,
+                task_id=task_id,
+                objective_id=objective_id,
             )
             if outcome_event:
                 add_event(
@@ -188,8 +218,11 @@ class LeaseManager:
                     aggregate_type="task",
                     aggregate_id=task_id,
                     actor=owner[:24],
-                    payload=details or {},
+                    payload=_outcome_payload(details or {}),
                     created_at=now,
+                    source=_SOURCE,
+                    task_id=task_id,
+                    objective_id=objective_id,
                 )
         return True
 
@@ -258,14 +291,18 @@ class LeaseManager:
                 actor=self._actor,
                 payload={
                     "owner": seen_owner,
-                    "expired_at": as_utc(seen_expiry).isoformat() if seen_expiry else None,
+                    "expired_at": as_utc(seen_expiry) if seen_expiry else None,
                 },
                 created_at=now,
+                source=_SOURCE,
+                task_id=task_id,
+                objective_id=task.objective_id,
             )
             details = {"reason": "lease_expired", "attempt": task.attempt}
             self._stage_transitions(
                 session,
                 task_id,
+                task.objective_id,
                 TaskStatus.RUNNING,
                 [TaskStatus.RETRYING, final],
                 self._actor,
@@ -279,12 +316,17 @@ class LeaseManager:
                 aggregate_id=task_id,
                 actor=self._actor,
                 payload={
-                    "outcome": "requeued" if retry else "failed",
+                    "operation": "lease_expiry",
                     "attempt": task.attempt,
+                    "success": retry,
+                    "reason": "requeued" if retry else "failed: attempts exhausted",
                     "max_attempts": task.max_attempts,
                     "previous_owner": seen_owner,
                 },
                 created_at=now,
+                source=_SOURCE,
+                task_id=task_id,
+                objective_id=task.objective_id,
             )
             return RecoveryOutcome(
                 task_id=task_id,
@@ -306,6 +348,7 @@ class LeaseManager:
         self,
         session: AsyncSession,
         task_id: UUID,
+        objective_id: UUID | None,
         start: TaskStatus,
         hops: list[TaskStatus],
         owner: str,
@@ -321,10 +364,13 @@ class LeaseManager:
                 aggregate_id=task_id,
                 actor=self._actor,
                 payload={
-                    "from": current.value,
-                    "to": target.value,
+                    "from_status": current.value,
+                    "to_status": target.value,
                     "details": {"owner": owner, **details},
                 },
                 created_at=now,
+                source=_SOURCE,
+                task_id=task_id,
+                objective_id=objective_id,
             )
             current = target

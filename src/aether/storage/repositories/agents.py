@@ -60,7 +60,7 @@ class AgentRepository:
                 actor=actor,
                 payload={
                     "agent_id": agent_id,
-                    "enabled": agent.enabled,
+                    "enabled": True if agent.enabled is None else agent.enabled,
                     "model_preference": agent.model_preference,
                 },
                 category=EventCategory.AGENT,
@@ -125,19 +125,29 @@ class AgentHeartbeatRepository:
             await session.flush()
             previous_status = previous.status if previous is not None else None
             changed = previous_status != status
+            payload = (
+                {
+                    "agent_id": agent_id,
+                    "from_status": previous_status,
+                    "to_status": status,
+                    "heartbeat_id": heartbeat.id,
+                    "current_task_id": current_task_id,
+                }
+                if changed
+                else {
+                    "agent_id": agent_id,
+                    "status": status,
+                    "heartbeat_id": heartbeat.id,
+                    "current_task_id": current_task_id,
+                }
+            )
             add_event(
                 session,
                 event_type="agent.status_changed" if changed else "agent.heartbeat",
                 aggregate_type="agent",
                 aggregate_id=agent_aggregate_id(agent_id),
                 actor=agent_id,
-                payload={
-                    "agent_id": agent_id,
-                    "from": previous_status,
-                    "to": status,
-                    "heartbeat_id": heartbeat.id,
-                    "current_task_id": current_task_id,
-                },
+                payload=payload,
                 category=EventCategory.AGENT,
                 correlation_id=correlation_id,
                 task_id=current_task_id,

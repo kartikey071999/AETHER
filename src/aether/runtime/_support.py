@@ -7,7 +7,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aether.storage.models import EventRecord
+from aether.observability.recorder import stage_event
 
 Clock = Callable[[], datetime]
 
@@ -33,16 +33,23 @@ def add_event(
     payload: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
     created_at: datetime | None = None,
+    source: str = "runtime",
+    objective_id: UUID | None = None,
+    task_id: UUID | None = None,
+    correlation_id: UUID | None = None,
 ) -> None:
-    """Stage an audit event in the caller's transaction (swappable for the shared recorder)."""
-    event = EventRecord(
-        event_type=event_type,
+    """Stage a typed event in the caller's transaction via the shared recorder."""
+    stage_event(
+        session,
+        event_type,
+        source=source,
+        actor=actor,
         aggregate_type=aggregate_type,
         aggregate_id=aggregate_id,
-        actor=actor,
-        payload=payload or {},
+        payload=payload,
         idempotency_key=idempotency_key,
+        created_at=created_at,
+        objective_id=objective_id,
+        task_id=task_id,
+        correlation_id=correlation_id,
     )
-    if created_at is not None:
-        event.created_at = created_at
-    session.add(event)
