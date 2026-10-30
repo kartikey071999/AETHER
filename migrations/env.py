@@ -9,7 +9,7 @@ config = context.config
 settings = load_settings()
 config.set_main_option(
     "sqlalchemy.url",
-    settings.database_url.get_secret_value().replace("%", "%%"),
+    settings.database_url_for_alembic.replace("%", "%%"),
 )
 target_metadata = Base.metadata
 
