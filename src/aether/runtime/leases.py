@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aether.runtime._support import Clock, add_event, as_utc, utc_now
 from aether.storage.models import TaskRecord, TaskStatus
-from aether.storage.repositories import _ALLOWED_TRANSITIONS, InvalidTaskTransition
+from aether.storage.repositories import ALLOWED_TASK_TRANSITIONS, InvalidTaskTransition
 
 RUNTIME_ACTOR = "RUNTIME"
 
@@ -298,7 +298,7 @@ class LeaseManager:
     def _validate_route(start: TaskStatus, route: tuple[TaskStatus, ...]) -> None:
         current = start
         for target in route:
-            if target not in _ALLOWED_TRANSITIONS[current]:
+            if target not in ALLOWED_TASK_TRANSITIONS[current]:
                 raise InvalidTaskTransition(f"Cannot transition task from {current} to {target}")
             current = target
 

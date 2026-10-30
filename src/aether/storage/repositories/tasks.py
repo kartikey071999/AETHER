@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from aether.storage.models import EventCategory, TaskRecord, TaskStatus, utcnow
 from aether.storage.repositories._events import add_event, to_json
 
-_ALLOWED_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
+ALLOWED_TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.PENDING: frozenset({TaskStatus.READY, TaskStatus.BLOCKED, TaskStatus.CANCELLED}),
     TaskStatus.READY: frozenset(
         {TaskStatus.SCHEDULED, TaskStatus.BLOCKED, TaskStatus.PAUSED, TaskStatus.CANCELLED}
@@ -48,6 +48,10 @@ _ALLOWED_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
 }
 
 _TERMINAL_STATES = frozenset({TaskStatus.COMPLETED, TaskStatus.CANCELLED})
+
+
+# Backwards-compatible alias used before the repositories package split.
+_ALLOWED_TRANSITIONS = ALLOWED_TASK_TRANSITIONS
 
 
 class InvalidTaskTransition(ValueError):
@@ -136,7 +140,7 @@ class TaskRepository:
             if task is None:
                 raise LookupError(f"Task {task_id} does not exist")
             old_status = TaskStatus(task.state)
-            if new_status not in _ALLOWED_TRANSITIONS[old_status]:
+            if new_status not in ALLOWED_TASK_TRANSITIONS[old_status]:
                 raise InvalidTaskTransition(
                     f"Cannot transition task from {old_status} to {new_status}"
                 )

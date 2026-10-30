@@ -30,9 +30,15 @@ from aether.storage.repositories.research import (
     InvalidFindingTransition,
     ResearchFindingRepository,
 )
-from aether.storage.repositories.tasks import InvalidTaskTransition, TaskRepository
+from aether.storage.repositories.tasks import (
+    _ALLOWED_TRANSITIONS,  # noqa: F401 - compatibility re-export
+    ALLOWED_TASK_TRANSITIONS,
+    InvalidTaskTransition,
+    TaskRepository,
+)
 
 __all__ = [
+    "ALLOWED_TASK_TRANSITIONS",
     "AgentHeartbeatRepository",
     "AgentRepository",
     "AuthorizationRequestRepository",
