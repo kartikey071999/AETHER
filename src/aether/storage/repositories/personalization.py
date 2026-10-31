@@ -1,15 +1,18 @@
 """People, their preferences, and interaction history used by MUSE."""
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aether.storage.models import (
     EventCategory,
     InteractionDirection,
     InteractionRecord,
+    KnowledgeEntityRecord,
+    KnowledgeRelationRecord,
     PersonRecord,
     PreferenceSource,
     UserPreferenceRecord,
@@ -117,9 +120,77 @@ class PersonRepository:
             return preference.id
 
     async def get_preferences(self, person_id: UUID) -> dict[str, Any]:
-        statement = select(UserPreferenceRecord).where(UserPreferenceRecord.person_id == person_id)
+        """Preferences of an active person; deleted or unknown people have none."""
+        statement = (
+            select(UserPreferenceRecord)
+            .join(PersonRecord, PersonRecord.id == UserPreferenceRecord.person_id)
+            .where(
+                UserPreferenceRecord.person_id == person_id,
+                PersonRecord.deleted_at.is_(None),
+            )
+        )
         async with self._sessions() as session:
             return {record.key: record.value for record in await session.scalars(statement)}
+
+    async def delete_person_data(
+        self,
+        person_id: UUID,
+        actor: str,
+        *,
+        correlation_id: UUID | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        """Anonymize and soft-delete a person and purge their preferences and owned KG data.
+
+        Everything happens in one transaction with one ``person.deleted`` event. Interactions and
+        existing audit events are retained. Returns ``False`` when already deleted.
+        """
+        async with self._sessions() as session, session.begin():
+            # A no-op write takes SQLite's write lock before state is read; PostgreSQL row-locks.
+            await session.execute(
+                update(PersonRecord)
+                .where(PersonRecord.id == person_id)
+                .values(deleted_at=PersonRecord.deleted_at)
+            )
+            person = await session.scalar(
+                select(PersonRecord).where(PersonRecord.id == person_id).with_for_update()
+            )
+            if person is None:
+                raise LookupError(f"Person {person_id} does not exist")
+            if person.deleted_at is not None:
+                return False
+            entities = select(KnowledgeEntityRecord.id).where(
+                KnowledgeEntityRecord.person_id == person_id
+            )
+            await session.execute(
+                delete(KnowledgeRelationRecord).where(
+                    or_(
+                        KnowledgeRelationRecord.source_entity_id.in_(entities),
+                        KnowledgeRelationRecord.target_entity_id.in_(entities),
+                    )
+                )
+            )
+            await session.execute(
+                delete(KnowledgeEntityRecord).where(KnowledgeEntityRecord.person_id == person_id)
+            )
+            await session.execute(
+                delete(UserPreferenceRecord).where(UserPreferenceRecord.person_id == person_id)
+            )
+            person.deleted_at = now or utcnow()
+            person.display_name = "Deleted person"
+            person.relationship = None
+            person.access_level = "deleted"
+            add_event(
+                session,
+                event_type="person.deleted",
+                aggregate_type="person",
+                aggregate_id=person_id,
+                actor=actor,
+                payload={},
+                category=EventCategory.PERSONALIZATION,
+                correlation_id=correlation_id,
+            )
+            return True
 
     async def record_interaction(
         self,
