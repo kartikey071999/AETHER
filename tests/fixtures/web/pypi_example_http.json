@@ -1,0 +1,27 @@
+{
+  "info": {
+    "name": "example-http",
+    "version": "1.4.2",
+    "summary": "A small, typed HTTP client used as an offline test fixture.",
+    "license_expression": "BSD-3-Clause",
+    "license": null,
+    "requires_python": ">=3.10",
+    "author": "Example Maintainers",
+    "home_page": null,
+    "project_urls": {
+      "Documentation": "https://docs.example.org/",
+      "Source": "https://github.com/example/http"
+    },
+    "yanked": false,
+    "classifiers": [
+      "License :: OSI Approved :: BSD License",
+      "Programming Language :: Python :: 3"
+    ],
+    "requires_dist": ["anyio>=4", "certifi", "h2<5,>=3; extra == \"http2\""]
+  },
+  "releases": {"1.3.0": [], "1.4.0": [], "1.4.1": [], "1.4.2": []},
+  "urls": [
+    {"filename": "example_http-1.4.2-py3-none-any.whl", "upload_time_iso_8601": "2026-03-01T10:00:00.000000Z"},
+    {"filename": "example_http-1.4.2.tar.gz", "upload_time_iso_8601": "2026-03-01T09:59:00.000000Z"}
+  ]
+}
