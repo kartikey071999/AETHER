@@ -45,7 +45,8 @@ uv run pytest
 ## Current implementation boundary
 
 The seven names and responsibilities are registered centrally; role-specific
-reasoning workflows and model integrations are not implemented. Objectives,
+reasoning workflows are not implemented. Protected model integrations are available
+through the injectable `aether.models` package described below. Objectives,
 tasks, requirements, messages, audit events, security decisions, and resource
 measurements have relational records. Objective/task repositories currently
 cover creation and task transitions, and transitions write audit events in the
@@ -69,6 +70,93 @@ workflows, message delivery/recovery, a complete requirement workflow,
 independent test verification, personalization storage, API, and dashboard
 remain future phases. No arbitrary software installation or shell execution is
 exposed by this foundation.
+
+## Model providers
+
+`aether.models` provides async `GroqProvider`, `AzureOpenAIProvider`,
+`AzureAnthropicProvider`, `OllamaProvider`, and a deterministic scripted
+`MockProvider`. These are library integrations, not yet startup-wired agent
+reasoning workflows. `ProviderSettings` reads `.env` independently of runtime
+settings. Credential, endpoint, and API-version fields are `SecretStr`; missing
+or empty remote configuration makes that provider unavailable. `.env.example`
+lists the exact environment names.
+
+Construct the providers with shared `ProviderSettings` and `PermissionService`,
+then create `BudgetGuard(ProviderUsageRepository(database.sessions), settings,
+recorder)` and one shared `ModelRouter(providers, guard,
+max_concurrent_llm_requests=runtime_settings.max_concurrent_llm_requests)`.
+Await `router.complete(CompletionRequest(messages=[{"role": "user",
+"content": "..."}], tier=ModelTier.LIGHT, max_tokens=128, agent=AgentId.SCOUT))`.
+Task/objective IDs are optional context; responses include token usage, latency,
+estimated cost, finish reason, and uncertainty flags. Close the router with
+`await router.aclose()` at shutdown. Multiple routers must share a semaphore
+if they are to share the global concurrency limit.
+
+Routing prefers suitable installed Ollama models, then Groq. Explicitly
+declare local-model suitability with, for example,
+`AETHER_PROVIDER_OLLAMA_MODELS={"qwen-local:latest":["light","standard"]}`.
+Installed names must match exactly; `OllamaProvider.refresh_models()` refreshes
+discovery after installations. Groq's `openai/gpt-oss-20b` serves light/standard;
+`openai/gpt-oss-120b` and `qwen/qwen3.8-27b` serve standard/reasoning/premium,
+with the cheaper eligible model tried first. Azure `claude-opus-4-8` and
+`gpt-6-astra` are premium-only, even with an explicit override. Astra is the
+last premium fallback unless `provider="azure_openai"` or `model="gpt-6-astra"`
+explicitly selects it. `tier="none"` rejects LLM use for deterministic work.
+`response_format="json_object"` or `json_schema={...}` enables structured
+output where supported; Anthropic requires a schema for JSON output.
+Temperature is optional and omitted by default. Anthropic's installed SDK does
+not expose temperature; explicit temperature requests skip that provider with
+an error instead of silently discarding the requested sampling control.
+
+Every completion attempt reserves a persisted `provider_usage` row before the
+call, including retries. A UTC daily quota checks request count, conservative
+input/output token estimates, estimated USD cost, per-request tokens, and active
+requests. Provider-wide caps cover all models; optional `provider/model` caps
+apply additionally. Defaults are:
+
+| Provider | Requests/day | Tokens/day | Estimated USD/day | Tokens/request | Concurrent |
+|---|---:|---:|---:|---:|---:|
+| Groq | 2,000 | 2,000,000 | 10 | 32,768 | 2 |
+| Azure Astra | 50 | 100,000 | 1 | 8,192 | 1 |
+| Azure Anthropic | 50 | 200,000 | 5 | 16,384 | 1 |
+| Ollama | unlimited | unlimited | no API cost | 32,768 | 2 |
+
+Override caps with `AETHER_PROVIDER_BUDGETS` (JSON); unspecified fields retain
+their provider defaults. `AETHER_PROVIDER_MODEL_BUDGETS` adds per-model limits.
+PostgreSQL advisory transaction locks serialize admission across processes;
+SQLite uses immediate transactions for offline tests. Successful calls replace
+reservations with measured usage; failed calls retain conservative estimates
+when billable consumption is unknown. Security-blocked calls consume no tokens.
+Costs in the ledger round upward to its micro-dollar precision. Final usage,
+`provider.usage_recorded`, and `provider.request_completed` commit atomically.
+Database failures propagate instead of routing around failed accounting.
+Interrupted reservations remain fail-closed and require explicit reconciliation
+before reusing their concurrency slots; automatic recovery is not implemented.
+
+Groq prices are approximate constants from its model API. Unknown remote model
+prices return zero **with `cost_estimate_unknown=True`**, not an assertion of free
+inference. In particular, Azure cost ceilings cannot account for actual dollars
+until prices are supplied; its low request/token caps still apply. Byte-based
+input reservations are conservative estimates, not model-specific tokenizers.
+Timeouts/unknown failure consumption remain estimates, not billing reports.
+
+Runtime startup must merge `provider_hosts(settings)` into
+`SecuritySettings.allowed_hosts` before constructing its immutable policy, or
+explicitly configure the allowlist. This helper does not mutate security policy.
+Providers authorize and redeem `OperationKind.LLM_CALL` grants before SDK calls;
+the audited HTTP boundary repeats this check for each actual destination and
+binds request/header hashes without retaining prompts or credentials. Redirects,
+environment proxies, and implicit SDK retries are disabled. Only 429, 5xx, and
+transport timeouts/errors receive bounded retries, each separately accounted.
+SDK payload-bearing DEBUG logs are suppressed; events retain safe classifications,
+never prompt/response/error bodies. Anthropic's installed SDK uses its existing
+`httpx2` transport; Groq, OpenAI, and Ollama use `httpx`.
+
+All default tests are offline with mock SDKs/transports. The optional live smoke
+test is skipped unless `AETHER_LIVE_TESTS=1`; it makes at most one Groq completion
+attempt with `max_tokens=5`. It uses an isolated test ledger, not the runtime's
+daily budget database. Do not run it routinely or treat it as production usage
+accounting.
 
 ## Observability APIs
 

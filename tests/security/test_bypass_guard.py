@@ -9,6 +9,7 @@ FORBIDDEN_MODULES = (
     "subprocess",
     "socket",
     "httpx",
+    "httpx2",
     "requests",
     "urllib.request",
     "aiohttp",
@@ -78,8 +79,28 @@ def test_agents_and_models_do_not_bypass_the_tool_registry() -> None:
         f"{path.relative_to(SOURCE_ROOT)}: {name}"
         for path in files
         for name in _forbidden_uses(path.read_text(encoding="utf-8"))
+        if name not in MODEL_BOUNDARY_EXCEPTIONS.get(path.relative_to(SOURCE_ROOT).as_posix(), ())
     ]
     assert violations == []
+
+
+# The model-provider boundary is trusted infrastructure (like aether.tools): it is injected with
+# PermissionService so it can authorize every outbound LLM request itself, and transport.py is the
+# only module that may perform HTTP. Agents remain fully guarded. Keep this list explicit.
+MODEL_BOUNDARY_EXCEPTIONS: dict[str, frozenset[str]] = {
+    "models/transport.py": frozenset({"httpx", "httpx2", "aether.security.PermissionService"}),
+    "models/base.py": frozenset({"aether.security.PermissionService"}),
+    "models/providers.py": frozenset({"aether.security.PermissionService"}),
+}
+
+
+def test_model_boundary_exceptions_are_minimal() -> None:
+    for relative, allowed in MODEL_BOUNDARY_EXCEPTIONS.items():
+        path = SOURCE_ROOT / relative
+        assert path.is_file(), f"stale exception for {relative}"
+        used = set(_forbidden_uses(path.read_text(encoding="utf-8")))
+        assert used <= allowed
+        assert allowed <= used, f"unused exception in {relative}: {sorted(allowed - used)}"
 
 
 def test_guard_detects_direct_privileged_calls() -> None:
@@ -91,7 +112,7 @@ def test_guard_detects_direct_privileged_calls() -> None:
         "from aether.security.permissions import Authorization\n"
         "from aether.security import PermissionService\n"
         "from aether.tools import ToolRegistry\n"
-        "import httpx\n"
+        "import httpx, httpx2\n"
         "os.system('x')\n"
         "os.spawnl(0, 'x')\n"
         "__import__('socket')\n"
@@ -105,6 +126,7 @@ def test_guard_detects_direct_privileged_calls() -> None:
         "aether.security.PermissionService",
         "aether.tools.ToolRegistry",
         "httpx",
+        "httpx2",
         "os.system",
         "os.spawnl",
         "__import__",
