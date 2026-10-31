@@ -31,17 +31,39 @@ from aether.models.transport import (
     is_transient_http_error,
     protect_sdk_logs,
 )
+from aether.observability.redaction import redact_string
 from aether.security import Operation, OperationBlocked, OperationKind, PermissionService
 
 
 class ProviderError(RuntimeError):
-    """Safe error metadata; never includes provider messages, request bodies, or credentials."""
+    """Error metadata; ``str()`` never includes provider messages, request bodies, or credentials.
 
-    def __init__(self, provider: str, *, transient: bool = False, code: str = "failed") -> None:
+    ``detail`` is a redacted, truncated status/message for durable diagnostics only.
+    """
+
+    def __init__(
+        self,
+        provider: str,
+        *,
+        transient: bool = False,
+        code: str = "failed",
+        detail: str | None = None,
+    ) -> None:
         self.provider = provider
         self.transient = transient
         self.code = code
+        self.detail = detail
         super().__init__(f"{provider}: {code}")
+
+
+ERROR_DETAIL_LIMIT = 300
+
+
+def error_detail(error: BaseException, status: object) -> str:
+    """Status code and provider message, secret-redacted first and then truncated."""
+    message = " ".join(str(getattr(error, "message", None) or error).split())
+    label = f"HTTP {status}" if status else type(error).__name__
+    return redact_string(f"{label}: {message}" if message else label)[:ERROR_DETAIL_LIMIT]
 
 
 LENGTH_FINISH_REASONS = frozenset({"length", "max_tokens"})
@@ -154,6 +176,7 @@ class RemoteProvider:
                 self.name,
                 transient=transient,
                 code=f"http_{status}" if status else "transport_error",
+                detail=error_detail(error, status),
             ) from None
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:

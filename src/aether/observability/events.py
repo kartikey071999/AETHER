@@ -397,6 +397,8 @@ class ProviderRequestCompletedPayload(EventPayload):
     status: str = "succeeded"
     attempt: int = Field(default=1, ge=1)
     error_type: str | None = None
+    # Redacted status and provider message of a failed call, for diagnosing 4xx/5xx from the DB.
+    error_detail: str | None = Field(default=None, max_length=300)
     usage_estimated: bool = False
     cost_estimate_unknown: bool = False
     # Routing by the agent's model assignment: the rank used (``None`` for the final fallback)

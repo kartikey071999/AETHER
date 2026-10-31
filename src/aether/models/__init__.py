@@ -32,6 +32,7 @@ from aether.models.providers import (
     OllamaProvider,
 )
 from aether.models.router import ModelRouter, NoModelAvailable
+from aether.models.schemas import strict_json_schema
 from aether.models.settings import AgentBudgetPolicy, ModelPrice, ProviderSettings
 
 __all__ = [
@@ -64,4 +65,5 @@ __all__ = [
     "default_model_assignments",
     "provider_hosts",
     "reconcile_stale_reservations",
+    "strict_json_schema",
 ]
