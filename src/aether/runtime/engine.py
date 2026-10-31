@@ -22,6 +22,7 @@ from aether.agents.base import (
     PermissionService,
     UnsupportedMessageType,
 )
+from aether.agents.work_queue import AgentWorkQueue, WorkQueueService
 from aether.communication.bus import MessageBus
 from aether.communication.messages import AgentId, AgentMessage
 from aether.config import AetherSettings
@@ -170,6 +171,16 @@ class Engine:
                 agent_id: models.context_for(agent_id, self._contexts.get(agent_id, self._context))
                 for agent_id in self._agents
             }
+        # Every agent reads its own work through a queue bound to its identity, ranked with
+        # the same effective-priority rules the scheduler uses.
+        work_queues = WorkQueueService(database_sessions, clock=clock, policy=scheduler.policy)
+        self._contexts = {
+            agent_id: replace(
+                self._contexts.get(agent_id, self._context),
+                work=AgentWorkQueue(agent_id, work_queues),
+            )
+            for agent_id in self._agents
+        }
         self._task_control = task_control or TaskControl(database_sessions, clock=clock)
         self._resources = ResourceMeasurementRepository(
             database_sessions, event_interval_seconds=self._limits.resource_event_seconds

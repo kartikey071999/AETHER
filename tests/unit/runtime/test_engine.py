@@ -288,3 +288,15 @@ async def test_engine_health_reports_each_agent(sessions) -> None:
         await engine.stop()
 
     assert report[AgentId.FORGE].status == "healthy"
+
+
+async def test_engine_injects_a_work_queue_bound_to_each_agent(sessions, objective_id) -> None:
+    agent = StubAgent()
+    engine = build_engine(sessions, [agent])
+    ctx = engine.context_for(AgentId.FORGE)
+
+    assert ctx.work is not None
+    assert ctx.work.agent_id is AgentId.FORGE
+    assert agent.work_queue(ctx) is ctx.work
+    task_id = await make_task(sessions, objective_id)
+    assert [item.id for item in await ctx.work.open_tasks()] == [task_id]

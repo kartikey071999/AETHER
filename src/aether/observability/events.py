@@ -797,3 +797,19 @@ class CommunicationSuppressedPayload(EventPayload):
 
 EVENT_TYPES["communication.suppressed"] = CommunicationSuppressedPayload
 EVENT_CATEGORIES["communication.suppressed"] = EventCategory.DECISION
+
+
+# --- per-agent work queues (T-053) ---
+
+
+class TaskAccessDeniedPayload(EventPayload):
+    """An agent asked its work queue for a task (or task list) it may not see."""
+
+    requested_by: str = Field(min_length=1, max_length=24)
+    operation: str = Field(min_length=1, max_length=64)
+    owner: str | None = Field(default=None, max_length=24)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+EVENT_TYPES["task.access_denied"] = TaskAccessDeniedPayload
+EVENT_CATEGORIES["task.access_denied"] = EventCategory.TASK
