@@ -205,10 +205,10 @@ class LedgerAgent(BaseAgent):
 
     async def execute_task(self, task: TaskRecord, ctx: AgentContext) -> TaskResult:
         """Answer the operational snapshot; a verification task first needs a real test run."""
-        progress = await verification_progress(ctx.sessions, task)
+        progress = await verification_progress(ctx.sessions, self.work_queue(ctx), task.id)
         if progress is not None and not progress.finished and task.requirement_id is not None:
             return TaskResult(
-                status=TaskResultStatus.WAITING_FOR_APPROVAL,
+                status=TaskResultStatus.WAITING_FOR_VERIFICATION,
                 summary="waiting for the independent test run of the implementation",
                 outputs={"awaiting_test_run_for": [str(item) for item in progress.forge_task_ids]},
             )
@@ -227,8 +227,9 @@ class LedgerAgent(BaseAgent):
 
     async def _resume_verification_tasks(self, ctx: AgentContext) -> list[UUID]:
         resumed: list[UUID] = []
-        for task in await waiting_verification_tasks(ctx.sessions):
-            progress = await verification_progress(ctx.sessions, task)
+        work = self.work_queue(ctx)
+        for task in await waiting_verification_tasks(work):
+            progress = await verification_progress(ctx.sessions, work, task.id)
             if progress is None or not progress.finished:
                 continue
             try:
@@ -1004,7 +1005,7 @@ class LedgerAgent(BaseAgent):
         finished = await TestRunStore(ctx.sessions).finished_for_capability(run.capability_id)
         streak = 0
         for item in reversed(finished):
-            if item.status == RunStatus.CANCELLED.value:
+            if item.status in (RunStatus.CANCELLED.value, RunStatus.INCONCLUSIVE.value):
                 continue
             if item.status != RunStatus.FAILED.value:
                 break

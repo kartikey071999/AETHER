@@ -30,7 +30,12 @@ from aether.storage.repositories import InvalidAuthorizationResponse, InvalidTas
 
 # States ORCHESTR may move to BLOCKED itself. Running work is left to the worker pool, which
 # records BLOCKED when the agent returns; moving it here would race that transition.
-_BLOCKABLE_NOW = (TaskStatus.PENDING, TaskStatus.READY, TaskStatus.WAITING_FOR_APPROVAL)
+_BLOCKABLE_NOW = (
+    TaskStatus.PENDING,
+    TaskStatus.READY,
+    TaskStatus.WAITING_FOR_APPROVAL,
+    TaskStatus.WAITING_FOR_VERIFICATION,
+)
 _CANCELLABLE = (
     TaskStatus.PENDING,
     TaskStatus.READY,
@@ -38,6 +43,7 @@ _CANCELLABLE = (
     TaskStatus.BLOCKED,
     TaskStatus.PAUSED,
     TaskStatus.WAITING_FOR_APPROVAL,
+    TaskStatus.WAITING_FOR_VERIFICATION,
     TaskStatus.RETRYING,
     TaskStatus.FAILED,
 )
@@ -49,6 +55,11 @@ TASK_FAILURE = "task_failure"
 VERIFICATION = "verification"
 PLAN = "plan"
 REQUIREMENT = "requirement"
+# Waits that clear on their own or by a person's reply: the user is told, the objective keeps
+# running (a blocked objective would stop ORCHESTR releasing and completing its other tasks).
+VERIFICATION_WAIT = "verification_wait"
+APPROVAL_WAIT = "approval_wait"
+RESOURCE_DEFERRAL = "resource_deferral"
 
 
 async def escalate_objective(
@@ -59,6 +70,8 @@ async def escalate_objective(
     reason: str,
     kind: str,
     task_id: UUID | None = None,
+    block: bool = True,
+    decision: str | None = None,
 ) -> bool:
     """Stop work on an objective that cannot proceed unaided and tell the user once.
 
@@ -66,7 +79,8 @@ async def escalate_objective(
     once. ``kind`` groups triggers: at most one escalation and one user update is sent per
     (objective, kind) per ``limits.escalation_window_hours``; later triggers in the window are
     recorded as ``escalation_aggregated`` against the open escalation. Finished objectives are
-    never escalated. True when a new escalation (and user update) was issued.
+    never escalated. With ``block=False`` the user is told but the objective stays active.
+    True when a new escalation (and user update) was issued.
     """
     current = await env.store.get_objective(objective.id) or objective
     if current.status in TERMINAL_OBJECTIVE_STATES:
@@ -103,7 +117,9 @@ async def escalate_objective(
             objective_id=objective.id,
             task_id=task_id,
         ):
-            await _escalate_now(env, current, objective.id, reason, kind, len(previous), task_id)
+            await _escalate_now(
+                env, current, objective.id, reason, kind, len(previous), task_id, block, decision
+            )
             return True
     else:
         open_key = open_escalation.key or prefix
@@ -142,21 +158,28 @@ async def _escalate_now(
     kind: str,
     number: int,
     task_id: UUID | None,
+    block: bool = True,
+    decision: str | None = None,
 ) -> None:
-    if current.status == "active":
+    if block and current.status == "active":
         await env.store.objectives.set_status(
             current.id, "blocked", actor=ACTOR, reason=reason[:300]
         )
         current = await env.store.get_objective(objective_id) or current
+    headline = (
+        f"Work on '{current.title}' is blocked and needs your input."
+        if block
+        else f"Work on '{current.title}' is taking longer than expected."
+    )
     await env.send_user_update(
         UpdateEvent(UpdateKind.ESCALATION),
         key=f"escalation:{objective_id}:{kind}:{number}",
-        what_happened=f"Work on '{current.title}' is blocked and needs your input.",
+        what_happened=headline,
         objective=current,
         task_id=task_id,
         blockers=[reason],
         decisions_required=[
-            "Decide whether to retry, change the approach, or cancel the objective"
+            decision or "Decide whether to retry, change the approach, or cancel the objective"
         ],
     )
 

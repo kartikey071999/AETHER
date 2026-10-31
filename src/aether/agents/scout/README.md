@@ -51,7 +51,8 @@ source URL and the hash of the returned text. See `docs/web-research.md`.
 Questions, excerpts and candidate proposals are quoted `UntrustedContent`.
 Instruction-like source content is quarantined, never used for model decisions,
 and cannot change permissions. Models cannot assert verified classification or
-invent evidence indices. Summaries and rankings are JSON-schema validated;
+invent evidence indices; a hypothesis that cites no evidence is stored as untested
+(`settle_classification`). Summaries and rankings are JSON-schema validated;
 unavailable, over-budget or invalid responses use deterministic fallbacks. When
 no model answers, conventional (SCOUT) research still adopts a
 "Standard-library implementation" at confidence 0.65 if all evidence is clean,
@@ -66,8 +67,14 @@ incoherent/low-confidence proposals with rationale. Adoption means evaluation,
 not installation or verification. It creates acceptance criteria, requires
 security review, submits the proposed requirement to LEDGER, and announces
 `research.consolidated` to ORCHESTR, ROGUE and LEDGER. Roadmap candidates remain
-`discovered`; only adopted candidates become `proposed`. Finding-scoped names
-preserve requirement/evidence ownership across rounds.
+`discovered`; only adopted candidates become `proposed`. Discoveries share one
+roadmap row per objective and approach name (case-insensitive, with whitespace
+trimmed and collapsed). Stable objective-scoped names fit the existing registry
+constraint; different objectives retain separate rows. Every finding adds an
+idempotent `capability.evidence_added` snapshot linking its persisted evidence and
+any adopted requirement. Repeated discoveries merge unreviewed metadata, but
+never overwrite proposed or later lifecycle states, including verified entries.
+Legacy finding-scoped rows are reused; historical duplicates are not deleted.
 
 State, audit events and outgoing messages commit atomically through existing
 repositories and savepoint-bound sessions (SQLite or PostgreSQL). Stable message

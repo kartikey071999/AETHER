@@ -19,6 +19,7 @@ from aether.communication.messages import AgentId, AgentMessage, MessageType
 from aether.storage.models import TaskRecord
 
 if TYPE_CHECKING:
+    from aether.agents.work_queue import AgentWorkQueue
     from aether.models.facade import AgentModels
     from aether.tools.facade import AgentTools
 
@@ -41,6 +42,8 @@ class AgentContext:
     permission_service: PermissionService | None = None
     tools: "AgentTools | None" = None
     models: "AgentModels | None" = None
+    # The agent's own deterministic task list (aether.agents.work_queue); bound to its identity.
+    work: "AgentWorkQueue | None" = None
     services: dict[str, Any] = field(default_factory=dict)
 
 
@@ -49,6 +52,8 @@ class TaskResultStatus(StrEnum):
     FAILED = "failed"
     BLOCKED = "blocked"
     WAITING_FOR_APPROVAL = "waiting_for_approval"
+    # The task waits for an independent verification run (LEDGER), not for a person or WARDEN.
+    WAITING_FOR_VERIFICATION = "waiting_for_verification"
 
 
 class TaskResult(BaseModel):
@@ -161,6 +166,15 @@ class BaseAgent(ABC):
 
     @abstractmethod
     async def execute_task(self, task: TaskRecord, ctx: AgentContext) -> TaskResult: ...
+
+    def work_queue(self, ctx: AgentContext) -> "AgentWorkQueue":
+        """This agent's own task list: open tasks by effective priority, dependencies resolved.
+
+        Agents read their work through this instead of querying ``TaskRecord`` themselves.
+        """
+        from aether.agents.work_queue import work_queue
+
+        return work_queue(ctx, self.agent_id)
 
     async def invoke_tool(
         self,

@@ -47,9 +47,13 @@ _OUTCOMES = {
 _VERDICT_STATUS = {
     VerificationVerdict.VERIFIED: RunStatus.SUCCEEDED,
     VerificationVerdict.FAILED: RunStatus.FAILED,
-    VerificationVerdict.INCONCLUSIVE: RunStatus.CANCELLED,
+    VerificationVerdict.INCONCLUSIVE: RunStatus.INCONCLUSIVE,
 }
-_STATUS_VERDICT = {status: verdict for verdict, status in _VERDICT_STATUS.items()}
+# Rows written before the dedicated status stored inconclusive runs as cancelled.
+_STATUS_VERDICT = {
+    **{status: verdict for verdict, status in _VERDICT_STATUS.items()},
+    RunStatus.CANCELLED: VerificationVerdict.INCONCLUSIVE,
+}
 _FAILING = (ResultOutcome.FAILED, ResultOutcome.ERROR)
 
 

@@ -11,10 +11,13 @@ from uuid import UUID
 
 import pytest
 from reliability_support import (
+    FakeClock,
     RecordingAgent,
     assign_message,
     build_engine,
+    engine_limits,
     event_counts,
+    events_of,
     get_task,
     make_task,
     message_status,
@@ -23,11 +26,12 @@ from reliability_support import (
     wait_until,
 )
 
+from aether.agents.base import AgentContext
 from aether.communication.bus import MessageBus
-from aether.communication.messages import AgentId
+from aether.communication.messages import AgentId, AgentMessage
 from aether.runtime.leases import LeaseManager
 from aether.storage.database import Database
-from aether.storage.models import TaskStatus
+from aether.storage.models import MessageRecord, TaskStatus
 from aether.storage.repositories import ObjectiveRepository
 
 TTL = timedelta(seconds=30)
@@ -65,8 +69,8 @@ async def _engines_race(databases: list[Database], objective_id: UUID) -> None:
         build_engine(database.sessions, [agent])
         for database, agent in zip(databases, agents, strict=True)
     ]
-    # Every engine is up before any message is published, so start-up requeueing cannot touch
-    # a peer's in-flight messages (see the multi-engine note in the T-050 report).
+    # Every engine is up before any message is published; a late engine joining while messages
+    # are in flight is covered by the claim tests below.
     for engine in engines:
         await engine.start()
     try:
@@ -189,3 +193,190 @@ async def test_postgres_claims_skip_locked_rows_without_double_delivery() -> Non
 
 async def _is(sessions, task_id, state: TaskStatus) -> bool:
     return await task_state(sessions, task_id) is state
+
+
+class BlockingAgent(RecordingAgent):
+    """Holds every message it receives in flight until `release` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def handle_message(self, message: AgentMessage, ctx: AgentContext) -> None:
+        self.handled.append(message.message_id)
+        await self.release.wait()
+
+
+async def _status_is(sessions, message_id: UUID, status: str) -> bool:
+    return await message_status(sessions, message_id) == status
+
+
+async def _requeue_events(sessions, message_id: UUID) -> list:
+    return await events_of(sessions, "message.requeued", message_id)
+
+
+async def _late_engine_leaves_live_claims_alone(databases: list[Database]) -> None:
+    first_db, second_db = databases[0], databases[1]
+    busy, idle = BlockingAgent(), RecordingAgent()
+    first = build_engine(first_db.sessions, [busy])
+    second = build_engine(second_db.sessions, [idle])
+    message = assign_message()
+    await first.start()
+    try:
+        await MessageBus(first_db.sessions).publish(message)
+        await wait_until(lambda: _status_is(first_db.sessions, message.message_id, "processing"))
+
+        await second.start()  # starts while the first engine has the message in flight
+        try:
+            assert second.recovery_report is not None
+            assert second.recovery_report.requeued_messages == 0
+            await asyncio.sleep(0.4)  # several periodic sweeps of the second engine
+            assert await message_status(first_db.sessions, message.message_id) == "processing"
+            assert idle.handled == []
+        finally:
+            busy.release.set()
+            await wait_until(lambda: _status_is(first_db.sessions, message.message_id, "processed"))
+            await second.stop()
+    finally:
+        busy.release.set()
+        await first.stop()
+
+    assert busy.handled == [message.message_id] and idle.handled == []
+    assert await _requeue_events(first_db.sessions, message.message_id) == []
+
+
+async def _dead_engines_claim_is_taken_over_after_it_expires(databases: list[Database]) -> None:
+    first_db, second_db = databases[0], databases[1]
+    clock = FakeClock()
+    message = assign_message()
+    dead_bus = MessageBus(first_db.sessions, clock=clock)
+    await dead_bus.publish(message)
+    await dead_bus.claim(AgentId.FORGE, 1, consumer="engine-dead")
+    await dead_bus.mark_processing(message.message_id, consumer="engine-dead")
+    agent = RecordingAgent()
+    engine = build_engine(
+        second_db.sessions,
+        [agent],
+        clock=clock,
+        bus=MessageBus(second_db.sessions, clock=clock),
+    )
+
+    await engine.start()
+    try:
+        assert engine.recovery_report is not None
+        assert engine.recovery_report.requeued_messages == 0  # the dead engine's claim is live
+        await asyncio.sleep(0.2)
+        assert await message_status(first_db.sessions, message.message_id) == "processing"
+        assert agent.handled == []
+
+        clock.advance(120)  # the claim lapses: nobody renewed it
+
+        await wait_until(lambda: _status_is(first_db.sessions, message.message_id, "processed"))
+    finally:
+        await engine.stop()
+
+    assert agent.handled == [message.message_id]
+    [requeued] = await _requeue_events(first_db.sessions, message.message_id)
+    assert requeued.payload["consumer"] == "engine-dead"
+    assert requeued.payload["reason"] == "claim_expired"
+
+
+async def test_a_late_engine_does_not_requeue_a_live_engines_messages(
+    database, peer_database
+) -> None:
+    await _late_engine_leaves_live_claims_alone([database, peer_database])
+
+
+async def test_a_dead_engines_message_is_taken_over_once_its_claim_expires(
+    database, peer_database
+) -> None:
+    await _dead_engines_claim_is_taken_over_after_it_expires([database, peer_database])
+
+
+async def test_the_engine_heartbeat_renews_its_claims(database) -> None:
+    agent = BlockingAgent()
+    engine = build_engine(
+        database.sessions, [agent], limits=engine_limits(message_claim_ttl_seconds=0.6)
+    )
+    message = assign_message()
+
+    async def expiry() -> object:
+        async with database.sessions() as session:
+            record = await session.get(MessageRecord, message.message_id, populate_existing=True)
+        assert record is not None
+        return record.claim_expires_at
+
+    await engine.start()
+    try:
+        await MessageBus(database.sessions).publish(message)
+        await wait_until(lambda: _status_is(database.sessions, message.message_id, "processing"))
+        first = await expiry()
+
+        async def renewed() -> bool:
+            return await expiry() != first
+
+        await wait_until(renewed)
+    finally:
+        agent.release.set()
+        await engine.stop()
+
+
+async def test_a_graceful_stop_releases_claims_for_immediate_pickup(
+    database, peer_database
+) -> None:
+    stuck = BlockingAgent()
+    first = build_engine(database.sessions, [stuck])
+    message = assign_message()
+    await first.start()
+    await MessageBus(database.sessions).publish(message)
+    await wait_until(lambda: _status_is(database.sessions, message.message_id, "processing"))
+
+    await first.stop()  # the handler never finishes; shutdown gives up on it
+
+    assert await message_status(database.sessions, message.message_id) == "pending"
+    [requeued] = await _requeue_events(database.sessions, message.message_id)
+    assert requeued.payload["reason"] == "released"
+    agent = RecordingAgent()
+    second = build_engine(peer_database.sessions, [agent])
+    await second.start()
+    try:
+        await wait_until(lambda: _status_is(database.sessions, message.message_id, "processed"))
+    finally:
+        await second.stop()
+    assert agent.handled == [message.message_id]
+
+
+@pytest.mark.postgres
+async def test_postgres_a_late_engine_does_not_requeue_a_live_engines_messages() -> None:
+    async with postgres_databases(2) as databases:
+        await _late_engine_leaves_live_claims_alone(databases)
+
+
+@pytest.mark.postgres
+async def test_postgres_a_dead_engines_message_is_taken_over_once_its_claim_expires() -> None:
+    async with postgres_databases(2) as databases:
+        await _dead_engines_claim_is_taken_over_after_it_expires(databases)
+
+
+@pytest.mark.postgres
+async def test_postgres_concurrent_sweeps_requeue_each_expired_message_once() -> None:
+    async with postgres_databases(3) as databases:
+        clock = FakeClock()
+        messages = [assign_message() for _ in range(TASKS)]
+        publisher = MessageBus(databases[0].sessions, clock=clock)
+        for message in messages:
+            await publisher.publish(message)
+        await publisher.claim(AgentId.FORGE, TASKS, consumer="engine-dead")
+        clock.advance(120)
+
+        counts = await asyncio.gather(
+            *(
+                MessageBus(database.sessions, clock=clock).requeue_in_flight()
+                for database in databases
+                for _ in range(2)
+            )
+        )
+
+        assert sum(counts) == TASKS
+        for message in messages:
+            assert len(await _requeue_events(databases[0].sessions, message.message_id)) == 1

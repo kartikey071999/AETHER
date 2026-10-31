@@ -28,7 +28,7 @@ NOW = datetime(2030, 1, 1, tzinfo=UTC)
 CRITERIA = [{"criterion": "works offline", "passed": True, "evidence": "offline test"}]
 
 
-async def test_inconclusive_verdict_is_stored_with_cancelled_status(database, objective_id):
+async def test_inconclusive_verdict_is_stored_with_inconclusive_status(database, objective_id):
     task_id = await TaskRepository(database.sessions).create(objective_id=objective_id, title="T")
     repository = TestRunRepository(database.sessions)
     run_id = await repository.create(suite="offline", task_id=task_id, now=NOW)
@@ -40,7 +40,7 @@ async def test_inconclusive_verdict_is_stored_with_cancelled_status(database, ob
     )
     run = await repository.get(run_id)
     assert run.verdict == TestVerdict.INCONCLUSIVE
-    assert run.status == RunStatus.CANCELLED
+    assert run.status == RunStatus.INCONCLUSIVE
     assert (run.passed, run.failed, run.errors) == (1, 0, 0)
     with pytest.raises(InvalidTestRunTransition):
         await repository.finish(run_id, verdict=TestVerdict.INCONCLUSIVE, now=NOW)

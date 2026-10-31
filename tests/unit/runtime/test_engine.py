@@ -6,6 +6,7 @@ from runtime_helpers import FakeMonitor, StubAgent, event_counts, get_task, make
 from sqlalchemy import select
 
 from aether.agents.base import TaskResult, TaskResultStatus
+from aether.communication.bus import MessageBus
 from aether.communication.messages import AgentId, AgentMessage, MessageType
 from aether.runtime.engine import Engine, EngineLimits
 from aether.runtime.lifecycle import LifecycleState
@@ -199,9 +200,11 @@ async def test_start_recovers_stale_leases_and_messages(sessions, objective_id) 
     engine = build_engine(sessions, [agent])
     in_flight = assign_message()
     pending = assign_message()
+    # The dead engine's claim lapsed five minutes ago.
+    dead_bus = MessageBus(sessions, clock=lambda: datetime.now(UTC) - timedelta(minutes=5))
     await engine.bus.publish(in_flight)
     await engine.bus.publish(pending)
-    await engine.bus.claim(AgentId.FORGE, 1, consumer="dead-engine")  # left delivered
+    await dead_bus.claim(AgentId.FORGE, 1, consumer="dead-engine")  # left delivered
 
     await engine.start()
     try:
@@ -288,3 +291,15 @@ async def test_engine_health_reports_each_agent(sessions) -> None:
         await engine.stop()
 
     assert report[AgentId.FORGE].status == "healthy"
+
+
+async def test_engine_injects_a_work_queue_bound_to_each_agent(sessions, objective_id) -> None:
+    agent = StubAgent()
+    engine = build_engine(sessions, [agent])
+    ctx = engine.context_for(AgentId.FORGE)
+
+    assert ctx.work is not None
+    assert ctx.work.agent_id is AgentId.FORGE
+    assert agent.work_queue(ctx) is ctx.work
+    task_id = await make_task(sessions, objective_id)
+    assert [item.id for item in await ctx.work.open_tasks()] == [task_id]

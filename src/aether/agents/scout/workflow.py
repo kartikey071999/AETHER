@@ -20,6 +20,7 @@ from aether.agents.scout.schemas import (
     ResearchWork,
     SourceSpec,
 )
+from aether.agents.work_queue import MAX_LIMIT, work_queue
 from aether.communication.bus import MessageBus
 from aether.communication.contracts import (
     CandidateApproach,
@@ -175,10 +176,16 @@ async def _enqueue(
     ctx: AgentContext,
 ) -> UUID:
     key = f"research:{agent.value}:{message.message_id}"
+    queue = work_queue(ctx, agent)
+    existing = await queue.task_by_key(key)
+    if existing is not None:
+        return existing.id
+    # FAILED tasks may still be retried, so they keep occupying the research queue.
+    tasks = [
+        *await queue.open_tasks(limit=MAX_LIMIT),
+        *await queue.finished_tasks(states={TaskStatus.FAILED}, limit=MAX_LIMIT),
+    ]
     async with ctx.sessions() as session:
-        existing = await session.scalar(select(TaskRecord).where(TaskRecord.idempotency_key == key))
-        if existing is not None:
-            return existing.id
         objective = await session.get(ObjectiveRecord, request.objective_id)
         if objective is None:
             raise LookupError("research objective does not exist")
@@ -192,17 +199,12 @@ async def _enqueue(
             if parent is None or parent.objective_id != request.objective_id:
                 raise ValueError("research parent task must belong to the owning objective")
         investigations(request, limits)
-        active = select(TaskRecord).where(
-            TaskRecord.assigned_agent == agent.value,
-            TaskRecord.state.not_in([TaskStatus.COMPLETED, TaskStatus.CANCELLED]),
-        )
-        tasks = list(await session.scalars(active))
         expired_ids: set[UUID] = set()
         for task in tasks:
             if (
                 task.deadline
-                and as_utc(task.deadline) <= ctx.clock()
-                and TaskStatus.CANCELLED in ALLOWED_TASK_TRANSITIONS[TaskStatus(task.state)]
+                and task.deadline <= ctx.clock()
+                and TaskStatus.CANCELLED in ALLOWED_TASK_TRANSITIONS[task.state]
             ):
                 expired_ids.add(task.id)
         generated = list(
@@ -291,15 +293,13 @@ async def generate_objective(
 ) -> UUID:
     async with atomic_research(ctx) as transaction:
         now = ctx.clock()
+        if origin_message_id is not None:
+            existing = await work_queue(transaction, agent).task_by_key(
+                f"research:{agent.value}:{origin_message_id}"
+            )
+            if existing is not None:
+                return existing.objective_id
         async with transaction.sessions() as session:
-            if origin_message_id is not None:
-                existing = await session.scalar(
-                    select(TaskRecord).where(
-                        TaskRecord.idempotency_key == f"research:{agent.value}:{origin_message_id}"
-                    )
-                )
-                if existing is not None:
-                    return existing.objective_id
             count = await session.scalar(
                 select(func.count())
                 .select_from(ObjectiveRecord)
@@ -666,6 +666,17 @@ async def stored_finding(
         )
 
 
+def settle_classification(draft: FindingDraft) -> FindingDraft:
+    """Code, not the model, decides evidence-dependent labels.
+
+    A hypothesis must rest on cited evidence; one that cites nothing is recorded as untested.
+    (``VERIFIED`` is already refused by ``FindingDraft`` itself.)
+    """
+    if draft.classification is FindingClassification.HYPOTHESIS and not draft.evidence_indices:
+        return draft.model_copy(update={"classification": FindingClassification.UNTESTED})
+    return draft
+
+
 async def save_finding(
     agent: AgentId,
     work: ResearchWork,
@@ -677,6 +688,7 @@ async def save_finding(
         raise ValueError("a persisted research task is required to save a finding")
     if any(index < 0 or index >= len(contents) for index in draft.evidence_indices):
         raise ValueError("model cited evidence that was not collected")
+    draft = settle_classification(draft)
     async with atomic_research(ctx) as transaction:
         existing = await stored_finding(agent, work.request.task_id, transaction)
         if existing is not None:
@@ -946,32 +958,31 @@ async def consolidate(
         for item in finding.candidate_approaches[: limits.top_k]:
             candidate = CandidateApproach.model_validate(item)
             adopted = bool(requirement_ids) and candidate.name == finding.recommendation
-            # Finding-scoped names preserve evidence/requirement ownership across research rounds.
-            name = f"{candidate.name[:150]} [{finding.id}]"
-            if await capabilities.get_by_name(name) is None:
-                capability_id = await capabilities.register(
-                    name=name,
+            capability = await capabilities.record_discovery(
+                name=candidate.name,
+                actor=AgentId.SCOUT.value,
+                finding_id=finding.id,
+                evidence_ids=[row.id for row in rows],
+                description=candidate.description,
+                dependencies=candidate.dependencies,
+                resource_estimates=(
+                    candidate.resource_needs.model_dump(mode="json")
+                    if candidate.resource_needs
+                    else {}
+                ),
+                known_limitations=candidate.cons + candidate.risks,
+                required_permissions=["security.review"],
+                requirement_id=requirement_ids[0] if adopted else None,
+                objective_id=finding.objective_id,
+                correlation_id=message.correlation_id,
+            )
+            if adopted and capability.lifecycle_status == CapabilityStatus.DISCOVERED:
+                await capabilities.transition(
+                    capability.id,
+                    CapabilityStatus.PROPOSED,
                     actor=AgentId.SCOUT.value,
-                    description=candidate.description,
-                    dependencies=candidate.dependencies,
-                    resource_estimates=(
-                        candidate.resource_needs.model_dump(mode="json")
-                        if candidate.resource_needs
-                        else {}
-                    ),
-                    known_limitations=candidate.cons + candidate.risks,
-                    required_permissions=["security.review"],
-                    requirement_id=requirement_ids[0] if adopted else None,
-                    objective_id=finding.objective_id,
                     correlation_id=message.correlation_id,
                 )
-                if adopted:
-                    await capabilities.transition(
-                        capability_id,
-                        CapabilityStatus.PROPOSED,
-                        actor=AgentId.SCOUT.value,
-                        correlation_id=message.correlation_id,
-                    )
         if requirement_ids:
             # SCOUT evaluated the evidence and adopted the approach: the requirement is approved
             # for implementation (operations still need WARDEN; completion needs LEDGER).

@@ -40,6 +40,10 @@ _RESULT_STATUS: dict[TaskResultStatus, tuple[TaskStatus, str]] = {
         TaskStatus.WAITING_FOR_APPROVAL,
         "task.waiting_for_approval",
     ),
+    TaskResultStatus.WAITING_FOR_VERIFICATION: (
+        TaskStatus.WAITING_FOR_VERIFICATION,
+        "task.waiting_for_verification",
+    ),
 }
 
 

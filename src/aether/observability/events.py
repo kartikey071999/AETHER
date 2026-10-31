@@ -184,7 +184,10 @@ class MessageProcessingPayload(MessageDeliveredPayload):
 
 
 class MessageRequeuedPayload(MessageDeliveredPayload):
+    """``consumer`` is the consumer whose claim was given up."""
+
     previous_status: str
+    reason: str | None = None
 
 
 class MessageProcessedPayload(MessageDeliveredPayload):
@@ -404,6 +407,17 @@ class CapabilityDiscoveredPayload(EventPayload):
     version: str | None = None
 
 
+class CapabilityEvidenceAddedPayload(EventPayload):
+    approach_name: str
+    finding_id: UUID
+    evidence_ids: list[UUID]
+    description: str = ""
+    dependencies: list[str] = Field(default_factory=list)
+    resource_estimates: dict[str, Any] = Field(default_factory=dict)
+    known_limitations: list[str] = Field(default_factory=list)
+    requirement_id: UUID | None = None
+
+
 class CapabilityTransitionedPayload(EventPayload):
     from_status: str
     to_status: str
@@ -527,6 +541,7 @@ EVENT_TYPES: dict[str, type[BaseModel]] = {
     "task.completed": TaskOutcomePayload,
     "task.blocked": TaskOutcomePayload,
     "task.waiting_for_approval": TaskOutcomePayload,
+    "task.waiting_for_verification": TaskOutcomePayload,
     "task.failed": TaskOutcomePayload,
     "task.timed_out": TaskOutcomePayload,
     "task.cancelled": TaskOutcomePayload,
@@ -548,6 +563,7 @@ EVENT_TYPES: dict[str, type[BaseModel]] = {
     "test.results_added": TestResultsAddedPayload,
     "capability.status_changed": CapabilityStatusChangedPayload,
     "capability.discovered": CapabilityDiscoveredPayload,
+    "capability.evidence_added": CapabilityEvidenceAddedPayload,
     "capability.transitioned": CapabilityTransitionedPayload,
     "requirement.created": RequirementCreatedPayload,
     "requirement.status_changed": RequirementStatusChangedPayload,
@@ -797,3 +813,19 @@ class CommunicationSuppressedPayload(EventPayload):
 
 EVENT_TYPES["communication.suppressed"] = CommunicationSuppressedPayload
 EVENT_CATEGORIES["communication.suppressed"] = EventCategory.DECISION
+
+
+# --- per-agent work queues (T-053) ---
+
+
+class TaskAccessDeniedPayload(EventPayload):
+    """An agent asked its work queue for a task (or task list) it may not see."""
+
+    requested_by: str = Field(min_length=1, max_length=24)
+    operation: str = Field(min_length=1, max_length=64)
+    owner: str | None = Field(default=None, max_length=24)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+EVENT_TYPES["task.access_denied"] = TaskAccessDeniedPayload
+EVENT_CATEGORIES["task.access_denied"] = EventCategory.TASK

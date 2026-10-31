@@ -37,7 +37,7 @@ async def test_task_waits_without_a_test_run(agent, ctx, database, make_work):
 
     result = await agent.execute_task(await _task(database, task_id), ctx)
 
-    assert result.status is TaskResultStatus.WAITING_FOR_APPROVAL
+    assert result.status is TaskResultStatus.WAITING_FOR_VERIFICATION
     assert result.outputs["awaiting_test_run_for"] == [str(work.task_id)]
 
 
@@ -48,10 +48,10 @@ async def test_task_completes_once_the_run_has_a_verdict(
     write_suite(workspace, PASSING_SUITE)
     task_id = await _verification_task(database, work)
     tasks = TaskRepository(database.sessions)
-    await tasks.transition(task_id, TaskStatus.WAITING_FOR_APPROVAL, actor="test")
+    await tasks.transition(task_id, TaskStatus.WAITING_FOR_VERIFICATION, actor="test")
 
     assert await agent.tick(ctx) == []
-    assert (await _task(database, task_id)).state == TaskStatus.WAITING_FOR_APPROVAL.value
+    assert (await _task(database, task_id)).state == TaskStatus.WAITING_FOR_VERIFICATION.value
 
     run = await run_verification(agent, ctx, publish, approve_pending, work)
 
@@ -76,10 +76,25 @@ async def test_tick_resumes_a_task_whose_run_finished_before_it_waited(
     await run_verification(agent, ctx, publish, approve_pending, work)
     task_id = await _verification_task(database, work)
     tasks = TaskRepository(database.sessions)
-    await tasks.transition(task_id, TaskStatus.WAITING_FOR_APPROVAL, actor="test")
+    await tasks.transition(task_id, TaskStatus.WAITING_FOR_VERIFICATION, actor="test")
 
     assert await agent.tick(ctx) == [task_id]
     assert (await _task(database, task_id)).state == TaskStatus.READY.value
+
+
+async def test_tick_leaves_a_task_waiting_for_approval_alone(
+    agent, ctx, publish, approve_pending, database, make_work, workspace
+):
+    work = await make_work()
+    write_suite(workspace, PASSING_SUITE)
+    await run_verification(agent, ctx, publish, approve_pending, work)
+    task_id = await _verification_task(database, work)
+    await TaskRepository(database.sessions).transition(
+        task_id, TaskStatus.WAITING_FOR_APPROVAL, actor="test"
+    )
+
+    assert await agent.tick(ctx) == []
+    assert (await _task(database, task_id)).state == TaskStatus.WAITING_FOR_APPROVAL.value
 
 
 async def test_tasks_without_forge_work_or_requirement_keep_completing(

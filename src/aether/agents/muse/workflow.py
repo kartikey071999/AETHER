@@ -3,22 +3,17 @@
 import json
 import re
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import ValidationError
 from sqlalchemy import select
 
 from aether.agents.base import AgentContext
-from aether.agents.muse.prompts import OPENING_POLISH
 from aether.agents.muse.repository import MuseRepository
-from aether.agents.muse.schemas import CommunicationPreferences, HandoffOptions, OpeningPolish
+from aether.agents.muse.schemas import CommunicationPreferences, HandoffOptions
 from aether.communication.contracts import CommunicationRequestPayload, Urgency
 from aether.communication.messages import AgentId
-from aether.models.base import ProviderError
-from aether.models.contracts import CompletionMessage, CompletionRequest, ModelTier
-from aether.models.facade import ModelCallContext, ModelUnavailable
-from aether.security.errors import OperationBlocked
-from aether.security.untrusted import UntrustedContent
 from aether.storage.models import PersonRecord
 from aether.storage.repositories.knowledge_graph import KnowledgeGraphRepository
 
@@ -101,11 +96,50 @@ def routine_notification(request: CommunicationRequestPayload, options: HandoffO
 
 
 def opening_for(preferences: CommunicationPreferences) -> str:
+    """The fact-free opening line, chosen from explicit preferences only (no model involved)."""
     if preferences.formality == "formal":
         return "Please review the update below."
     if preferences.tone == "warm":
         return "Here is the update."
     return ""
+
+
+def result_lines(result: dict[str, Any]) -> list[str]:
+    """Render supplied fields without promoting reported results to verified facts."""
+    lines = []
+    count = result.get("tasks_completed")
+    objective = result.get("objective")
+    summarized = isinstance(count, int) and not isinstance(count, bool) and count >= 0
+    if summarized:
+        task_label = "task" if count == 1 else "tasks"
+        summary = f"{count} {task_label} completed"
+        if isinstance(objective, str) and objective.strip():
+            summary += f" for '{objective}'"
+        lines.append(summary)
+
+    def field(label: str, value: Any) -> None:
+        if isinstance(value, dict):
+            if not value:
+                lines.append(f"{label}: (empty mapping)")
+            for key, item in value.items():
+                field(f"{label}: {key}", item)
+        elif isinstance(value, list):
+            if not value:
+                lines.append(f"{label}: (empty list)")
+            for item in value:
+                field(label, item)
+        else:
+            text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+            lines.append(f"{label}: {text}")
+
+    for key, value in result.items():
+        if summarized and (
+            key == "tasks_completed"
+            or (key == "objective" and isinstance(objective, str) and objective.strip())
+        ):
+            continue
+        field(key, value)
+    return lines or ["No result fields supplied."]
 
 
 def render_message(
@@ -129,10 +163,7 @@ def render_message(
             parts.append(f"## {title}\n" + "\n".join(f"- {line}" for line in content))
 
     section("What happened", [request.what_happened])
-    results = [
-        json.dumps(result, ensure_ascii=True, sort_keys=True, indent=2 if detailed else None)
-        for result in request.results
-    ]
+    results = [line for result in request.results for line in result_lines(result)]
     section("Reported results (not independently verified by MUSE)", results)
     section("Verified", request.verified)
     section("Uncertain", request.uncertain)
@@ -173,64 +204,34 @@ def render_message(
             ],
         )
     text = "\n\n".join(part for part in parts if part) + "\n"
-    source = json.dumps(
-        {
-            "handoff": request.model_dump(mode="json"),
-            "options": options.model_dump(mode="json"),
-            "deadlines": [
-                value.isoformat()
-                for value in [
-                    deadline,
-                    options.authorization_expires_at,
-                    *options.decision_deadlines.values(),
-                ]
-                if value is not None
-            ],
-        },
-        ensure_ascii=True,
-        sort_keys=True,
-    )
-    if not set(_IDENTIFIERS.findall(text)).issubset(set(_IDENTIFIERS.findall(source))):
+    source = {
+        "handoff": request.model_dump(mode="json"),
+        "options": options.model_dump(mode="json"),
+        "deadlines": [
+            value.isoformat()
+            for value in [
+                deadline,
+                options.authorization_expires_at,
+                *options.decision_deadlines.values(),
+            ]
+            if value is not None
+        ],
+    }
+
+    def source_identifiers(value: Any) -> set[str]:
+        # Inspect decoded strings so JSON escapes cannot alter supplied identifiers.
+        if isinstance(value, dict):
+            return set().union(
+                *(source_identifiers(item) for pair in value.items() for item in pair)
+            )
+        if isinstance(value, list):
+            return set().union(*(source_identifiers(item) for item in value))
+        literal = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        return set(_IDENTIFIERS.findall(literal))
+
+    if not set(_IDENTIFIERS.findall(text)).issubset(source_identifiers(source)):
         raise ValueError("Rendered communication contains an unsupported number or identifier")
     return text
-
-
-async def polish_opening(
-    preferences: CommunicationPreferences,
-    ctx: AgentContext,
-    *,
-    objective_id: UUID | None = None,
-    task_id: UUID | None = None,
-) -> str:
-    fallback = opening_for(preferences)
-    if ctx.models is None:
-        ctx.logger.info("MUSE template fallback: model facade is unavailable")
-        return fallback
-    data = UntrustedContent(
-        source="explicit-communication-preferences", content=preferences.model_dump_json()
-    )
-    request = CompletionRequest(
-        tier=ModelTier.LIGHT,
-        messages=(
-            CompletionMessage(role="system", content=OPENING_POLISH),
-            CompletionMessage(role="user", content=data.quote()),
-        ),
-        response_format="json_object",
-        max_tokens=128,
-        temperature=0,
-    )
-    try:
-        response = await ctx.models.complete(
-            request, ModelCallContext(objective_id=objective_id, task_id=task_id)
-        )
-        candidate = OpeningPolish.model_validate_json(response.text).opening
-    except (ModelUnavailable, ProviderError, OperationBlocked, ValidationError):
-        ctx.logger.warning(
-            "MUSE template fallback: optional opening polish was unavailable or invalid"
-        )
-        return fallback
-    # A model cannot override the explicit presentation preference either.
-    return candidate if candidate == fallback else fallback
 
 
 def feedback_preferences(text: str) -> dict[str, str]:

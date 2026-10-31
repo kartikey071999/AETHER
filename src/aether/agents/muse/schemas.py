@@ -33,10 +33,6 @@ class HandoffOptions(MuseModel):
     notice_kind: str | None = Field(default=None, min_length=1, max_length=64)
 
 
-class OpeningPolish(MuseModel):
-    opening: Literal["", "Here is the update.", "Please review the update below."]
-
-
 class FileWriteReceipt(MuseModel):
     path: Path
     bytes_written: int = Field(ge=0)

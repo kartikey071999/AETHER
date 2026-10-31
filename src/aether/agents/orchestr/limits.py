@@ -30,6 +30,12 @@ class OrchestrLimits(BaseModel):
     escalation_window_hours: float = Field(default=1.0, gt=0)
     # A task held for an objective's requirement escalates after waiting this long.
     requirement_wait_minutes: float = Field(default=10.0, gt=0)
+    # A task waiting for its independent test run or for an approval escalates (once, without
+    # blocking the objective) after this long.
+    verification_wait_minutes: float = Field(default=30.0, gt=0)
+    approval_wait_minutes: float = Field(default=60.0, gt=0)
+    # A PENDING task the scheduler keeps deferring for resource reasons escalates after this long.
+    resource_deferral_minutes: float = Field(default=15.0, gt=0)
     # Resource pressure: after `pressure_pause_after_ticks` consecutive pressured ticks ORCHESTR
     # requests a pause of up to `pressure_max_pauses_per_tick` interruptible running tasks (0
     # disables it); after `pressure_resume_after_ticks` calm ticks it resumes one of them.
