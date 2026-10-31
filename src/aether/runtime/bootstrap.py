@@ -16,7 +16,7 @@ from aether.observability.logging import configure_logging
 from aether.observability.recorder import EventRecorder
 from aether.observability.retention import RetentionResult, apply_retention
 from aether.observability.spool import EventSpool, ReplayResult
-from aether.runtime.engine import Engine, EngineLimits
+from aether.runtime.engine import Engine, EngineLimits, ResourceSnapshotter
 from aether.runtime.models import ModelServices, allowlist_hosts, build_model_services
 from aether.runtime.resource_monitor import ResourceMonitor
 from aether.runtime.scheduler import Scheduler, SchedulerPolicy
@@ -35,7 +35,7 @@ def spool_path(settings: AetherSettings) -> Path:
 def agent_services(
     settings: AetherSettings,
     scheduler_policy: SchedulerPolicy,
-    monitor: ResourceMonitor,
+    monitor: ResourceSnapshotter,
     agent_ids: Iterable[AgentId],
 ) -> dict[AgentId, dict[str, Any]]:
     """Per-agent `ctx.services` beyond the shared security/model services.
@@ -139,13 +139,15 @@ def build_runtime(
     provider_settings: ProviderSettings | None = None,
     model_providers: Sequence[ModelProvider] | None = None,
     engine_limits: EngineLimits | None = None,
+    resource_monitor: ResourceSnapshotter | None = None,
 ) -> Runtime:
     """Construct the runtime; nothing touches the database until `Runtime.start`.
 
     ``model_providers`` replaces the providers built from ``provider_settings`` (used by tests).
     Agent tick intervals, task-control timing and agent limits come from ``settings``.
     ``engine_limits`` replaces the limits derived from the settings (e.g. faster polling in
-    end-to-end scenarios).
+    end-to-end scenarios). ``resource_monitor`` replaces the host monitor read by the scheduler
+    and ORCHESTR's pressure handling (tests pin host resources so load cannot change outcomes).
     """
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     provider_settings = provider_settings or ProviderSettings()
@@ -175,7 +177,7 @@ def build_runtime(
         min_free_disk_bytes=int(settings.min_free_disk_gb * 1024**3),
     )
     scheduler = Scheduler(scheduler_policy, database.sessions)
-    monitor = ResourceMonitor()
+    monitor = resource_monitor or ResourceMonitor()
     if agents is None:
         agents = build_agents(
             options=runtime_agent_options(

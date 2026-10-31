@@ -3,12 +3,12 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from sqlite_schema import schema_database
 
 from aether.models import BudgetGuard, ProviderSettings
 from aether.observability.recorder import EventRecorder
 from aether.security import PermissionService, SecurityPolicy
 from aether.storage.database import Database
-from aether.storage.models import Base
 from aether.storage.repositories.provider_usage import ProviderUsageRepository
 
 
@@ -31,9 +31,7 @@ def isolated_provider_env(monkeypatch):
 
 @pytest.fixture
 async def database(tmp_path: Path) -> AsyncIterator[Database]:
-    database = Database(f"sqlite+aiosqlite:///{(tmp_path / 'models.db').as_posix()}")
-    async with database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    database = schema_database(tmp_path / "models.db")
     yield database
     await database.close()
 

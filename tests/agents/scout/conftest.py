@@ -4,6 +4,7 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+from sqlite_schema import schema_database
 
 from aether.agents.base import AgentContext
 from aether.communication.bus import MessageBus
@@ -12,7 +13,6 @@ from aether.models.providers import MockProvider
 from aether.security.operations import Operation, OperationKind
 from aether.security.untrusted import UntrustedContent
 from aether.storage.database import Database
-from aether.storage.models import Base
 from aether.storage.repositories import ObjectiveRepository
 
 
@@ -43,9 +43,7 @@ class FakeTools:
 
 @pytest.fixture
 async def database(tmp_path: Path) -> AsyncIterator[Database]:
-    database = Database(f"sqlite+aiosqlite:///{(tmp_path / 'research.db').as_posix()}")
-    async with database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    database = schema_database(tmp_path / "research.db")
     yield database
     await database.close()
 

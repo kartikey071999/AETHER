@@ -163,6 +163,22 @@ async def test_stopping_an_unstarted_engine_is_safe(sessions) -> None:
     assert await runtime_events(sessions, engine) == []
 
 
+async def test_stop_does_not_wait_for_idle_message_loops_to_poll(sessions) -> None:
+    # Regression: an idle agent loop only noticed shutdown when its message poll timed out, so
+    # every stop took up to message_poll_seconds (1s by default; here 30s).
+    engine = build_engine(
+        sessions, [StubAgent()], message_poll_seconds=30.0, shutdown_timeout_seconds=30.0
+    )
+    await engine.start()
+    await asyncio.sleep(0.1)  # the message loop is now idle, waiting for messages
+
+    started = asyncio.get_running_loop().time()
+    await asyncio.wait_for(engine.stop(), 15.0)
+
+    assert asyncio.get_running_loop().time() - started < 10.0
+    assert engine.state is LifecycleState.STOPPED
+
+
 async def test_start_recovers_stale_leases_and_messages(sessions, objective_id) -> None:
     async with sessions() as session, session.begin():
         stale = TaskRecord(

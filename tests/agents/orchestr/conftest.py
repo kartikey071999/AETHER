@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 from orchestr_helpers import FakeBus, FakeClock, FakeMonitor, Harness
+from sqlite_schema import schema_database
 
 from aether.agents.base import AgentContext
 from aether.agents.orchestr import OrchestrAgent
 from aether.agents.orchestr.store import OrchestrStore
 from aether.runtime.scheduler import SchedulerPolicy
 from aether.storage.database import Database
-from aether.storage.models import Base
 
 
 @pytest.fixture(autouse=True)
@@ -25,9 +25,7 @@ def _mock_providers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 async def database(tmp_path: Path) -> AsyncIterator[Database]:
-    database = Database(f"sqlite+aiosqlite:///{(tmp_path / 'orchestr.db').as_posix()}")
-    async with database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    database = schema_database(tmp_path / "orchestr.db")
     yield database
     await database.close()
 

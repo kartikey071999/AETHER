@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 from forge_support import FakeClock, ForgeEnv
+from sqlite_schema import schema_database
 
 from aether.agents.base import AgentContext
 from aether.agents.forge import ForgeAgent
@@ -19,16 +20,13 @@ from aether.observability.recorder import EventRecorder
 from aether.observability.spool import EventSpool
 from aether.security import ApprovalService, PermissionService, SecurityPolicy
 from aether.storage.database import Database
-from aether.storage.models import Base
 from aether.tools import AgentTools, ToolRegistry
 from aether.tools.adapters import build_default_registry
 
 
 @pytest.fixture
 async def database(tmp_path: Path) -> AsyncIterator[Database]:
-    database = Database(f"sqlite+aiosqlite:///{(tmp_path / 'forge.db').as_posix()}")
-    async with database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    database = schema_database(tmp_path / "forge.db")
     yield database
     await database.close()
 
