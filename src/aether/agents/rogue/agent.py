@@ -1,6 +1,7 @@
 """Independent unconventional generation, critique and top-k selection; SCOUT owns adoption."""
 
 import json
+from typing import NamedTuple
 
 from aether.agents.base import AgentContext
 from aether.agents.rogue import prompts
@@ -16,6 +17,24 @@ from aether.communication.contracts import (
 from aether.communication.messages import AgentId, AgentMessage, MessageType
 from aether.security.untrusted import UntrustedContent
 from aether.storage.models import FindingClassification
+
+
+class RogueLlmBudget(NamedTuple):
+    generate: int
+    critique: int
+
+
+def split_llm_budget(max_llm_requests: int, critique_share: float) -> RogueLlmBudget:
+    """Split an objective's LLM budget between ROGUE's generation and critique phases.
+
+    The critique pool is ``critique_share`` of the budget (at least one call when the budget
+    allows two). Every generation call needs a critique after it, so generation is capped at the
+    critique pool too; neither phase can starve the other.
+    """
+    if max_llm_requests <= 1:
+        return RogueLlmBudget(generate=max_llm_requests, critique=0)
+    critique = min(max(1, int(max_llm_requests * critique_share + 0.5)), max_llm_requests - 1)
+    return RogueLlmBudget(generate=min(max_llm_requests - critique, critique), critique=critique)
 
 
 class RogueAgent(ScoutAgent):
@@ -48,8 +67,17 @@ class RogueAgent(ScoutAgent):
         if any(content.suspicious_patterns() for content in contents):
             ctx.logger.warning("research.source_quarantined", extra={"agent": self.agent_id.value})
             return fallback
+        budget = split_llm_budget(
+            work.request.budget.max_llm_requests, self.limits.llm_critique_share
+        )
         divergent = await self.complete_json(
-            DivergentDraft, prompts.DIVERGE, self.prompt_data(work, contents), work, ctx
+            DivergentDraft,
+            prompts.DIVERGE,
+            self.prompt_data(work, contents),
+            work,
+            ctx,
+            kind="llm",
+            limit=budget.generate,
         )
         if divergent is None:
             return fallback
@@ -62,6 +90,8 @@ class RogueAgent(ScoutAgent):
             ).quote(16384),
             work,
             ctx,
+            kind="llm_critique",
+            limit=budget.critique,
         )
         if critique is None or any(
             index < 0 or index >= len(divergent.candidates) for index in critique.ranked_indices

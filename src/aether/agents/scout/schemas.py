@@ -49,6 +49,9 @@ class ResearchLimits(ResearchModel):
     review_seconds: int = Field(default=86400, ge=1)
     max_sources: int = Field(default=4, ge=0, le=32)
     max_llm_requests: int = Field(default=2, ge=0, le=8)
+    # Share of the per-objective LLM budget reserved for ROGUE's critique phase, so that
+    # generation can never use up the calls its own critique needs.
+    llm_critique_share: float = Field(default=0.5, ge=0.0, le=1.0)
     max_attempts: int = Field(default=2, ge=1, le=5)
     max_follow_ups: int = Field(default=1, ge=0, le=4)
     top_k: int = Field(default=3, ge=1, le=8)
