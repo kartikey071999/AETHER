@@ -11,7 +11,6 @@ from aether.communication.bus import MessageBus
 from aether.communication.contracts import CommunicationRequestPayload, build_message
 from aether.communication.messages import AgentId
 from aether.observability.recorder import EventRecorder
-from aether.security.operations import OperationKind
 from aether.security.permissions import PermissionService
 from aether.security.policy import SecurityPolicy
 from aether.security.readonly import PermissionView
@@ -64,12 +63,10 @@ def policy(tmp_path):
     roots = {name: tmp_path / name for name in ("workspaces", "artifacts", "data")}
     for path in roots.values():
         path.mkdir()
-    # Explicit startup permission in this isolated test only; production remains default-deny.
     return SecurityPolicy(
         workspace_dir=roots["workspaces"],
         artifact_dir=roots["artifacts"],
         data_dir=roots["data"],
-        agent_permissions={AgentId.MUSE: {OperationKind.FILE_WRITE, OperationKind.LLM_CALL}},
     )
 
 

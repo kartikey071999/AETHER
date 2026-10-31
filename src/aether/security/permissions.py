@@ -259,7 +259,7 @@ class PermissionService:
         correlation_id: UUID | None,
     ) -> _Block | _Allow:
         policy = self._policy
-        if not policy.permits(operation.requested_by, operation.kind):
+        if not policy.permits_operation(operation):
             return _Block(
                 BlockReason.AGENT_NOT_PERMITTED,
                 f"{operation.requested_by.value} has no declared permission for "

@@ -6,11 +6,11 @@ using the existing unique event idempotency key rather than introducing unmigrat
 
 import hashlib
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid5
 
-from sqlalchemy import delete, or_, select, text, update
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,8 +31,6 @@ from aether.storage.models import (
     EventRecord,
     InteractionDirection,
     InteractionRecord,
-    KnowledgeEntityRecord,
-    KnowledgeRelationRecord,
     MessageRecord,
     ObjectiveRecord,
     PersonRecord,
@@ -302,7 +300,9 @@ class MuseRepository(PersonRepository):
                     interaction_id=interaction_id,
                     audience=request.audience,
                     channel=channel,
-                    path=data_dir / "outbox" / f"{interaction_id}.md",
+                    path=data_dir
+                    / "outbox"
+                    / f"{now.astimezone(UTC):%Y%m%dT%H%M%SZ}-{interaction_id}.md",
                     content_hash=text_hash(canonical_text),
                     rendered_text_hash=text_hash(rendered),
                     correlation_id=message.correlation_id,
@@ -634,47 +634,4 @@ class MuseRepository(PersonRepository):
             _interaction_event(session, interaction, correlation_id)
             _decision(
                 session, "feedback", feedback_id, correlation_id=correlation_id, evidence=[evidence]
-            )
-
-    async def delete_person(self, person_id: UUID, correlation_id: UUID, now: datetime) -> None:
-        async with self._sessions() as session, session.begin():
-            await _serialize(session, correlation_id, person_id)
-            person = await session.scalar(
-                select(PersonRecord).where(PersonRecord.id == person_id).with_for_update()
-            )
-            if person is None:
-                raise LookupError("Person does not exist")
-            if person.deleted_at is not None:
-                return
-            entities = select(KnowledgeEntityRecord.id).where(
-                KnowledgeEntityRecord.person_id == person_id
-            )
-            await session.execute(
-                delete(KnowledgeRelationRecord).where(
-                    or_(
-                        KnowledgeRelationRecord.source_entity_id.in_(entities),
-                        KnowledgeRelationRecord.target_entity_id.in_(entities),
-                    )
-                )
-            )
-            await session.execute(
-                delete(KnowledgeEntityRecord).where(KnowledgeEntityRecord.person_id == person_id)
-            )
-            await session.execute(
-                delete(UserPreferenceRecord).where(UserPreferenceRecord.person_id == person_id)
-            )
-            person.deleted_at = now
-            person.display_name = "Deleted person"
-            person.relationship = None
-            person.access_level = "deleted"
-            add_event(
-                session,
-                event_type="person.deleted",
-                aggregate_type="person",
-                aggregate_id=person_id,
-                actor="MUSE",
-                payload={},
-                category="personalization",
-                correlation_id=correlation_id,
-                source=_SOURCE,
             )

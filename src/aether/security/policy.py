@@ -41,8 +41,19 @@ ACTION_OPERATION_KINDS: Mapping[str, frozenset[OperationKind]] = MappingProxyTyp
         "security.evaluate": frozenset({_K.HTTP_REQUEST, _K.FILE_READ}),
         "implementation.propose": frozenset({_K.FILE_READ, _K.LLM_CALL}),
         "communication.prepare": frozenset({_K.LLM_CALL}),
+        # Only the narrow outbox delivery tool: see ``outbox_violation``.
+        "communication.deliver": frozenset({_K.FILE_WRITE}),
         "objective.manage": frozenset({_K.LLM_CALL}),
     }
+)
+
+OUTBOX_DELIVERY_ACTION = "communication.deliver"
+# Operation argument that only the outbox delivery tool sets; generic write_file never does.
+OUTBOX_ARGUMENT = "outbox_delivery"
+OUTBOX_DIRNAME = "outbox"
+OUTBOX_MAX_BYTES = 256 * 1024
+OUTBOX_FILENAME = re.compile(
+    r"^\d{8}T\d{6}Z-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.md$"
 )
 
 # Kinds that can never run without both a WARDEN approval and explicit user authorization.
@@ -76,6 +87,27 @@ def default_agent_permissions() -> Mapping[AgentId, frozenset[OperationKind]]:
     return MappingProxyType(
         {definition.agent_id: permitted_kinds(definition) for definition in AGENT_DEFINITIONS}
     )
+
+
+def outbox_writers() -> frozenset[AgentId]:
+    """Agents declared with the narrow outbox delivery action."""
+    return frozenset(
+        definition.agent_id
+        for definition in AGENT_DEFINITIONS
+        if OUTBOX_DELIVERY_ACTION in definition.allowed_actions
+    )
+
+
+def outbox_only_writers() -> frozenset[AgentId]:
+    """Outbox writers whose only source of ``file_write`` is outbox delivery."""
+    scoped = set()
+    for definition in AGENT_DEFINITIONS:
+        if definition.agent_id not in outbox_writers():
+            continue
+        others = [a for a in definition.allowed_actions if a != OUTBOX_DELIVERY_ACTION]
+        if not any(_K.FILE_WRITE in ACTION_OPERATION_KINDS.get(a, frozenset()) for a in others):
+            scoped.add(definition.agent_id)
+    return frozenset(scoped)
 
 
 def url_host(target: str) -> str | None:
@@ -165,6 +197,7 @@ class SecurityPolicy:
         "max_output_bytes",
         "max_redirects",
         "max_response_bytes",
+        "outbox_dir",
         "subprocess_timeout_seconds",
         "user_authorization_required_kinds",
         "workspace_dir",
@@ -183,6 +216,7 @@ class SecurityPolicy:
     max_output_bytes: int
     max_redirects: int
     max_response_bytes: int
+    outbox_dir: Path
     subprocess_timeout_seconds: float
     user_authorization_required_kinds: frozenset[OperationKind]
     workspace_dir: Path
@@ -251,6 +285,7 @@ class SecurityPolicy:
         )
         values: dict[str, Any] = {
             **directories,
+            "outbox_dir": directories["data_dir"] / OUTBOX_DIRNAME,
             "filesystem_roots": tuple(dict.fromkeys(roots)),
             "allowed_executables": frozenset(executables),
             "allowed_hosts": frozenset(normalize_host(host) for host in allowed_hosts if host),
@@ -306,6 +341,16 @@ class SecurityPolicy:
     def permits(self, agent_id: AgentId, kind: OperationKind) -> bool:
         return kind in self.agent_permissions.get(agent_id, frozenset())
 
+    def permits_operation(self, operation: Operation) -> bool:
+        """Kind-level permission, narrowed for agents limited to outbox delivery."""
+        if not self.permits(operation.requested_by, operation.kind):
+            return False
+        return not (
+            operation.kind is OperationKind.FILE_WRITE
+            and OUTBOX_ARGUMENT not in operation.arguments
+            and operation.requested_by in outbox_only_writers()
+        )
+
     def requires_approval(self, kind: OperationKind) -> bool:
         return kind in self.approval_required_kinds
 
@@ -348,8 +393,40 @@ class SecurityPolicy:
                 return True
         return False
 
+    def outbox_violation(self, operation: Operation) -> str | None:
+        """Why ``operation`` is not a valid single-file outbox delivery, else ``None``."""
+        if operation.kind is not OperationKind.FILE_WRITE:
+            return "outbox delivery must be a file write"
+        if operation.requested_by not in outbox_writers():
+            return f"{operation.requested_by.value} may not deliver outbox messages"
+        target = operation.target
+        if "\x00" in target or not Path(target).is_absolute():
+            return "outbox path must be an absolute path"
+        resolved = _resolve_path(target)
+        if resolved is None or resolved.parent != self.outbox_dir:
+            return "outbox delivery must write one file directly in the outbox directory"
+        if Path(target).name != resolved.name or not OUTBOX_FILENAME.match(resolved.name):
+            return "outbox file name must match <timestamp>-<uuid>.md"
+        content = operation.arguments.get("content")
+        if set(operation.arguments) != {"content", OUTBOX_ARGUMENT} or not isinstance(content, str):
+            return "outbox delivery arguments are malformed"
+        if operation.arguments[OUTBOX_ARGUMENT] is not True:
+            return "outbox delivery arguments are malformed"
+        size = len(content.encode("utf-8"))
+        if not 0 < size <= OUTBOX_MAX_BYTES:
+            return "outbox message size is outside the allowed range"
+        return None
+
     def static_violation(self, operation: Operation) -> str | None:
         """First allowlist/confinement violation of ``operation``, or ``None`` if compliant."""
+        if OUTBOX_ARGUMENT in operation.arguments:
+            violation = self.outbox_violation(operation)
+            if violation is not None:
+                return violation
+        elif operation.kind is OperationKind.FILE_WRITE and (
+            operation.requested_by in outbox_only_writers()
+        ):
+            return "agent may only write through outbox delivery"
         if operation.cwd is not None and self.confine_path(operation.cwd) is None:
             return "working directory is outside the allowed filesystem roots"
         hosts = set(operation.hosts)
