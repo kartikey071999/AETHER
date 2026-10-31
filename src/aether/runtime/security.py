@@ -77,10 +77,17 @@ def build_security_services(
     recorder: EventRecorder,
     *,
     security_settings: SecuritySettings | None = None,
+    extra_hosts: Iterable[str] = (),
     http_transport: httpx.AsyncBaseTransport | None = None,
 ) -> SecurityServices:
-    """Build the default-deny policy from settings and the services that enforce it."""
-    policy = load_security_policy(settings, security_settings)
+    """Build the default-deny policy from settings and the services that enforce it.
+
+    ``extra_hosts`` (e.g. configured model providers) join the allowlist before the policy is
+    frozen; nothing can be added afterwards.
+    """
+    base = security_settings or SecuritySettings()
+    merged = list(dict.fromkeys([*base.allowed_hosts, *extra_hosts]))
+    policy = load_security_policy(settings, base.model_copy(update={"allowed_hosts": merged}))
     # Adapters refuse to run in or write to roots that do not exist yet.
     for directory in (policy.workspace_dir, policy.artifact_dir, policy.data_dir):
         directory.mkdir(parents=True, exist_ok=True)

@@ -30,6 +30,7 @@ from aether.observability.recorder import EventRecorder
 from aether.runtime._support import Clock, as_utc, utc_now
 from aether.runtime.leases import RUNTIME_ACTOR, LeaseManager
 from aether.runtime.lifecycle import Lifecycle, LifecycleState
+from aether.runtime.models import ModelServices
 from aether.runtime.recovery import RecoveryReport, recover_runtime_state
 from aether.runtime.resource_monitor import HostResources
 from aether.runtime.scheduler import (
@@ -87,6 +88,7 @@ class Engine:
         logger: logging.Logger | None = None,
         permission_service: PermissionService | None = None,
         security: SecurityServices | None = None,
+        models: ModelServices | None = None,
     ) -> None:
         self._sessions = database_sessions
         self._agents: dict[AgentId, BaseAgent] = {}
@@ -114,9 +116,15 @@ class Engine:
         )
         lease_ttl = timedelta(seconds=self._limits.lease_ttl_seconds)
         self._security = security
+        self._models = models
         self._contexts = (
             security.contexts_for(self._agents, self._context) if security is not None else {}
         )
+        if models is not None:
+            self._contexts = {
+                agent_id: models.context_for(agent_id, self._contexts.get(agent_id, self._context))
+                for agent_id in self._agents
+            }
         self._pool = WorkerPool(
             self._leases,
             self._context,
@@ -161,6 +169,10 @@ class Engine:
     def security(self) -> SecurityServices | None:
         return self._security
 
+    @property
+    def models(self) -> ModelServices | None:
+        return self._models
+
     def agent(self, agent_id: AgentId) -> BaseAgent:
         return self._agents[agent_id]
 
@@ -179,6 +191,10 @@ class Engine:
             if self._security is not None:
                 await self._emit(
                     "runtime.security_initialized", self._security.initialized_payload()
+                )
+            if self._models is not None:
+                await self._emit(
+                    "runtime.models_initialized", await self._models.initialized_payload()
                 )
             for agent in self._agents.values():
                 self._spawn(self._agent_loop(agent), f"agent-loop-{agent.agent_id.value}")
