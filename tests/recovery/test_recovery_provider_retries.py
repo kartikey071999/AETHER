@@ -33,6 +33,7 @@ from aether.models import (
     ProviderSettings,
 )
 from aether.models.facade import ModelCallContext, ModelUnavailable
+from aether.models.governor import ModelGovernor
 from aether.runtime.models import ModelServices
 from aether.storage.models import EventRecord, ProviderUsageRecord, TaskRecord, TaskStatus
 from aether.storage.repositories.provider_usage import ProviderUsageRepository
@@ -96,6 +97,7 @@ def _services(sessions, providers: list[MockProvider], sleeper: _Sleeps) -> Mode
         router=ModelRouter(providers, budgets, sleeper=sleeper),
         usage=usage,
         max_concurrent_llm_requests=2,
+        governor=ModelGovernor(settings, sessions=sessions),
     )
 
 
