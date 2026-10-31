@@ -8,7 +8,7 @@ import groq
 import openai
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from aether.models.base import ProviderError, RemoteProvider
+from aether.models.base import EmptyCompletion, ProviderError, RemoteProvider
 from aether.models.contracts import (
     CompletionRequest,
     CompletionResponse,
@@ -107,15 +107,19 @@ class GroqProvider(RemoteProvider):
         if not self.available():
             return []
         return [
-            ModelInfo(name="openai/gpt-oss-20b", tiers=_LIGHT),
-            ModelInfo(name="openai/gpt-oss-120b", tiers=_REASONING),
-            ModelInfo(name="qwen/qwen3.8-27b", tiers=_REASONING),
+            ModelInfo(name="openai/gpt-oss-20b", tiers=_LIGHT, min_max_tokens=128),
+            ModelInfo(name="openai/gpt-oss-120b", tiers=_REASONING, min_max_tokens=128),
+            ModelInfo(name="qwen/qwen3.8-27b", tiers=_REASONING, min_max_tokens=128),
         ]
 
     async def _complete(self, request: CompletionRequest) -> CompletionResponse:
         if self.client is None:
             raise ProviderError(self.name, code="unavailable")
-        options = {"temperature": request.temperature} if request.temperature is not None else {}
+        options: dict[str, float | str] = (
+            {"temperature": request.temperature} if request.temperature is not None else {}
+        )
+        if request.model is not None and request.model.startswith("openai/gpt-oss-"):
+            options["reasoning_effort"] = "low"
         result = await self.client.chat.completions.create(
             model=request.model,
             messages=[message.model_dump() for message in request.messages],
@@ -172,7 +176,11 @@ class AzureOpenAIProvider(RemoteProvider):
 
     async def list_models(self) -> list[ModelInfo]:
         return (
-            [ModelInfo(name="gpt-6-astra", tiers=frozenset({ModelTier.PREMIUM}))]
+            [
+                ModelInfo(
+                    name="gpt-6-astra", tiers=frozenset({ModelTier.PREMIUM}), min_max_tokens=128
+                )
+            ]
             if self.available()
             else []
         )
@@ -438,20 +446,30 @@ class MockProvider:
             raise ValueError("deterministic work must not call an LLM")
         if not self.available():
             raise ProviderError(self.name, code="unavailable")
+        model = next((model for model in self._models if model.name == request.model), None)
+        if model is not None:
+            try:
+                request = request.with_model_limits(model)
+            except ValueError as error:
+                raise ProviderError(self.name, code=str(error)) from None
         self.requests.append(request)
         outcome = self._responses.popleft() if self._responses else "mock completion"
         if isinstance(outcome, Exception):
             raise outcome
         if isinstance(outcome, CompletionResponse):
-            return outcome
-        return CompletionResponse(
-            text=outcome,
-            provider=self.name,
-            model=request.model or self._models[0].name,
-            input_tokens=min(request.input_token_estimate(), 10),
-            output_tokens=min(request.max_tokens, 5),
-            latency_ms=0,
-        )
+            response = outcome
+        else:
+            response = CompletionResponse(
+                text=outcome,
+                provider=self.name,
+                model=request.model or self._models[0].name,
+                input_tokens=min(request.input_token_estimate(), 10),
+                output_tokens=min(request.max_tokens, 5),
+                latency_ms=0,
+            )
+        if not response.text.strip():
+            raise EmptyCompletion(response)
+        return response
 
     async def health(self) -> ProviderHealth:
         return ProviderHealth(

@@ -1,7 +1,18 @@
 """Approximate USD prices per million tokens; not a provider billing guarantee."""
 
+from collections.abc import Mapping
 from decimal import Decimal
 from types import MappingProxyType
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ModelPrice(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+
+    input_per_mtok: Decimal = Field(ge=0)
+    output_per_mtok: Decimal = Field(ge=0)
+
 
 # Groq model API prices, input/output respectively.
 TOKEN_PRICES = MappingProxyType(
@@ -14,11 +25,20 @@ TOKEN_PRICES = MappingProxyType(
 
 
 def estimate_cost(
-    provider: str, model: str, input_tokens: int, output_tokens: int
+    provider: str,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    prices: Mapping[str, ModelPrice] | None = None,
 ) -> tuple[Decimal, bool]:
-    if provider in {"ollama", "mock"}:
+    override = prices.get(f"{provider}/{model}") if prices is not None else None
+    if override is not None:
+        rates = override.input_per_mtok, override.output_per_mtok
+    elif provider in {"ollama", "mock"}:
         return Decimal(0), False
-    prices = TOKEN_PRICES.get((provider, model))
-    if prices is None:
+    else:
+        rates = TOKEN_PRICES.get((provider, model))
+    if rates is None:
         return Decimal(0), True
-    return (input_tokens * prices[0] + output_tokens * prices[1]) / 1_000_000, False
+    return (input_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000, False

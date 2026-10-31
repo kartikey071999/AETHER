@@ -94,7 +94,10 @@ async def test_astra_explicit_selection_does_not_call_cheaper_providers(guard):
 
 async def test_budget_exceeded_falls_back_without_calling_provider(usage, database):
     settings = ProviderSettings(
-        _env_file=None, max_retries=0, budgets={"ollama": BudgetPolicy(max_requests_per_day=0)}
+        _env_file=None,
+        max_retries=0,
+        budgets={"ollama": BudgetPolicy(max_requests_per_day=0)},
+        prices={"groq/groq-model": {"input_per_mtok": 0, "output_per_mtok": 0}},
     )
     local = provider("ollama", [ModelTier.STANDARD])
     groq = provider("groq", [ModelTier.STANDARD])

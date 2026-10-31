@@ -51,7 +51,14 @@ def permissions(database, tmp_path):
 
 @pytest.fixture
 def settings():
-    return ProviderSettings(_env_file=None, max_retries=0)
+    return ProviderSettings(
+        _env_file=None,
+        max_retries=0,
+        prices={
+            f"{provider}/{provider}-model": {"input_per_mtok": 0, "output_per_mtok": 0}
+            for provider in ("groq", "azure_openai", "azure_anthropic")
+        },
+    )
 
 
 @pytest.fixture
