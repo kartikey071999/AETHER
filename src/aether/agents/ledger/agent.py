@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aether.agents.base import AgentContext, BaseAgent, TaskResult, TaskResultStatus
+from aether.agents.ledger.gating import verification_progress, waiting_verification_tasks
 from aether.agents.ledger.queries import LedgerQueries
 from aether.agents.ledger.records import TestRunStore, existing_id
 from aether.agents.ledger.workflow import (
@@ -72,12 +73,15 @@ from aether.storage.models import (
     ResultOutcome,
     RunStatus,
     TaskRecord,
+    TaskStatus,
     TestRunRecord,
 )
 from aether.storage.repositories import (
     CapabilityRepository,
     ErrorRepository,
+    InvalidTaskTransition,
     RequirementRepository,
+    TaskRepository,
     add_event,
 )
 
@@ -199,13 +203,44 @@ class LedgerAgent(BaseAgent):
             )
 
     async def execute_task(self, task: TaskRecord, ctx: AgentContext) -> TaskResult:
-        """LEDGER's only task is reporting: answer with the operational snapshot."""
+        """Answer the operational snapshot; a verification task first needs a real test run."""
+        progress = await verification_progress(ctx.sessions, task)
+        if progress is not None and not progress.finished and task.requirement_id is not None:
+            return TaskResult(
+                status=TaskResultStatus.WAITING_FOR_APPROVAL,
+                summary="waiting for the independent test run of the implementation",
+                outputs={"awaiting_test_run_for": [str(item) for item in progress.forge_task_ids]},
+            )
         snapshot = await self.queries(ctx).snapshot()
-        return TaskResult(
-            status=TaskResultStatus.COMPLETED,
-            summary="operational records snapshot",
-            outputs={"snapshot": snapshot.model_dump(mode="json")},
-        )
+        outputs: dict[str, Any] = {"snapshot": snapshot.model_dump(mode="json")}
+        summary = "operational records snapshot"
+        if progress is not None and progress.run is not None:
+            outputs["test_run_id"] = str(progress.run.id)
+            outputs["verdict"] = progress.run.verdict
+            summary = f"independent verification finished: {progress.run.verdict}"
+        return TaskResult(status=TaskResultStatus.COMPLETED, summary=summary, outputs=outputs)
+
+    async def tick(self, ctx: AgentContext) -> list[UUID]:
+        """Release verification tasks whose test run has a verdict; returns the resumed ids."""
+        return await self._resume_verification_tasks(ctx)
+
+    async def _resume_verification_tasks(self, ctx: AgentContext) -> list[UUID]:
+        resumed: list[UUID] = []
+        for task in await waiting_verification_tasks(ctx.sessions):
+            progress = await verification_progress(ctx.sessions, task)
+            if progress is None or not progress.finished:
+                continue
+            try:
+                await TaskRepository(ctx.sessions).transition(
+                    task.id,
+                    TaskStatus.READY,
+                    actor=_ACTOR,
+                    details={"test_run_id": str(progress.run.id) if progress.run else None},
+                )
+            except (InvalidTaskTransition, LookupError):
+                continue
+            resumed.append(task.id)
+        return resumed
 
     # -- verification specs ------------------------------------------------------------------
 
@@ -460,6 +495,7 @@ class LedgerAgent(BaseAgent):
         await self._publish_report(spec, run, verdict, reason, ctx)
         if verdict is VerificationVerdict.FAILED:
             await self._publish_blockers(spec, run, ctx)
+        await self._resume_verification_tasks(ctx)
 
     async def _is_latest_for_capability(self, run: TestRunRecord, ctx: AgentContext) -> bool:
         if run.capability_id is None:
