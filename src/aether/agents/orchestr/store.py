@@ -20,6 +20,7 @@ from aether.storage.models import (
     AuthorizationRequestRecord,
     EventRecord,
     ObjectiveRecord,
+    RequirementRecord,
     TaskDependencyRecord,
     TaskRecord,
     TaskStatus,
@@ -246,6 +247,10 @@ class OrchestrStore:
     async def get_task(self, task_id: UUID) -> TaskRecord | None:
         async with self.sessions() as session:
             return await session.get(TaskRecord, task_id)
+
+    async def get_requirement(self, requirement_id: UUID) -> RequirementRecord | None:
+        async with self.sessions() as session:
+            return await session.get(RequirementRecord, requirement_id)
 
     async def task_by_key(self, idempotency_key: str) -> TaskRecord | None:
         async with self.sessions() as session:

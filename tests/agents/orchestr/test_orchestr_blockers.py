@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from orchestr_helpers import Harness
 
+from aether.agents.orchestr.limits import OrchestrLimits
 from aether.communication.contracts import (
     AuthorizationRequestPayload,
     BlockerKind,
@@ -62,6 +63,28 @@ async def test_blocked_task_resumes_when_resolution_completes(harness: Harness) 
     assert await harness.state(resolution.id) is TaskStatus.READY
     await harness.finish(resolution.id)
     assert await harness.state(task.id) in (TaskStatus.PENDING, TaskStatus.READY)
+
+
+async def test_no_resolution_task_is_created_when_replans_are_disabled(harness: Harness) -> None:
+    harness.use_limits(OrchestrLimits(llm_refinement=False, max_replans_per_objective=0))
+    objective_id, task, _ = await _ready_task(harness)
+    before = {item.id for item in await harness.store.tasks_of(objective_id)}
+
+    await harness.send(
+        AgentId.FORGE,
+        _blocker(task, BlockerKind.IMPLEMENTATION, AgentId.FORGE),
+        task_id=task.id,
+    )
+
+    after = await harness.store.tasks_of(objective_id)
+    assert {item.id for item in after} == before
+    assert not [item for item in after if "Resolve" in item.title]
+    assert await harness.state(task.id) is TaskStatus.BLOCKED
+    assert (await harness.get_objective(objective_id)).status == "blocked"
+    escalations = await harness.store.keyed_decisions("orchestr:escalated:")
+    assert len(escalations) == 1
+    assert "replanning is disabled" in escalations[0].rationale
+    assert harness.bus.of_type(MessageType.COMMUNICATION_REQUEST, target=AgentId.MUSE)
 
 
 async def test_blocker_redelivery_creates_one_resolution(harness: Harness) -> None:

@@ -300,6 +300,9 @@ class Engine:
         if status is TaskStatus.WAITING_FOR_APPROVAL:
             # Apply WARDEN decisions recorded while the task was still running.
             self.request_tick(AgentId.WARDEN)
+            if agent_id is AgentId.LEDGER:
+                # The test run it waits for may have finished before the task started waiting.
+                self.request_tick(AgentId.LEDGER)
 
     async def start(self) -> None:
         self._lifecycle.transition(LifecycleState.STARTING)

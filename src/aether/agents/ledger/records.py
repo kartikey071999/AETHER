@@ -1,8 +1,8 @@
-"""LEDGER's durable test-run records: ``test_runs``/``test_results`` plus the audit event.
+"""LEDGER's durable test-run records: opening pending runs and reading evidence back.
 
-No shared repository exists for these tables yet, so LEDGER owns this small store. Every write
-happens in one transaction together with its ``test.run_finished`` event, and finishing a run
-twice is a no-op, so redelivered messages never duplicate evidence.
+Verdicts are written through the shared ``TestRunRepository`` so ``test_runs.verdict``, status,
+counts and the ``test.run_finished`` event commit together. Finishing a run twice is a no-op, so
+redelivered messages never duplicate evidence.
 """
 
 from collections.abc import Sequence
@@ -13,9 +13,8 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from aether.communication.contracts import TestCaseResult, TestCounts
+from aether.communication.contracts import TestCaseResult, TestCounts, VerificationVerdict
 from aether.communication.messages import AgentId
-from aether.observability.recorder import stage_event
 from aether.storage.models import (
     CapabilityRecord,
     ExecutionRunRecord,
@@ -23,6 +22,13 @@ from aether.storage.models import (
     TaskRecord,
     TestResultRecord,
     TestRunRecord,
+    TestVerdict,
+)
+from aether.storage.repositories import (
+    InvalidTestRunTransition,
+    TestResultInput,
+    TestRunCounts,
+    TestRunRepository,
 )
 
 _ACTOR = AgentId.LEDGER.value
@@ -113,62 +119,40 @@ class TestRunStore:
         self,
         run_id: UUID,
         *,
-        status: RunStatus,
+        verdict: VerificationVerdict,
         counts: TestCounts,
         cases: Sequence[TestCaseResult],
         acceptance_results: list[dict[str, Any]],
         execution_run_id: UUID | None,
         report_path: str | None,
-        duration_seconds: float,
         evidence: list[str],
-        task_id: UUID | None,
         correlation_id: UUID | None,
         now: datetime,
     ) -> bool:
-        """Record the verdict once; returns False when the run had already finished."""
-        async with self._sessions() as session, session.begin():
-            statement = select(TestRunRecord).where(TestRunRecord.id == run_id)
-            record = await session.scalar(statement.with_for_update())
-            if record is None:
-                raise LookupError(f"test run {run_id} does not exist")
-            if record.status not in _OPEN:
-                return False
-            linked_run = await existing_id(session, ExecutionRunRecord, execution_run_id)
-            record.status = status.value
-            record.passed = counts.passed
-            record.failed = counts.failed
-            record.errors = counts.errors
-            record.acceptance_results = acceptance_results
-            record.execution_run_id = linked_run or record.execution_run_id
-            record.report_path = report_path[:1024] if report_path else None
-            record.finished_at = now
-            for case in cases:
-                session.add(
-                    TestResultRecord(
-                        test_run_id=run_id,
-                        name=case.name[:500],
-                        outcome=case.outcome.value,
-                        duration_ms=case.duration_ms,
-                        message=case.message,
-                    )
-                )
-            stage_event(
-                session,
-                "test.run_finished",
-                source=_SOURCE,
+        """Record the verdict once through ``TestRunRepository``; False if already finished."""
+        run = await self.get(run_id)
+        if run is None:
+            raise LookupError(f"test run {run_id} does not exist")
+        if run.status not in _OPEN:
+            return False
+        try:
+            await TestRunRepository(self._sessions).finish(
+                run_id,
+                verdict=TestVerdict(verdict.value),
+                acceptance_results=acceptance_results,
+                report_path=report_path,
                 actor=_ACTOR,
-                aggregate_type="test_run",
-                aggregate_id=run_id,
-                payload={
-                    "suite": record.suite,
-                    "passed": counts.passed,
-                    "failed": counts.failed + counts.errors,
-                    "skipped": counts.skipped,
-                    "duration_seconds": max(duration_seconds, 0.0),
-                    "evidence": evidence,
-                },
-                task_id=task_id,
+                now=now,
                 correlation_id=correlation_id,
-                idempotency_key=f"test.run_finished:{run_id}",
+                counts=TestRunCounts(counts.passed, counts.failed, counts.errors),
+                results=[
+                    TestResultInput(case.name, case.outcome, case.duration_ms, case.message)
+                    for case in cases
+                ],
+                execution_run_id=execution_run_id,
+                evidence=evidence,
+                source=_SOURCE,
             )
-            return True
+        except InvalidTestRunTransition:
+            return False
+        return True

@@ -11,6 +11,7 @@ from aether.agents.orchestr.blockers import (
 from aether.agents.orchestr.completion import handle_test_report
 from aether.agents.orchestr.env import Env
 from aether.agents.orchestr.intake import ObjectiveRejected, create_objective
+from aether.agents.orchestr.linking import handle_consolidated, handle_evaluated
 from aether.agents.orchestr.planner import plan_idempotency_key
 from aether.agents.orchestr.planning import plan_objective
 from aether.agents.orchestr.priority import format_boost_reason, format_set_reason
@@ -167,7 +168,9 @@ async def _apply_status(
         for task in tasks:
             state = TaskStatus(task.state)
             if state in _CANCELLABLE:
-                await _move(env, task, TaskStatus.CANCELLED, "objective cancelled")
+                if not await _move(env, task, TaskStatus.CANCELLED, "objective cancelled"):
+                    # A worker moved the task first (e.g. leased it): stop it cooperatively.
+                    await _request_cancel(env, task, payload.reason)
             elif state is TaskStatus.RUNNING:
                 await _request_cancel(env, task, payload.reason)
     elif wanted in (ObjectiveState.PAUSED, ObjectiveState.DEFERRED):
@@ -211,11 +214,12 @@ async def _request_cancel(env: Env, task: TaskRecord, reason: str) -> None:
     )
 
 
-async def _move(env: Env, task: TaskRecord, status: TaskStatus, reason: str) -> None:
+async def _move(env: Env, task: TaskRecord, status: TaskStatus, reason: str) -> bool:
     try:
         await env.store.tasks.transition(task.id, status, actor=ACTOR, details={"reason": reason})
     except InvalidTaskTransition:
-        return
+        return False
+    return True
 
 
 # --- tasks ---------------------------------------------------------------------------------
@@ -391,8 +395,8 @@ _HANDLERS: dict[MessageType, Handler] = {
     MessageType.PROGRESS_UPDATE: _quiet,
     MessageType.COMMUNICATION_DELIVERED: _quiet,
     MessageType.IMPLEMENTATION_PLAN: _observe,
-    MessageType.RESEARCH_CONSOLIDATED: _observe,
-    MessageType.REQUIREMENT_EVALUATED: _observe,
+    MessageType.RESEARCH_CONSOLIDATED: handle_consolidated,
+    MessageType.REQUIREMENT_EVALUATED: handle_evaluated,
     MessageType.CAPABILITY_REGISTER: _observe,
     MessageType.EXECUTION_RESULT: _observe,
 }

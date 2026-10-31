@@ -2,6 +2,29 @@ from uuid import uuid4
 
 import pytest
 
+from aether.agents.rogue.agent import RogueLlmBudget, split_llm_budget
+
+
+@pytest.mark.parametrize(
+    ("limit", "share", "expected"),
+    [
+        (0, 0.5, (0, 0)),
+        (1, 0.5, (1, 0)),
+        (2, 0.5, (1, 1)),
+        (3, 0.5, (1, 2)),
+        (4, 0.5, (2, 2)),
+        (4, 0.75, (1, 3)),
+        (4, 0.0, (1, 1)),
+        (4, 1.0, (1, 3)),
+        (8, 0.25, (2, 2)),
+    ],
+)
+def test_llm_budget_split_reserves_critique_calls(limit, share, expected):
+    assert split_llm_budget(limit, share) == RogueLlmBudget(*expected)
+    generate, critique = split_llm_budget(limit, share)
+    assert generate + critique <= limit
+
+
 from aether.agents.base import AgentContext
 from aether.agents.rogue import RogueAgent
 from aether.agents.rogue.schemas import CritiqueDraft, DivergentDraft

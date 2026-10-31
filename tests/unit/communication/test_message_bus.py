@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from aether.communication.bus import InvalidMessageTransition, MessageBus
 from aether.communication.messages import AgentId, AgentMessage, MessageStatus, MessageType
@@ -97,6 +98,31 @@ async def test_republishing_same_message_id_is_idempotent(sessions) -> None:
     assert await bus.publish(message) is True
     assert await bus.publish(message) is False
 
+    async with sessions() as session:
+        records = (await session.scalars(select(MessageRecord))).all()
+    assert len(records) == 1
+    assert (await events_for(sessions, message.message_id))["message.published"] == 1
+
+
+async def test_publish_losing_a_concurrent_insert_race_reports_not_created(
+    sessions, monkeypatch
+) -> None:
+    """A rival publisher commits the same id between our existence check and our insert."""
+    message = make_message()
+    assert await MessageBus(sessions).publish(message) is True
+    original_get = AsyncSession.get
+    misses = []
+
+    async def stale_get(self, entity, ident, *args, **kwargs):
+        if entity is MessageRecord and not misses:
+            misses.append(ident)
+            return None  # the check ran before the rival's commit became visible
+        return await original_get(self, entity, ident, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "get", stale_get)
+
+    assert await MessageBus(sessions).publish(message) is False
+    assert misses == [message.message_id]
     async with sessions() as session:
         records = (await session.scalars(select(MessageRecord))).all()
     assert len(records) == 1

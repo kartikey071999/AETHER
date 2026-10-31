@@ -82,6 +82,56 @@ async def test_task_lifecycle_records_timestamps_result_and_events(
     assert {event.objective_id for event in events} == {objective_id}
 
 
+async def test_task_requirement_link_is_audited_idempotent_and_not_overwritten(
+    database, events_for, objective_id
+):
+    requirements = RequirementRepository(database.sessions)
+    first = await requirements.create(
+        objective_id=objective_id,
+        title="Read scanned documents",
+        requirement_type="capability",
+        created_by="SCOUT",
+        acceptance_criteria=["extracts text"],
+    )
+    second = await requirements.create(
+        objective_id=objective_id,
+        title="Another",
+        requirement_type="capability",
+        created_by="SCOUT",
+        acceptance_criteria=["x"],
+    )
+    repository = TaskRepository(database.sessions)
+    task_id = await repository.create(objective_id=objective_id, title="Implement")
+
+    assert await repository.set_requirement(task_id, first, actor="ORCHESTR", reason="approved")
+    assert not await repository.set_requirement(task_id, first, actor="ORCHESTR", reason="again")
+    with pytest.raises(ValueError, match="already linked"):
+        await repository.set_requirement(task_id, second, actor="ORCHESTR", reason="other")
+
+    async with database.sessions() as session:
+        task = await session.get(TaskRecord, task_id)
+    assert task.requirement_id == first
+    events = [e for e in await events_for(task_id) if e.event_type == "task.requirement_linked"]
+    assert len(events) == 1
+    assert events[0].actor == "ORCHESTR"
+    assert events[0].payload["requirement_id"] == str(first)
+
+
+async def test_cancelled_and_failed_tasks_get_completed_at(database, objective_id):
+    repository = TaskRepository(database.sessions)
+    cancelled = await repository.create(objective_id=objective_id, title="Cancel me")
+    await repository.transition(cancelled, TaskStatus.CANCELLED, actor="ORCHESTR")
+    failed = await repository.create(objective_id=objective_id, title="Fail me")
+    for status in (TaskStatus.READY, TaskStatus.SCHEDULED, TaskStatus.RUNNING, TaskStatus.FAILED):
+        await repository.transition(failed, status, actor="FORGE")
+    async with database.sessions() as session:
+        assert (await session.get(TaskRecord, cancelled)).completed_at is not None
+        assert (await session.get(TaskRecord, failed)).completed_at is not None
+    await repository.transition(failed, TaskStatus.RETRYING, actor="ORCHESTR")
+    async with database.sessions() as session:
+        assert (await session.get(TaskRecord, failed)).completed_at is None
+
+
 async def test_invalid_task_transition_changes_nothing(database, events_for, objective_id):
     repository = TaskRepository(database.sessions)
     task_id = await repository.create(objective_id=objective_id, title="Skip ahead")

@@ -6,13 +6,17 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aether.observability.events import TaskOutcomePayload
 from aether.runtime._support import Clock, add_event, as_utc, utc_now
 from aether.storage.models import TaskRecord, TaskStatus
-from aether.storage.repositories import ALLOWED_TASK_TRANSITIONS, InvalidTaskTransition
+from aether.storage.repositories import (
+    ALLOWED_TASK_TRANSITIONS,
+    FINISHED_TASK_STATES,
+    InvalidTaskTransition,
+)
 
 RUNTIME_ACTOR = "RUNTIME"
 _SOURCE = "runtime.leases"
@@ -101,6 +105,7 @@ class LeaseManager:
                     attempt=task.attempt + 1,
                     lease_owner=owner,
                     lease_expires_at=expires_at,
+                    started_at=func.coalesce(TaskRecord.started_at, now),
                     updated_at=now,
                 )
                 .execution_options(synchronize_session=False)
@@ -181,6 +186,8 @@ class LeaseManager:
             }
             if refund_attempt:
                 values["attempt"] = TaskRecord.attempt - 1
+            if route[-1] in FINISHED_TASK_STATES:
+                values["completed_at"] = now
             result = await session.execute(
                 update(TaskRecord)
                 .where(
@@ -287,7 +294,13 @@ class LeaseManager:
                     _matches(TaskRecord.lease_owner, seen_owner),
                     _matches(TaskRecord.lease_expires_at, seen_expiry),
                 )
-                .values(state=final.value, lease_owner=None, lease_expires_at=None, updated_at=now)
+                .values(
+                    state=final.value,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    updated_at=now,
+                    **({"completed_at": now} if final in FINISHED_TASK_STATES else {}),
+                )
                 .execution_options(synchronize_session=False)
             )
             if result.rowcount != 1:

@@ -6,7 +6,7 @@ from persisted records, never from in-memory state.
 """
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -56,6 +56,10 @@ def _overlaps(first: Window, second: Window) -> bool:
 
 def _titled(trace: ScenarioTrace, agent: AgentId, prefix: str) -> list[TaskRecord]:
     return [task for task in trace.tasks_for(agent) if task.title.startswith(prefix)]
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 async def test_happy_path_verifies_the_capability_and_reports_it(tmp_path: Path) -> None:
@@ -115,6 +119,24 @@ async def test_happy_path_verifies_the_capability_and_reports_it(tmp_path: Path)
         MessageType.REQUIREMENT_EVALUATED, source=AgentId.SCOUT, target=AgentId.LEDGER
     ), report
     assert requirement.status == "satisfied", report
+
+    # 5b. ORCHESTR linked the requirement to the tasks that build and verify it (no guessing).
+    [verify_task] = _titled(trace, AgentId.LEDGER, "Verify")
+    assert forge_task.requirement_id == requirement.id, report
+    assert verify_task.requirement_id == requirement.id, report
+    assert trace.messages_of(
+        MessageType.REQUIREMENT_EVALUATED, source=AgentId.SCOUT, target=AgentId.ORCHESTR
+    ), report
+
+    # 5c. Task timestamps come from the lease and the final transition, not from events.
+    for task in (forge_task, verify_task):
+        assert task.started_at is not None and task.completed_at is not None, report
+        assert task.started_at <= task.completed_at, report
+        assert task.state == "completed", report
+    # The verification task finished only after LEDGER's real test run had finished.
+    [finished_run] = trace.test_runs
+    assert finished_run.finished_at is not None, report
+    assert _aware(verify_task.completed_at) >= _aware(finished_run.finished_at), report
 
     # 6. WARDEN decided FORGE's operations, bound to the exact input hash.
     approved = {
@@ -194,6 +216,8 @@ async def test_buggy_module_fails_verification_and_is_never_verified(tmp_path: P
     assert trace.messages_of(MessageType.BLOCKER, source=AgentId.LEDGER, target=AgentId.FORGE)
     assert not trace.completed
     assert not trace.decisions("objective_completed"), report
+    # max_replans=0: ORCHESTR escalates rather than planning a resolution task it may not run.
+    assert not [task for task in trace.tasks if "Resolve" in task.title], report
 
 
 async def test_restart_mid_workflow_resumes_without_duplicates(tmp_path: Path) -> None:

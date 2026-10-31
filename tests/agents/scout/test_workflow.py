@@ -717,6 +717,55 @@ async def test_rogue_invalid_critique_uses_curated_fallback(context, objective_i
     assert finding.recommendation == "Signal-processing gate"
 
 
+async def _rogue_work(objective_id, budget: int):
+    from aether.agents.scout.schemas import ResearchWork
+
+    return ResearchWork(
+        request=ResearchRequestPayload(
+            objective_id=objective_id,
+            question="Investigate local voice presence",
+            mode=ResearchMode.UNCONVENTIONAL,
+            budget=ResearchBudget(max_sources=0, max_llm_requests=budget),
+        ),
+        correlation_id=uuid4(),
+        origin_message_id=uuid4(),
+    )
+
+
+DIVERGENT_REPLY = json.dumps({"candidates": [{"name": "An alternative"}]})
+CRITIQUE_REPLY = json.dumps({"ranked_indices": [0], "rationale": "Best fit"})
+
+
+async def test_rogue_generation_cannot_use_up_the_critique_budget(context, objective_id, models):
+    # Regression (T-042): with a shared 3-call budget the second pass spent its third call on
+    # generation, so its critique was always starved and the finding fell back to curated text.
+    facade, provider = models(AgentId.ROGUE, [DIVERGENT_REPLY, CRITIQUE_REPLY] * 3)
+    ctx = replace(context, models=facade)
+    agent = RogueAgent(ResearchLimits(max_llm_requests=3))
+    work = await _rogue_work(objective_id, 3)
+
+    first = await agent.summarize(work, [], ctx)
+    second = await agent.summarize(work, [], ctx)
+
+    assert first.recommendation == "An alternative" and first.summary == "Best fit"
+    # The generation pool is spent, so the second pass does not burn a call it cannot critique.
+    assert len(provider.requests) == 2
+    assert second.classification is FindingClassification.UNTESTED
+
+
+async def test_rogue_llm_budget_split_is_configurable(context, objective_id, models):
+    facade, provider = models(AgentId.ROGUE, [DIVERGENT_REPLY, CRITIQUE_REPLY] * 4)
+    ctx = replace(context, models=facade)
+    agent = RogueAgent(ResearchLimits(max_llm_requests=4, llm_critique_share=0.25))
+    work = await _rogue_work(objective_id, 4)
+
+    await agent.summarize(work, [], ctx)
+    await agent.summarize(work, [], ctx)
+
+    # A quarter of four calls is one critique, which also caps generation at one.
+    assert len(provider.requests) == 2
+
+
 async def test_assignment_uses_worker_and_preserves_existing_message_correlation(
     context, objective_id
 ):
@@ -834,11 +883,13 @@ async def test_adopted_requirement_uses_objective_criteria_and_is_approved_for_l
         for item in await records(context, MessageRecord)
         if item.message_type == MessageType.REQUIREMENT_EVALUATED.value
     ]
-    assert len(evaluated) == 1
-    assert evaluated[0].source_agent == "SCOUT" and evaluated[0].target_agent == "LEDGER"
-    assert evaluated[0].payload["outcome"] == "approved"
-    assert evaluated[0].payload["requirement_id"] == str(requirement.id)
-    assert evaluated[0].payload["acceptance_criteria"] == criteria
+    assert len(evaluated) == 2
+    assert {item.target_agent for item in evaluated} == {"LEDGER", "ORCHESTR"}
+    assert all(item.source_agent == "SCOUT" for item in evaluated)
+    for item in evaluated:
+        assert item.payload["outcome"] == "approved"
+        assert item.payload["requirement_id"] == str(requirement.id)
+        assert item.payload["acceptance_criteria"] == criteria
 
 
 async def test_second_adoption_for_the_same_objective_is_rejected_with_rationale(

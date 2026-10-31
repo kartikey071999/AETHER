@@ -27,7 +27,7 @@ from aether.models.contracts import CompletionRequest
 from aether.runtime.leases import LeaseManager
 from aether.security import ApprovalService, DecisionOutcome
 from aether.storage.database import Database
-from aether.storage.models import MessageRecord, TaskRecord, TaskStatus
+from aether.storage.models import MessageRecord, RequirementStatus, TaskRecord, TaskStatus
 from aether.storage.repositories import (
     ObjectiveRepository,
     RequirementRepository,
@@ -80,6 +80,7 @@ class ForgeEnv:
         description: str = "",
         criteria: Sequence[str] | None = CRITERIA,
         with_requirement: bool = True,
+        requirement_status: RequirementStatus = RequirementStatus.APPROVED,
         requirement_description: str = "",
         assigned_agent: str | None = "FORGE",
         running: bool = True,
@@ -90,7 +91,8 @@ class ForgeEnv:
         objective_id = await ObjectiveRepository(sessions).create(title="Build a feature")
         requirement_id: UUID | None = None
         if with_requirement:
-            requirement_id = await RequirementRepository(sessions).create(
+            requirements = RequirementRepository(sessions)
+            requirement_id = await requirements.create(
                 objective_id=objective_id,
                 title="Greeting module",
                 requirement_type="capability",
@@ -98,6 +100,8 @@ class ForgeEnv:
                 description=requirement_description,
                 acceptance_criteria=list(criteria or []),
             )
+            if requirement_status is not RequirementStatus.PROPOSED:
+                await requirements.set_status(requirement_id, requirement_status, actor="LEDGER")
         task_id = await TaskRepository(sessions).create(
             objective_id=objective_id,
             title="Implement the greeting module",
