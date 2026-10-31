@@ -9,16 +9,19 @@ from pathlib import Path
 from aether.agents.base import BaseAgent
 from aether.agents.factory import build_agents
 from aether.config import AetherSettings
+from aether.models import ModelProvider, ProviderSettings
 from aether.observability.logging import configure_logging
 from aether.observability.recorder import EventRecorder
 from aether.observability.retention import RetentionResult, apply_retention
 from aether.observability.spool import EventSpool, ReplayResult
 from aether.runtime.engine import Engine, EngineLimits
+from aether.runtime.models import ModelServices, allowlist_hosts, build_model_services
 from aether.runtime.resource_monitor import ResourceMonitor
 from aether.runtime.scheduler import Scheduler, SchedulerPolicy
 from aether.runtime.security import SecurityServices, build_security_services
 from aether.security.policy import SecuritySettings
 from aether.storage.database import Database
+from aether.storage.repositories.provider_usage import ProviderUsageRepository
 
 _LOGGER = logging.getLogger("aether.error.runtime")
 
@@ -36,6 +39,7 @@ class Runtime:
     recorder: EventRecorder
     engine: Engine
     security: SecurityServices
+    models: ModelServices | None = None
     spool_replay: ReplayResult | None = None
     retention: RetentionResult | None = None
     started: bool = field(default=False)
@@ -70,8 +74,8 @@ class Runtime:
 
     async def run(self, *, once: bool = False, duration: float | None = None) -> None:
         """Run until stopped by signal or `duration`; `once` performs a single scheduler tick."""
-        await self.start()
         try:
+            await self.start()
             if once:
                 await self.engine.schedule_once()
                 return
@@ -84,10 +88,18 @@ class Runtime:
                 if timer is not None:
                     timer.cancel()
         finally:
-            await self.engine.stop()
+            try:
+                await self.engine.stop()
+            finally:
+                if self.models is not None:
+                    await self.models.aclose()
 
     async def close(self) -> None:
-        await self.database.close()
+        try:
+            if self.models is not None:
+                await self.models.aclose()
+        finally:
+            await self.database.close()
 
 
 def build_runtime(
@@ -95,14 +107,33 @@ def build_runtime(
     agents: Sequence[BaseAgent] | None = None,
     *,
     security_settings: SecuritySettings | None = None,
+    provider_settings: ProviderSettings | None = None,
+    model_providers: Sequence[ModelProvider] | None = None,
 ) -> Runtime:
-    """Construct the runtime; nothing touches the database until `Runtime.start`."""
+    """Construct the runtime; nothing touches the database until `Runtime.start`.
+
+    ``model_providers`` replaces the providers built from ``provider_settings`` (used by tests).
+    """
     settings.data_dir.mkdir(parents=True, exist_ok=True)
+    provider_settings = provider_settings or ProviderSettings()
     database = Database.from_settings(settings)
     recorder = EventRecorder(EventSpool(spool_path(settings)))
-    # The only security services of the process; agents receive them through their contexts.
+    # The only security services of the process; provider hosts join the allowlist before the
+    # policy is frozen, and agents receive the services through their contexts.
     security = build_security_services(
-        settings, database.sessions, recorder, security_settings=security_settings
+        settings,
+        database.sessions,
+        recorder,
+        security_settings=security_settings,
+        extra_hosts=allowlist_hosts(provider_settings),
+    )
+    models = build_model_services(
+        provider_settings,
+        settings,
+        security.permissions,
+        ProviderUsageRepository(database.sessions),
+        recorder,
+        providers=model_providers,
     )
     limits = EngineLimits.from_settings(settings)
     scheduler = Scheduler(
@@ -120,6 +151,7 @@ def build_runtime(
         ResourceMonitor(),
         limits,
         security=security,
+        models=models,
     )
     return Runtime(
         settings=settings,
@@ -127,4 +159,5 @@ def build_runtime(
         recorder=recorder,
         engine=engine,
         security=security,
+        models=models,
     )

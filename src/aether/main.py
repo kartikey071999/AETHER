@@ -6,8 +6,10 @@ import argparse
 import asyncio
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
@@ -19,6 +21,9 @@ from aether.config import load_settings
 from aether.storage import bootstrap
 from aether.storage.database import Database
 from aether.storage.models import EventRecord
+
+if TYPE_CHECKING:
+    from aether.runtime.models import ModelServices, ProviderStatus
 
 
 def _positive_int(value: str) -> int:
@@ -68,6 +73,20 @@ def build_parser() -> argparse.ArgumentParser:
     security_commands = security.add_subparsers(dest="security_command", required=True)
     security_commands.add_parser(
         "show", help="print the effective, redacted security policy and its fingerprint"
+    )
+    models = commands.add_parser("models", help="inspect and exercise the model router")
+    models_commands = models.add_subparsers(dest="models_command", required=True)
+    models_commands.add_parser(
+        "status", help="show configured providers, their models, and today's usage vs budget"
+    )
+    model_test = models_commands.add_parser(
+        "test", help="send one tiny completion through the router (respects budgets)"
+    )
+    model_test.add_argument(
+        "--tier",
+        choices=("light", "standard", "reasoning", "premium"),
+        default="light",
+        help="model tier to request (default: light)",
     )
     database = commands.add_parser("db", help="manage the PostgreSQL schema")
     database_commands = database.add_subparsers(dest="database_command", required=True)
@@ -183,6 +202,117 @@ def _security_show_command() -> int:
     return 0
 
 
+@asynccontextmanager
+async def _model_services() -> AsyncIterator[ModelServices]:
+    from aether.models import ProviderSettings
+    from aether.observability.recorder import EventRecorder
+    from aether.runtime.models import allowlist_hosts, build_model_services
+    from aether.runtime.security import build_security_services
+    from aether.storage.repositories.provider_usage import ProviderUsageRepository
+
+    settings = load_settings()
+    provider_settings = ProviderSettings()
+    database = Database.from_settings(settings)
+    recorder = EventRecorder()
+    try:
+        security = build_security_services(
+            settings,
+            database.sessions,
+            recorder,
+            extra_hosts=allowlist_hosts(provider_settings),
+        )
+        services = build_model_services(
+            provider_settings,
+            settings,
+            security.permissions,
+            ProviderUsageRepository(database.sessions),
+            recorder,
+        )
+        try:
+            yield services
+        finally:
+            await services.aclose()
+    finally:
+        await database.close()
+
+
+def _limit(value: object, *, money: bool = False) -> str:
+    if value is None:
+        return "unlimited"
+    return f"${float(value):.2f}" if money else str(value)
+
+
+def _format_provider(status: ProviderStatus) -> list[str]:
+    models = ", ".join(status.models) or "-"
+    lines = [
+        (
+            f"{status.name}: configured={'yes' if status.configured else 'no'} "
+            f"available={'yes' if status.available else 'no'} models={models}"
+        )
+    ]
+    if status.usage is not None:
+        usage = status.usage
+        lines.append(
+            f"  today: requests {usage.requests}/{_limit(usage.max_requests)}, "
+            f"tokens {usage.tokens}/{_limit(usage.max_tokens)}, "
+            f"cost ${float(usage.cost_usd):.6f}/{_limit(usage.max_cost_usd, money=True)}"
+        )
+    return lines
+
+
+async def _models_status() -> int:
+    async with _model_services() as services:
+        try:
+            statuses = await services.status()
+        except Exception as error:  # noqa: BLE001 - report any failure without a traceback
+            print(f"Reading provider usage failed: {type(error).__name__}", file=sys.stderr)
+            statuses = await services.describe()
+            failed = 1
+        else:
+            failed = 0
+        if services.settings.mock:
+            print("Mock providers only (AETHER_PROVIDER_MOCK is set).")
+        for status in statuses:
+            for line in _format_provider(status):
+                print(line)
+        return failed
+
+
+async def _models_test(tier: str) -> int:
+    from aether.communication.messages import AgentId
+    from aether.models import CompletionRequest, ModelTier, NoModelAvailable
+
+    request = CompletionRequest(
+        messages=[{"role": "user", "content": "Reply with the single word: ok"}],
+        max_tokens=16,
+        tier=ModelTier(tier),
+        agent=AgentId.ORCHESTR,
+    )
+    async with _model_services() as services:
+        try:
+            response = await services.router.complete(request)
+        except NoModelAvailable as error:
+            print(
+                f"No model available for tier {tier}: {'; '.join(error.reasons)}", file=sys.stderr
+            )
+            return 1
+    print(f"Provider: {response.provider}")
+    print(f"Model: {response.model}")
+    print(f"Tokens: {response.input_tokens} in, {response.output_tokens} out")
+    print(f"Cost: ${response.cost_usd:.6f}")
+    return 0
+
+
+def _models_command(command: str, tier: str) -> int:
+    try:
+        if command == "status":
+            return asyncio.run(_models_status())
+        return asyncio.run(_models_test(tier))
+    except Exception as error:  # noqa: BLE001 - report any failure without a traceback
+        print(f"Models {command} failed: {type(error).__name__}", file=sys.stderr)
+        return 1
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = build_parser()
     arguments = parser.parse_args(argv)
@@ -215,6 +345,12 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if arguments.command == "security" and arguments.security_command == "show":
         status = _security_show_command()
+        if status:
+            raise SystemExit(status)
+        return
+
+    if arguments.command == "models":
+        status = _models_command(arguments.models_command, getattr(arguments, "tier", "light"))
         if status:
             raise SystemExit(status)
         return

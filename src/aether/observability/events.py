@@ -659,3 +659,19 @@ class RuntimeSecurityInitializedPayload(EventPayload):
 
 EVENT_TYPES["runtime.security_initialized"] = RuntimeSecurityInitializedPayload
 EVENT_CATEGORIES["runtime.security_initialized"] = EventCategory.RUNTIME
+
+
+# --- model router wiring (T-024) ---
+
+
+class RuntimeModelsInitializedPayload(EventPayload):
+    """Non-secret summary of the model router built at startup: names, availability, counts."""
+
+    mock: bool = False
+    providers: list[dict[str, Any]] = Field(default_factory=list)
+    model_count: int = Field(ge=0)
+    max_concurrent_llm_requests: int = Field(ge=1)
+
+
+EVENT_TYPES["runtime.models_initialized"] = RuntimeModelsInitializedPayload
+EVENT_CATEGORIES["runtime.models_initialized"] = EventCategory.RUNTIME
