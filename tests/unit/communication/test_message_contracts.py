@@ -190,7 +190,7 @@ SAMPLES: dict[MessageType, tuple[AgentId, AgentId, dict]] = {
         },
     ),
     MessageType.REQUIREMENT_SUBMIT: (
-        AgentId.ROGUE,
+        AgentId.SCOUT,
         AgentId.SCOUT,
         {
             "objective_id": str(OBJECTIVE),
@@ -759,3 +759,27 @@ def test_receivable_and_sendable_types_follow_the_tables() -> None:
         for message_type in sendable_types(agent_id):
             assert agent_id in SENDERS[message_type]
     assert MessageType.SECURITY_DECISION in sendable_types(AgentId.WARDEN)
+
+
+def test_rogue_may_not_submit_requirements() -> None:
+    from uuid import uuid4
+
+    import pytest
+
+    from aether.communication.contracts import (
+        RequirementSubmitPayload,
+        RequirementType,
+        RouteViolation,
+        build_message,
+    )
+    from aether.communication.messages import AgentId
+
+    payload = RequirementSubmitPayload(
+        objective_id=uuid4(),
+        title="Candidate dependency",
+        requirement_type=RequirementType.DEPENDENCY,
+    )
+    with pytest.raises(RouteViolation):
+        build_message(AgentId.ROGUE, AgentId.LEDGER, payload)
+    # SCOUT owns requirement creation from research.
+    assert build_message(AgentId.SCOUT, AgentId.LEDGER, payload).source_agent is AgentId.SCOUT
