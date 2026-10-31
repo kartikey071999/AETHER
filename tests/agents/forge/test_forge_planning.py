@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import replace
@@ -15,6 +16,7 @@ from aether.agents.forge.planning import (
     extract_spec,
     relative_path,
 )
+from aether.agents.forge.resolve import resolve_plan
 from aether.agents.forge.schemas import FailureClass, ForgeConfig, ForgeSpec, PlanDefect
 from aether.agents.forge.templates import (
     TEXT_STATISTICS_MODULE,
@@ -279,6 +281,24 @@ async def test_failed_refinement_falls_back_to_the_template_not_a_blocker(
     paths = [step["arguments"].get("path", "") for step in plan.payload["steps"]]
     assert any(path.endswith(TEXT_STATISTICS_MODULE_FILE) for path in paths)
     assert not await env.messages(MessageType.BLOCKER)
+
+
+async def test_concurrent_resolutions_share_one_refined_plan(
+    make_env: Callable[..., ForgeEnv],
+) -> None:
+    # The assignment handler and the task run resolve the same task concurrently; the later
+    # resolution must reuse the drafted plan rather than save the template as a competing plan.
+    env = make_env(ForgeConfig(llm_refine_templates=True))
+    task = await _text_statistics_task(env)
+    env.llm_replies.append(json.dumps(LLM_PLAN))
+
+    results = await asyncio.gather(*(resolve_plan(env.ctx, task, env.config) for _ in range(3)))
+
+    plans = [plan for plan, refusal in results if plan is not None and refusal is None]
+    assert len(plans) == 3
+    assert len({plan.plan_id for plan in plans}) == 1
+    assert len(env.llm_requests) == 1
+    assert len(await env.messages(MessageType.IMPLEMENTATION_PLAN)) == 1
 
 
 async def test_capability_templates_can_be_disabled(make_env: Callable[..., ForgeEnv]) -> None:

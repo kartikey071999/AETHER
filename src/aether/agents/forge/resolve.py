@@ -1,9 +1,11 @@
 """Finding the plan for a task: a stored one, a deterministic template, or a validated LLM draft."""
 
+import asyncio
 import re
 from collections.abc import Sequence
 from dataclasses import replace
 from uuid import UUID
+from weakref import WeakValueDictionary
 
 from sqlalchemy import select
 
@@ -17,6 +19,16 @@ from aether.storage.models import RequirementRecord, RequirementStatus, TaskReco
 _ACTIONABLE = (RequirementStatus.APPROVED.value, RequirementStatus.IN_PROGRESS.value)
 _CRITERIA_HEADER = re.compile(r"^\s*acceptance criteria:\s*$", re.IGNORECASE)
 _BULLET = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
+# The assignment handler and the task run may resolve the same task at once; one resolver per
+# task keeps them from saving two different plans (e.g. an LLM draft and the template).
+_PLAN_LOCKS: WeakValueDictionary[UUID, asyncio.Lock] = WeakValueDictionary()
+
+
+def _plan_lock(task_id: UUID) -> asyncio.Lock:
+    lock = _PLAN_LOCKS.get(task_id)
+    if lock is None:
+        lock = _PLAN_LOCKS[task_id] = asyncio.Lock()
+    return lock
 
 
 async def load_requirement(ctx: AgentContext, task: TaskRecord) -> RequirementRecord | None:
@@ -83,6 +95,16 @@ async def resolve_plan(
     stored = await latest_plan(ctx, task.id)
     if stored is not None:
         return stored, None
+    async with _plan_lock(task.id):
+        stored = await latest_plan(ctx, task.id)
+        if stored is not None:
+            return stored, None
+        return await _build_plan(ctx, task, config, criteria_hint)
+
+
+async def _build_plan(
+    ctx: AgentContext, task: TaskRecord, config: ForgeConfig, criteria_hint: Sequence[str]
+) -> tuple[ForgePlan | None, Refusal | None]:
     requirement = await load_requirement(ctx, task)
     requirement_id = requirement.id if requirement is not None else task.requirement_id
     # The structured requirement is authoritative; the assignment hint and the task text are
