@@ -7,6 +7,7 @@ always wins over a concurrent request.
 """
 
 import asyncio
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -53,6 +54,8 @@ class _Disposition:
 class _Running:
     agent: BaseAgent
     lease: Lease
+    started_at: datetime
+    started_monotonic: float
     task: asyncio.Task[None] | None = None
     cancel_reason: str | None = None
     control_action: ControlAction | None = None
@@ -150,7 +153,12 @@ class WorkerPool:
                     refund_attempt=True,
                 )
                 return False
-            running = _Running(agent=agent, lease=lease)
+            running = _Running(
+                agent=agent,
+                lease=lease,
+                started_at=self._context.clock(),
+                started_monotonic=time.monotonic(),
+            )
             self._running[task_id] = running
             running.task = asyncio.create_task(
                 self._run(task_id, running), name=f"aether-task-{task_id}"
@@ -339,6 +347,26 @@ class WorkerPool:
                 disposition = _control_disposition(lease, action)
             if requests:
                 stage = _resolver(task_id, requests, disposition.status)
+        control_stage = stage
+        usage = {"duration_seconds": round(time.monotonic() - running.started_monotonic, 3)}
+
+        async def stage_usage(
+            session: AsyncSession, objective_id: UUID | None, now: datetime
+        ) -> None:
+            task = await session.get(TaskRecord, task_id, populate_existing=True)
+            if task is None:
+                raise LookupError(f"Task {task_id} disappeared during release")
+            task.started_at = running.started_at
+            if disposition.status in (
+                TaskStatus.COMPLETED,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+            ):
+                task.completed_at = now
+            task.result = {**(task.result or {}), "resource_usage": usage}
+            if control_stage is not None:
+                await control_stage(session, objective_id, now)
+
         try:
             released = await asyncio.shield(
                 self._leases.release(
@@ -348,7 +376,7 @@ class WorkerPool:
                     details=disposition.details,
                     outcome_event=disposition.event,
                     refund_attempt=disposition.refund_attempt,
-                    stage=stage,
+                    stage=stage_usage,
                 )
             )
         except Exception:

@@ -1,6 +1,7 @@
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import psutil
 import pytest
@@ -55,6 +56,8 @@ async def test_approved_subprocess_runs_and_is_recorded(
     assert run.exit_code == 0
     assert run.agent == "FORGE"
     assert run.security_decision_id is not None
+    assert run.resource_usage["duration_seconds"] == round(result.duration_seconds, 3)
+    assert run.resource_usage["peak_rss_bytes"] == result.peak_rss_bytes
     assert len(await events_of("execution.started")) == 1
     finished = await events_of("execution.finished")
     assert finished[0].payload["success"] is True
@@ -131,6 +134,8 @@ async def test_timeout_kills_the_whole_process_tree(registry, approve, roots, da
     assert run is not None
     assert run.status == RunStatus.FAILED
     assert run.resource_usage["timed_out"] is True
+    assert run.resource_usage["duration_seconds"] >= 5
+    assert run.resource_usage["peak_rss_bytes"] > 0
 
 
 async def test_child_environment_is_scrubbed(registry, approve, monkeypatch) -> None:
@@ -188,3 +193,66 @@ def test_subprocess_operation_shape(registry, policy) -> None:
     assert operation.target == sys.executable
     assert operation.arguments["timeout_seconds"] == policy.subprocess_timeout_seconds
     assert Path(operation.cwd or "") == policy.workspace_dir
+
+
+async def test_sampled_process_tree_rss_is_persisted(registry, approve, database):
+    script = "import time; allocation = bytearray(16 * 1024**2); time.sleep(0.3)"
+    result = await _approved_run(registry, approve, {"argv": [sys.executable, "-c", script]})
+    assert result.succeeded and result.peak_rss_bytes >= 16 * 1024**2
+    async with database.sessions() as session:
+        run = await session.get(ExecutionRunRecord, result.run_id)
+    assert run.resource_usage["peak_rss_bytes"] == result.peak_rss_bytes
+    assert run.resource_usage["rss_sample_seconds"] == 0.1
+
+
+def test_rss_sampling_is_bounded_and_includes_descendants(monkeypatch):
+    from aether.tools.adapters import subprocess as adapter
+
+    now = [100.0]
+    calls = []
+    child = SimpleNamespace(memory_info=lambda: SimpleNamespace(rss=200))
+    parent = SimpleNamespace(
+        children=lambda recursive: [child], memory_info=lambda: SimpleNamespace(rss=300)
+    )
+    monkeypatch.setattr(adapter, "time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    def process(pid):
+        calls.append(pid)
+        return parent
+
+    monkeypatch.setattr(adapter.psutil, "Process", process)
+    usage = adapter._ProcessUsage()
+    usage.sample(123)
+    usage.sample(123)
+    now[0] += 0.05
+    usage.sample(123)
+    assert calls == [123] and usage.peak_rss_bytes == 500
+    now[0] += 0.1
+    usage.sample(123)
+    assert calls == [123, 123]
+
+
+def test_denied_rss_is_unknown_and_logged_once(monkeypatch, caplog):
+    from aether.tools.adapters import subprocess as adapter
+
+    def denied(pid):
+        raise psutil.AccessDenied(pid)
+
+    monkeypatch.setattr(adapter.psutil, "Process", denied)
+    usage = adapter._ProcessUsage()
+    usage.sample(123)
+    usage.sample(123)
+    assert usage.peak_rss_bytes is None and usage.unavailable
+    assert caplog.text.count("RSS measurement unavailable") == 1
+
+
+def test_short_lived_process_rss_remains_unknown(monkeypatch):
+    from aether.tools.adapters import subprocess as adapter
+
+    def gone(pid):
+        raise psutil.NoSuchProcess(pid)
+
+    monkeypatch.setattr(adapter.psutil, "Process", gone)
+    usage = adapter._ProcessUsage()
+    usage.sample(123)
+    assert usage.peak_rss_bytes is None
