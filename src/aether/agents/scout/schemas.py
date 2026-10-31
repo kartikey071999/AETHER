@@ -17,11 +17,21 @@ class ResearchModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
 
+SourceKind = Literal["http", "file", "web", "pypi", "github", "github_search", "docs"]
+# Source kinds served by the read-only web research tools (``web_fetch`` operations).
+WEB_SOURCE_KINDS = frozenset({"web", "pypi", "github", "github_search", "docs"})
+
+
 class SourceSpec(ResearchModel):
-    kind: Literal["http", "file"]
+    """One research source. ``location`` is a URL (http, web, docs base URL), a confined path
+    (file), a package name (pypi), ``owner/repo`` (github) or search terms (github_search);
+    ``query`` holds the search terms for ``docs`` sources."""
+
+    kind: SourceKind
     location: Text
     purpose: str = "Collect evidence"
     perspective: Literal["conventional", "unconventional", "both"] = "both"
+    query: str | None = Field(default=None, max_length=200)
 
 
 @runtime_checkable
@@ -56,6 +66,12 @@ class ResearchLimits(ResearchModel):
     max_follow_ups: int = Field(default=1, ge=0, le=4)
     top_k: int = Field(default=3, ge=1, le=8)
     default_sources: tuple[SourceSpec, ...] = ()
+    # Opt-in: when a request names no sources and no default_sources are configured, derive
+    # documentation and GitHub searches from the question (network access via web_fetch only).
+    web_research: bool = False
+    docs_base_url: str = Field(default="https://docs.python.org/3/", min_length=8, max_length=512)
+    # GitHub repositories from a github_search result followed up with github.repo.
+    web_follow_ups: int = Field(default=1, ge=0, le=4)
 
     @property
     def review_interval(self) -> timedelta:
