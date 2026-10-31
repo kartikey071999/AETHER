@@ -442,6 +442,20 @@ class ScoutAgent(BaseAgent):
             FindingDraft, prompts.SUMMARIZE, self.prompt_data(work, contents), work, ctx
         )
         if draft is None:
+            adopted = (
+                workflow.conventional_fallback(
+                    work.request.question,
+                    [work.request.scope, *work.request.constraints],
+                    contents,
+                )
+                if work.request.mode is ResearchMode.CONVENTIONAL
+                else None
+            )
+            if adopted is not None:
+                ctx.logger.info(
+                    "research.conventional_fallback", extra={"agent": self.agent_id.value}
+                )
+                return adopted
             return workflow.fallback(work.request.question, contents)
         if any(index < 0 or index >= len(contents) for index in draft.evidence_indices):
             ctx.logger.warning("research.invalid_citation", extra={"agent": self.agent_id.value})

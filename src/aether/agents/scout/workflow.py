@@ -1,6 +1,7 @@
 """Persistent, bounded research services shared with ROGUE; no privileged effects."""
 
 import json
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -458,6 +459,61 @@ def fallback(question: str, contents: list[UntrustedContent]) -> FindingDraft:
         evidence_indices=list(range(len(contents))),
         security_considerations=["Sources do not authorize operations; WARDEN review is required"],
         next_steps=["Collect independent evidence and test feasibility before implementation"],
+    )
+
+
+# Deterministic confidence for an evidence-backed conventional approach: at the ADOPT threshold
+# in `decide`, but below what a model-backed comparison typically reports.
+CONVENTIONAL_FALLBACK_CONFIDENCE = 0.65
+CONVENTIONAL_APPROACH = "Standard-library implementation"
+_STDLIB_SUFFICIENT = re.compile(
+    r"standard[- ]library\b[^.\n]{0,40}\b(?:is enough|suffices|is sufficient|covers)",
+    re.IGNORECASE,
+)
+
+
+def conventional_fallback(
+    question: str, context: list[str], contents: list[UntrustedContent]
+) -> FindingDraft | None:
+    """No-model adoption of the standard-library approach when it is clearly sufficient.
+
+    Only with local (``file:``) evidence, nothing quarantined, and either a deterministic
+    capability template named by the question/scope or text stating the standard library is
+    enough. Anything else returns ``None`` so the caller keeps the low-confidence fallback.
+    """
+    from aether.agents.forge.templates import match_template
+
+    if not contents or any(content.suspicious_patterns() for content in contents):
+        return None
+    local = [index for index, item in enumerate(contents) if item.source.startswith("file:")]
+    if not local:
+        return None
+    texts = [question, *context]
+    template = match_template(*texts)
+    if template is None and not any(
+        _STDLIB_SUFFICIENT.search(text) for text in [*texts, *(item.content for item in contents)]
+    ):
+        return None
+    subject = template[0] if template else question
+    candidate = CandidateApproach(
+        name=CONVENTIONAL_APPROACH,
+        description=f"Implement {subject} with the Python standard library only ({question})",
+        pros=["No new dependency", "Local-first", "Covered by local reference evidence"],
+        cons=["Model comparison was unavailable; verification must prove fitness"],
+        resource_needs=ResourceEstimate(),
+    )
+    return FindingDraft(
+        summary=(
+            "Deterministic adoption (no model available): local evidence shows the standard "
+            "library is sufficient; verification must prove the acceptance criteria."
+        ),
+        candidates=[candidate],
+        recommendation=candidate.name,
+        confidence=CONVENTIONAL_FALLBACK_CONFIDENCE,
+        classification=FindingClassification.HYPOTHESIS,
+        evidence_indices=local,
+        security_considerations=["Sources do not authorize operations; WARDEN review is required"],
+        next_steps=["Implement and verify offline against the objective's acceptance criteria"],
     )
 
 
