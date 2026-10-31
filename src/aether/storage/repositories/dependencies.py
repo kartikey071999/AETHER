@@ -2,11 +2,14 @@
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aether.storage.models import EventCategory, TaskDependencyRecord, TaskRecord
 from aether.storage.repositories._events import add_event
+
+# Constant advisory-lock key for task dependency graph writes (PostgreSQL bigint range).
+_GRAPH_LOCK_KEY = int.from_bytes(b"aetherDG", "big") % (2**63 - 1)
 
 
 class DependencyCycleError(ValueError):
@@ -30,6 +33,8 @@ class TaskDependencyRepository:
             raise DependencyCycleError("A task cannot depend on itself")
         async with self._sessions() as session, session.begin():
             ids = (task_id, depends_on_task_id)
+            # Cycle checks read the whole graph, so writers must be serialized before reading.
+            await _serialize_graph_writes(session, ids)
             statement = select(TaskRecord).where(TaskRecord.id.in_(ids)).with_for_update()
             tasks = {task.id: task for task in await session.scalars(statement)}
             missing = [str(item) for item in ids if item not in tasks]
@@ -96,6 +101,25 @@ class TaskDependencyRepository:
         statement = select(column).where(TaskDependencyRecord.depends_on_task_id == task_id)
         async with self._sessions() as session:
             return list(await session.scalars(statement))
+
+
+async def _serialize_graph_writes(session: AsyncSession, ids: tuple[UUID, UUID]) -> None:
+    """Hold the dependency-graph write lock until the surrounding transaction ends.
+
+    Locking the two endpoint rows is not enough: edges closing a longer cycle can be added
+    concurrently over disjoint rows, each seeing an acyclic graph.
+    """
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _GRAPH_LOCK_KEY})
+    elif dialect == "sqlite":
+        # A no-op UPDATE takes SQLite's database write lock before any read of the graph.
+        await session.execute(
+            update(TaskRecord)
+            .where(TaskRecord.id.in_(ids))
+            .values(state=TaskRecord.state)
+            .execution_options(synchronize_session=False)
+        )
 
 
 async def _reaches(session: AsyncSession, *, start: UUID, target: UUID) -> bool:
