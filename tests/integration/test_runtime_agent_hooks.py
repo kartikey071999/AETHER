@@ -37,7 +37,11 @@ from aether.security import ApprovalService, OperationKind, SecuritySettings
 from aether.security.policy import SecurityPolicy
 from aether.storage.database import Database
 from aether.storage.models import Base, EventRecord, TaskRecord, TaskStatus
-from aether.storage.repositories import ObjectiveRepository
+from aether.storage.repositories import (
+    ExecutionRunRepository,
+    ObjectiveRepository,
+    ResourceMeasurementRepository,
+)
 
 ALL_AGENTS = [definition.agent_id for definition in AGENT_DEFINITIONS]
 ORCHESTR_KEYS = {"resource_monitor", "scheduler_policy", "disk_path", "orchestr_limits"}
@@ -314,12 +318,18 @@ async def test_each_agent_receives_only_the_services_it_needs(
     services = {agent_id: engine.context_for(agent_id).services for agent_id in ALL_AGENTS}
 
     orchestr = services[AgentId.ORCHESTR]
-    assert set(orchestr) == ORCHESTR_KEYS | {"task_control"}
+    assert set(orchestr) == ORCHESTR_KEYS | {
+        "task_control",
+        "resource_measurements",
+        "execution_runs",
+    }
     assert isinstance(orchestr["resource_monitor"], ResourceMonitor)
     assert isinstance(orchestr["scheduler_policy"], SchedulerPolicy)
     assert orchestr["disk_path"] == settings.data_dir
     assert orchestr["orchestr_limits"] == OrchestrLimits(max_active_objectives=4)
     assert isinstance(orchestr["task_control"], TaskControl)
+    assert isinstance(orchestr["resource_measurements"], ResourceMeasurementRepository)
+    assert isinstance(orchestr["execution_runs"], ExecutionRunRepository)
 
     warden = services[AgentId.WARDEN]
     assert set(warden) == PRIVILEGED_KEYS

@@ -5,7 +5,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID, uuid4
@@ -44,6 +44,7 @@ from aether.runtime.security import WARDEN_ONLY_SERVICES, SecurityServices
 from aether.runtime.shutdown import ShutdownSignalHandler
 from aether.runtime.worker import WorkerPool
 from aether.storage.models import TaskRecord, TaskStatus
+from aether.storage.repositories import ExecutionRunRepository, ResourceMeasurementRepository
 
 _MIB = 1024 * 1024
 _MAX_ERROR_CHARS = 2000
@@ -75,6 +76,9 @@ class EngineLimits(BaseModel):
     # Cooperative pause/cancel of running tasks.
     task_control_poll_seconds: float = Field(default=5.0, gt=0)
     task_interrupt_grace_seconds: float = Field(default=10.0, ge=0)
+    resource_sample_seconds: float = Field(default=30.0, ge=1, allow_inf_nan=False)
+    resource_retention_days: int = Field(default=30, ge=1)
+    resource_event_seconds: float = Field(default=300.0, ge=60, allow_inf_nan=False)
 
     @classmethod
     def from_settings(cls, settings: AetherSettings) -> "EngineLimits":
@@ -87,6 +91,9 @@ class EngineLimits(BaseModel):
             agent_tick_timeout_seconds=settings.agent_tick_timeout_seconds,
             task_control_poll_seconds=settings.task_control_poll_seconds,
             task_interrupt_grace_seconds=settings.task_interrupt_grace_seconds,
+            resource_sample_seconds=settings.resource_sample_seconds,
+            resource_retention_days=settings.resource_retention_days,
+            resource_event_seconds=settings.resource_event_seconds,
         )
 
     def tick_seconds_for(self, agent_id: AgentId) -> float:
@@ -164,6 +171,12 @@ class Engine:
                 for agent_id in self._agents
             }
         self._task_control = task_control or TaskControl(database_sessions, clock=clock)
+        self._resources = ResourceMeasurementRepository(
+            database_sessions, event_interval_seconds=self._limits.resource_event_seconds
+        )
+        self._resource_lock = asyncio.Lock()
+        self._last_resource_sample: datetime | None = None
+        self._last_resource_purge: datetime | None = None
         self._inject_services(agent_services or {})
         self._tick_hooks = {
             agent_id: hook
@@ -271,6 +284,8 @@ class Engine:
         for agent_id in self._agents:
             extra = dict(agent_services.get(agent_id, {}))
             if agent_id is AgentId.ORCHESTR:
+                extra.setdefault("resource_measurements", self._resources)
+                extra.setdefault("execution_runs", ExecutionRunRepository(self._sessions))
                 extra.setdefault(
                     TASK_CONTROL_SERVICE, self._task_control.bound_to(AgentId.ORCHESTR.value)
                 )
@@ -295,6 +310,7 @@ class Engine:
             self.recovery_report = await recover_runtime_state(
                 self._leases, self._bus, list(self._agents)
             )
+            await self.sample_resources_once()
             for agent in self._agents.values():
                 await agent.start()
             if self._security is not None:
@@ -311,6 +327,7 @@ class Engine:
                 self._spawn(self._tick_loop(agent_id), f"agent-tick-{agent_id.value}")
             self._spawn(self._scheduler_loop(), "scheduler-loop")
             self._spawn(self._recovery_loop(), "recovery-loop")
+            self._spawn(self._resource_loop(), "resource-loop")
             self._lifecycle.transition(LifecycleState.RUNNING)
             await self._emit(
                 "runtime.started",
@@ -421,6 +438,34 @@ class Engine:
             if await self._pool.submit(decision.selected_task_id, self._agents[agent_id]):
                 started += 1
         return started
+
+    async def sample_resources_once(self) -> bool:
+        """Persist at most one sample per interval, independent of scheduler activity."""
+        async with self._resource_lock:
+            now = self._clock()
+            if (
+                self._last_resource_sample is not None
+                and now
+                < self._last_resource_sample
+                + timedelta(seconds=self._limits.resource_sample_seconds)
+            ):
+                return False
+            if self._last_resource_purge is None or now >= self._last_resource_purge + timedelta(
+                days=1
+            ):
+                await self._resources.purge(
+                    retention_days=self._limits.resource_retention_days, now=now
+                )
+                self._last_resource_purge = now
+            host = self._monitor.snapshot(self._limits.disk_path)
+            await self._resources.record(
+                cpu_percent=host.cpu_percent,
+                available_ram_bytes=host.available_ram_bytes,
+                free_disk_bytes=host.free_disk_bytes,
+                observed_at=now,
+            )
+            self._last_resource_sample = now
+            return True
 
     def _spawn(self, coroutine: Any, name: str) -> None:
         self._loops.append(asyncio.create_task(coroutine, name=name))
@@ -559,6 +604,18 @@ class Engine:
                 raise
             except Exception:
                 self._logger.exception("lease recovery sweep failed")
+
+    async def _resource_loop(self) -> None:
+        while True:
+            await self._pause(self._limits.resource_sample_seconds)
+            if self._loops_stopping.is_set():
+                return
+            try:
+                await self.sample_resources_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._logger.exception("resource sampling or retention failed")
 
     async def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         event = build_event(

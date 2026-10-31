@@ -443,6 +443,8 @@ class CapabilityScenario:
         """Submit the objective as the user (through MUSE) and wait until ORCHESTR stores it."""
         runtime = self._runtime()
         title = f"{OBJECTIVE_TITLE} ({tag or uuid4().hex[:8]})"
+        # Only an objective created by this submission counts: earlier runs may share the title.
+        submitted_at = datetime.now(UTC)
         message = build_message(
             AgentId.MUSE,
             AgentId.ORCHESTR,
@@ -459,7 +461,13 @@ class CapabilityScenario:
         async def created() -> UUID | None:
             async with runtime.database.sessions() as session:
                 return await session.scalar(
-                    select(ObjectiveRecord.id).where(ObjectiveRecord.title == title)
+                    select(ObjectiveRecord.id)
+                    .where(
+                        ObjectiveRecord.title == title,
+                        ObjectiveRecord.created_at >= submitted_at,
+                    )
+                    .order_by(ObjectiveRecord.created_at.desc())
+                    .limit(1)
                 )
 
         return await wait_for(created, timeout=30.0, poll=self.timing.poll_seconds)
