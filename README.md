@@ -257,7 +257,9 @@ repositories and the runtime stage events through
 retention once, replays the spool, then starts the engine, which emits
 `runtime.started`. The seven agents are inert placeholders until their behaviour
 is implemented. `aether events tail [--limit N]` prints the latest redacted
-events from the database.
+events from the database. `aether demo capability [--live]` runs the end-to-end
+capability workflow against the configured database and prints its persisted
+trace; see [docs/e2e.md](docs/e2e.md).
 
 `configure_logging(log_dir, max_bytes=..., backup_count=..., level=...,
 console=False)` configures delayed, rotating JSON-lines files.
