@@ -17,6 +17,7 @@ def describe_policy(policy: SecurityPolicy) -> dict[str, Any]:
         "filesystem_roots": [str(root) for root in policy.filesystem_roots],
         "allowed_executables": sorted(policy.allowed_executables),
         "allowed_hosts": sorted(policy.allowed_hosts),
+        "web_allowed_hosts": sorted(policy.web_allowed_hosts),
         "approval_required_kinds": sorted(kind.value for kind in policy.approval_required_kinds),
         "user_authorization_required_kinds": sorted(
             kind.value for kind in policy.user_authorization_required_kinds

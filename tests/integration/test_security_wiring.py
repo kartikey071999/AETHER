@@ -167,6 +167,13 @@ async def test_container_injects_the_same_services_into_all_seven_agents(
         "read_file",
         "write_file",
         "deliver_outbox_message",
+        "web.fetch",
+        "web.extract",
+        "web.links",
+        "pypi.package",
+        "github.repo",
+        "github.search",
+        "docs.search",
     }
 
 
@@ -339,9 +346,14 @@ async def test_start_emits_security_initialized_without_secrets(
     assert len(events) == 1
     payload: dict[str, Any] = events[0].payload
     assert payload["policy_fingerprint"] == runtime.security.fingerprint
-    assert payload["tool_count"] == 5
+    assert payload["tool_count"] == 12
     assert payload["allowlist_sizes"]["hosts"] == 1
     assert payload["allowlist_sizes"]["executables"] == 1
+    assert (
+        payload["allowlist_sizes"]["web_hosts"]
+        == len(runtime.security.policy.web_allowed_hosts)
+        > 0
+    )
     assert sys.executable not in str(payload)
 
 

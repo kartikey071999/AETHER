@@ -80,7 +80,25 @@ class HttpResult:
     redirects: tuple[str, ...]
 
 
-def _check_url(url: str, policy: SecurityPolicy) -> str | None:
+@dataclass(frozen=True, slots=True)
+class RawResponse:
+    """Undecoded, size-capped response of one pinned exchange; the bytes are untrusted."""
+
+    status_code: int
+    url: str
+    headers: dict[str, str]
+    content: bytes
+    truncated: bool
+    redirects: tuple[str, ...]
+    encoding: str | None
+
+
+ResponseInspector = Callable[[httpx.Response], None]
+
+
+def _check_url(
+    url: str, policy: SecurityPolicy, kind: OperationKind = OperationKind.HTTP_REQUEST
+) -> str | None:
     try:
         parsed = httpx.URL(url)
     except httpx.InvalidURL:
@@ -90,17 +108,20 @@ def _check_url(url: str, policy: SecurityPolicy) -> str | None:
     if parsed.username or parsed.password:
         return "URL credentials are not allowed"
     host = url_host(url)
-    if host is None or not policy.is_host_allowed(host):
+    if host is None or not policy.host_allowed_for(kind, host):
         return f"host {host!r} is not allowlisted"
     return None
 
 
-def _explicitly_local(host: str, policy: SecurityPolicy) -> bool:
+def _explicitly_local(
+    host: str, policy: SecurityPolicy, kind: OperationKind = OperationKind.HTTP_REQUEST
+) -> bool:
     """Only exact localhost or literal local-IP entries express intent to contact local services.
 
-    A wildcard or a public DNS name in allowed_hosts never authorizes private resolution.
+    A wildcard or a public DNS name in allowed_hosts never authorizes private resolution, and
+    web research (``web_fetch``) never contacts local services at all.
     """
-    if host not in policy.allowed_hosts:
+    if kind is not OperationKind.HTTP_REQUEST or host not in policy.allowed_hosts:
         return False
     if host == "localhost":
         return True
@@ -113,6 +134,7 @@ def _explicitly_local(host: str, policy: SecurityPolicy) -> bool:
 
 class SafeHttp:
     kinds = frozenset({OperationKind.HTTP_REQUEST})
+    source = SOURCE
 
     def __init__(
         self,
@@ -243,7 +265,10 @@ class SafeHttp:
                 or checked.is_multicast
                 or checked.is_reserved
                 or checked.is_unspecified
-                or (not checked.is_global and not _explicitly_local(host, self._policy))
+                or (
+                    not checked.is_global
+                    and not _explicitly_local(host, self._policy, operation.kind)
+                )
             ):
                 problem = "DNS resolution returned a non-public or forbidden address"
                 break
@@ -267,11 +292,48 @@ class SafeHttp:
         timeout: float,
         correlation_id: UUID | None,
     ) -> HttpResult:
+        raw = await self._exchange(
+            operation,
+            grant,
+            method=payload.method,
+            url=payload.url,
+            headers=dict(payload.headers),
+            body=payload.body,
+            timeout=timeout,
+            correlation_id=correlation_id,
+        )
+        return HttpResult(
+            status_code=raw.status_code,
+            url=raw.url,
+            headers=raw.headers,
+            body=UntrustedContent(
+                source=raw.url,
+                content=raw.content.decode(raw.encoding or "utf-8", errors="replace"),
+            ),
+            truncated=raw.truncated,
+            redirects=raw.redirects,
+        )
+
+    async def _exchange(
+        self,
+        operation: Operation,
+        grant: Authorization,
+        *,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        body: str | None,
+        timeout: float,
+        correlation_id: UUID | None,
+        max_bytes: int | None = None,
+        inspect: ResponseInspector | None = None,
+    ) -> RawResponse:
+        """One pinned request chain: every hop re-checks the allowlist and resolved address.
+
+        ``inspect`` sees the final response's status and headers before the body is read and
+        may raise to refuse it (e.g. an unacceptable content type).
+        """
         policy = self._policy
-        method = payload.method
-        url = payload.url
-        headers = dict(payload.headers)
-        body = payload.body
         redirects: list[str] = []
         async with (
             asyncio.timeout(timeout),
@@ -290,7 +352,7 @@ class SafeHttp:
             ) as client,
         ):
             while True:
-                problem = _check_url(url, policy)
+                problem = _check_url(url, policy, operation.kind)
                 if (
                     grant.limits.allowed_hosts is not None
                     and url_host(url) not in grant.limits.allowed_hosts
@@ -337,19 +399,19 @@ class SafeHttp:
                     cap = min(
                         policy.max_response_bytes,
                         grant.limits.max_output_bytes or policy.max_response_bytes,
+                        max_bytes or policy.max_response_bytes,
                     )
+                    if inspect is not None:
+                        inspect(response)
                     content, truncated = await _read_capped(response, cap)
-                    encoding = response.charset_encoding or "utf-8"
-                    return HttpResult(
+                    return RawResponse(
                         status_code=response.status_code,
                         url=str(response.url),
                         headers=dict(response.headers),
-                        body=UntrustedContent(
-                            source=str(response.url),
-                            content=content.decode(encoding, errors="replace"),
-                        ),
+                        content=content,
                         truncated=truncated,
                         redirects=tuple(redirects),
+                        encoding=response.charset_encoding,
                     )
                 finally:
                     await response.aclose()
@@ -371,13 +433,35 @@ class SafeHttp:
                 "truncated": result.truncated,
                 "redirects": len(result.redirects),
             }
+        await self._finish_run(
+            operation,
+            execution_id,
+            started,
+            result.status_code if result is not None else None,
+            details,
+            error,
+            correlation_id,
+        )
+
+    async def _finish_run(
+        self,
+        operation: Operation,
+        execution_id: UUID,
+        started: float,
+        status_code: int | None,
+        details: dict[str, Any],
+        error: BaseException | None,
+        correlation_id: UUID | None,
+    ) -> None:
+        details = dict(details)
         if error is not None:
             details["error"] = type(error).__name__
+        succeeded = error is None and status_code is not None and status_code < 400
         status = (
             RunStatus.CANCELLED
             if isinstance(error, asyncio.CancelledError)
             else RunStatus.SUCCEEDED
-            if result is not None and result.status_code < 400
+            if succeeded
             else RunStatus.FAILED
         )
         details["status"] = status.value
@@ -386,7 +470,7 @@ class SafeHttp:
             "execution.finished",
             {
                 "execution_id": execution_id,
-                "success": result is not None and result.status_code < 400,
+                "success": succeeded,
                 "duration_seconds": max(time.monotonic() - started, 0.0),
                 "details": details,
             },
@@ -431,7 +515,7 @@ class SafeHttp:
                 session,
                 self._recorder,
                 event_type,
-                source=SOURCE,
+                source=self.source,
                 actor=operation.requested_by.value,
                 aggregate_type="execution_run",
                 aggregate_id=execution_id,

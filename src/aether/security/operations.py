@@ -18,6 +18,8 @@ _DESCRIPTION_LIMIT = 200
 class OperationKind(StrEnum):
     SUBPROCESS = "subprocess"
     HTTP_REQUEST = "http_request"
+    # Read-only GET of public research sources on the separate web research allowlist.
+    WEB_FETCH = "web_fetch"
     PACKAGE_INSTALL = "package_install"
     REPO_CLONE = "repo_clone"
     FILE_WRITE = "file_write"
