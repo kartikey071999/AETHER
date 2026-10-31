@@ -2,9 +2,15 @@
 
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from aether.models.assignment import (
+    ModelAssignment,
+    assignments_for,
+    default_model_assignments,
+    merge_assignments,
+)
 from aether.models.contracts import ModelTier
 from aether.models.costs import ModelPrice
 
@@ -17,25 +23,38 @@ class BudgetPolicy(BaseModel):
     max_cost_usd_per_day: float | None = Field(default=10, ge=0)
     max_tokens_per_request: int = Field(default=32_768, ge=1)
     max_concurrent_requests: int = Field(default=2, ge=1)
+    # Unknown prices are admitted only when daily request and token caps bound the spend.
     allow_unpriced: bool = False
+
+    @model_validator(mode="after")
+    def _unpriced_needs_caps(self) -> "BudgetPolicy":
+        if self.allow_unpriced and (
+            self.max_requests_per_day is None or self.max_tokens_per_day is None
+        ):
+            raise ValueError("allow_unpriced requires max_requests_per_day and max_tokens_per_day")
+        return self
 
 
 def default_budgets() -> dict[str, BudgetPolicy]:
+    # Azure prices are not built in, so their spend is bounded by request/token caps; the USD
+    # ceilings apply once AETHER_PROVIDER_PRICES declares a price.
     return {
         "groq": BudgetPolicy(),
         "azure_openai": BudgetPolicy(
-            max_requests_per_day=50,
-            max_tokens_per_day=100_000,
-            max_cost_usd_per_day=1,
+            max_requests_per_day=1000,
+            max_tokens_per_day=3_000_000,
+            max_cost_usd_per_day=25,
             max_tokens_per_request=8192,
-            max_concurrent_requests=1,
+            max_concurrent_requests=4,
+            allow_unpriced=True,
         ),
         "azure_anthropic": BudgetPolicy(
-            max_requests_per_day=50,
-            max_tokens_per_day=200_000,
-            max_cost_usd_per_day=5,
+            max_requests_per_day=300,
+            max_tokens_per_day=1_500_000,
+            max_cost_usd_per_day=50,
             max_tokens_per_request=16_384,
-            max_concurrent_requests=1,
+            max_concurrent_requests=2,
+            allow_unpriced=True,
         ),
         "ollama": BudgetPolicy(
             max_requests_per_day=None, max_tokens_per_day=None, max_cost_usd_per_day=None
@@ -109,6 +128,16 @@ class ProviderSettings(BaseSettings):
     agent_budgets: dict[str, AgentBudgetPolicy] = Field(default_factory=default_agent_budgets)
     # Distinct models one request may reach before giving up (bounds fallback fan-out).
     max_models_per_request: int = Field(default=2, ge=1, le=10)
+    # Ordered (provider, model) preferences per agent; see aether.models.assignment.
+    model_assignment: dict[str, tuple[ModelAssignment, ...]] = Field(
+        default_factory=default_model_assignments, validation_alias="AETHER_MODEL_ASSIGNMENT"
+    )
+    # After an agent's assigned models are exhausted, try any other eligible model.
+    assignment_final_fallback: bool = True
+    # Consecutive failures of one provider/model before the router skips it (0 disables), and
+    # how long it is skipped before one more attempt is allowed.
+    model_circuit_failures: int = Field(default=3, ge=0)
+    model_circuit_cooldown_seconds: float = Field(default=300, ge=0, le=86_400)
     # A length-truncated completion is retried once with doubled max_tokens up to this cap.
     length_retry_max_tokens: int = Field(default=8192, ge=1)
     # Consecutive failures per objective and agent before LLM use is stopped (0 disables).
@@ -195,6 +224,14 @@ class ProviderSettings(BaseSettings):
                 for name, policy in value.items()
             },
         }
+
+    @field_validator("model_assignment", mode="before")
+    @classmethod
+    def _merge_default_assignments(cls, value):
+        return default_model_assignments() if value is None else merge_assignments(value)
+
+    def assignments(self, agent: str) -> tuple[ModelAssignment, ...]:
+        return assignments_for(self.model_assignment, agent)
 
     def agent_budget(self, agent: str) -> AgentBudgetPolicy:
         return self.agent_budgets.get(agent) or self.agent_budgets.get(

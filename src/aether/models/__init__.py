@@ -1,5 +1,6 @@
 """Protected model providers; inject one shared router into agent workflows."""
 
+from aether.models.assignment import ModelAssignment, default_model_assignments
 from aether.models.base import (
     EmptyCompletion,
     ModelProvider,
@@ -46,6 +47,7 @@ __all__ = [
     "EmptyCompletion",
     "GroqProvider",
     "MockProvider",
+    "ModelAssignment",
     "ModelInfo",
     "ModelPrice",
     "ModelProvider",
@@ -59,6 +61,7 @@ __all__ = [
     "ReconciliationSummary",
     "RouteSpend",
     "TruncatedCompletion",
+    "default_model_assignments",
     "provider_hosts",
     "reconcile_stale_reservations",
 ]

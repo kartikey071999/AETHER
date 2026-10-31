@@ -1,6 +1,6 @@
 """Durable, conservative reservations protect daily and concurrent quotas."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
@@ -210,10 +210,12 @@ class BudgetGuard:
         error: BaseException | None,
         latency_ms: float,
         attempt: int,
+        routing: Mapping[str, object] | None = None,
     ) -> tuple[int, int]:
         """Finalize usage and both events atomically; write errors propagate, never fall back.
 
-        Returns the (input, output) tokens charged for the attempt.
+        ``routing`` (assignment rank and skipped higher-ranked models) is added to the
+        ``provider.request_completed`` payload. Returns the (input, output) tokens charged.
         """
         blocked = isinstance(error, OperationBlocked)
         measured = (
@@ -287,6 +289,7 @@ class BudgetGuard:
                         "error_type": type(error).__name__ if error else None,
                         "usage_estimated": estimated,
                         "cost_estimate_unknown": unknown,
+                        **(routing or {}),
                     },
                 ),
             ):

@@ -406,7 +406,10 @@ async def test_open_breaker_survives_a_restart(database, usage):
 
 async def test_half_open_probe_failure_reopens_and_restarts_the_cooldown(database, usage):
     clock = FakeClock()
-    settings = settings_with(circuit_breaker_failures=2, circuit_breaker_cooldown_seconds=60)
+    # The router's per-model circuit is disabled so only the per-objective breaker is tested.
+    settings = settings_with(
+        circuit_breaker_failures=2, circuit_breaker_cooldown_seconds=60, model_circuit_failures=0
+    )
     provider = one_model_provider([ProviderError("mock")] * 10)
     models, _ = governed(database, usage, provider, settings, clock=clock)
     call = ModelCallContext(objective_id=uuid4())

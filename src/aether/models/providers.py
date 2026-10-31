@@ -177,9 +177,8 @@ class AzureOpenAIProvider(RemoteProvider):
     async def list_models(self) -> list[ModelInfo]:
         return (
             [
-                ModelInfo(
-                    name="gpt-6-astra", tiers=frozenset({ModelTier.PREMIUM}), min_max_tokens=128
-                )
+                # Every tier: which agents and tiers use it is decided by the model assignment.
+                ModelInfo(name="gpt-6-astra", tiers=_GENERAL, min_max_tokens=128)
             ]
             if self.available()
             else []
@@ -260,11 +259,7 @@ class AzureAnthropicProvider(RemoteProvider):
         )
 
     async def list_models(self) -> list[ModelInfo]:
-        return (
-            [ModelInfo(name="claude-opus-4-8", tiers=frozenset({ModelTier.PREMIUM}))]
-            if self.available()
-            else []
-        )
+        return [ModelInfo(name="claude-opus-4-8", tiers=_GENERAL)] if self.available() else []
 
     async def _complete(self, request: CompletionRequest) -> CompletionResponse:
         if self.client is None:

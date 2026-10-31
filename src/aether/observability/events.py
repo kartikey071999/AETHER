@@ -377,6 +377,15 @@ class GitMergeCompletedPayload(EventPayload):
     commit_hash: str = Field(min_length=1)
 
 
+class SkippedModelPayload(EventPayload):
+    """A model the router passed over before the one that served the request."""
+
+    provider: str
+    model: str
+    rank: int | None = Field(default=None, ge=1)
+    reason: str = Field(max_length=300)
+
+
 class ProviderRequestCompletedPayload(EventPayload):
     provider: str
     model: str
@@ -390,6 +399,11 @@ class ProviderRequestCompletedPayload(EventPayload):
     error_type: str | None = None
     usage_estimated: bool = False
     cost_estimate_unknown: bool = False
+    # Routing by the agent's model assignment: the rank used (``None`` for the final fallback)
+    # and why each higher-ranked or earlier model was skipped.
+    assignment: Literal["assigned", "fallback"] | None = None
+    assignment_rank: int | None = Field(default=None, ge=1)
+    skipped: list[SkippedModelPayload] = Field(default_factory=list)
 
 
 class ProviderUsageRecordedPayload(EventPayload):
