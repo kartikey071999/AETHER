@@ -603,6 +603,10 @@ def build_event(event_type: str, **kwargs: Any) -> AetherEvent:
 # --- security / tools events (T-020) ---
 
 
+class SecurityOperationBlockedHashedPayload(SecurityOperationBlockedPayload):
+    input_hash: str | None = Field(default=None, min_length=64, max_length=64)
+
+
 class SecurityOperationAuthorizedPayload(EventPayload):
     operation: str
     kind: str
@@ -623,6 +627,7 @@ class SecurityUserAuthorizationRequestedPayload(EventPayload):
 
 EVENT_TYPES.update(
     {
+        "security.operation_blocked": SecurityOperationBlockedHashedPayload,
         "security.operation_authorized": SecurityOperationAuthorizedPayload,
         "security.user_authorization_requested": SecurityUserAuthorizationRequestedPayload,
     }
