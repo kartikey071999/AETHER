@@ -9,11 +9,10 @@ from aether.agents.orchestr.communication import UpdateEvent, UpdateKind
 from aether.agents.orchestr.completion import evaluate_completion
 from aether.agents.orchestr.env import Env, as_utc
 from aether.agents.orchestr.intake import LIMIT_DEFERRAL_REASON
-from aether.agents.orchestr.planner import StepKind, kind_of_idempotency_key
 from aether.agents.orchestr.planning import plan_objective
+from aether.agents.orchestr.pressure import is_build, manage_pressure
 from aether.agents.orchestr.priorities import refresh_all, task_rank
 from aether.agents.orchestr.store import ACTOR
-from aether.communication.messages import AgentId
 from aether.runtime.scheduler import SchedulerResources, SchedulingCandidate
 from aether.storage.models import ObjectiveRecord, TaskRecord, TaskStatus
 from aether.storage.repositories import InvalidTaskTransition
@@ -42,6 +41,7 @@ async def tick(env: Env) -> TickReport:
         await _reconcile(env, objective, report)
     active = await env.store.list_objectives(["active"])
     await _release(env, active, report)
+    await manage_pressure(env)
     for objective in active:
         fresh = await env.store.get_objective(objective.id)
         if fresh is None:
@@ -206,9 +206,7 @@ async def _release(env: Env, active: list[ObjectiveRecord], report: TickReport) 
 
 
 def _is_build(task: TaskRecord) -> bool:
-    return task.assigned_agent == AgentId.FORGE.value or (
-        kind_of_idempotency_key(task.idempotency_key) is StepKind.IMPLEMENTATION
-    )
+    return is_build(task)
 
 
 async def _deadline_notice(env: Env, objective: ObjectiveRecord) -> None:

@@ -68,6 +68,10 @@ class Scheduler:
         self._policy = policy
         self._sessions = sessions
 
+    @property
+    def policy(self) -> SchedulerPolicy:
+        return self._policy
+
     def choose_next(
         self,
         candidates: Iterable[SchedulingCandidate],

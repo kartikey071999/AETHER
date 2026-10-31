@@ -1,11 +1,14 @@
 """Durable, cooperative pause/cancel requests for tasks, including RUNNING ones.
 
-A request is a ``decision.recorded`` event on the task aggregate (``task.pause_requested`` /
-``task.cancel_requested``); it stays pending until a ``task.control_resolved`` decision lists
-its event id as evidence. Tasks that are not running are moved directly with a compare-and-set
-update. RUNNING tasks are left to their worker: it signals the agent cooperatively, interrupts
-after a grace period, and resolves the request in the same transaction that releases the lease,
-so a task that completes first stays completed (the request is resolved as superseded).
+A request is a ``task.control_requested`` event on the task aggregate (action pause or cancel);
+it stays pending until a ``task.control_resolved`` event names its id as ``request_event_id``.
+Requests recorded by older versions as ``decision.recorded`` events (``task.pause_requested`` /
+``task.cancel_requested``, resolved by a ``task.control_resolved`` decision listing the request
+ids as evidence) are still read. Tasks that are not running are moved directly with a
+compare-and-set update. RUNNING tasks are left to their worker: it signals the agent
+cooperatively, interrupts after a grace period, and resolves the request in the same transaction
+that releases the lease, so a task that completes first stays completed (the request is resolved
+as superseded).
 """
 
 import asyncio
@@ -25,12 +28,15 @@ from aether.storage.models import EventRecord, TaskRecord, TaskStatus
 from aether.storage.repositories import ALLOWED_TASK_TRANSITIONS
 
 TASK_CONTROL_SERVICE = "task_control"
+CONTROL_REQUESTED = "task.control_requested"
+CONTROL_RESOLVED = "task.control_resolved"
+# Pre-dedicated-event representation: requests were `decision.recorded` events.
 PAUSE_REQUESTED = "task.pause_requested"
 CANCEL_REQUESTED = "task.cancel_requested"
-CONTROL_RESOLVED = "task.control_resolved"
 
 _SOURCE = "runtime.control"
-_DECISION_EVENT = "decision.recorded"
+_LEGACY_DECISION_EVENT = "decision.recorded"
+_RESUME = "resume"
 _TERMINAL = frozenset({TaskStatus.COMPLETED, TaskStatus.CANCELLED})
 _MAX_CAS_ATTEMPTS = 5
 _MAX_REASON_CHARS = 500
@@ -45,8 +51,8 @@ class ControlAction(enum.StrEnum):
         return TaskStatus.PAUSED if self is ControlAction.PAUSE else TaskStatus.CANCELLED
 
 
-_REQUEST_DECISIONS = {PAUSE_REQUESTED: ControlAction.PAUSE, CANCEL_REQUESTED: ControlAction.CANCEL}
-_DECISION_FOR = {action: decision for decision, action in _REQUEST_DECISIONS.items()}
+_ACTIONS = {action.value: action for action in ControlAction}
+_LEGACY_REQUESTS = {PAUSE_REQUESTED: ControlAction.PAUSE, CANCEL_REQUESTED: ControlAction.CANCEL}
 
 
 def strongest(actions: Sequence[ControlAction | None]) -> ControlAction | None:
@@ -61,6 +67,8 @@ def strongest(actions: Sequence[ControlAction | None]) -> ControlAction | None:
 class ControlRequest:
     event_id: UUID
     action: ControlAction
+    requested_by: str = "RUNTIME"
+    reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,9 +113,11 @@ def _direct_route(state: TaskStatus, action: ControlAction) -> tuple[TaskStatus,
 async def pending_requests(session: AsyncSession, task_id: UUID) -> list[ControlRequest]:
     """Unresolved pause/cancel requests for one task, oldest first."""
     rows = await session.execute(
-        select(EventRecord.id, EventRecord.payload)
+        select(EventRecord.id, EventRecord.event_type, EventRecord.actor, EventRecord.payload)
         .where(
-            EventRecord.event_type == _DECISION_EVENT,
+            EventRecord.event_type.in_(
+                [CONTROL_REQUESTED, CONTROL_RESOLVED, _LEGACY_DECISION_EVENT]
+            ),
             EventRecord.aggregate_type == "task",
             EventRecord.aggregate_id == task_id,
         )
@@ -115,13 +125,34 @@ async def pending_requests(session: AsyncSession, task_id: UUID) -> list[Control
     )
     requests: list[ControlRequest] = []
     resolved: set[str] = set()
-    for event_id, payload in rows.all():
+    for event_id, event_type, actor, payload in rows.all():
         data = payload if isinstance(payload, dict) else {}
-        decision = data.get("decision")
-        if decision in _REQUEST_DECISIONS:
-            requests.append(ControlRequest(event_id, _REQUEST_DECISIONS[decision]))
-        elif decision == CONTROL_RESOLVED:
-            resolved.update(str(item) for item in data.get("evidence") or ())
+        if event_type == CONTROL_REQUESTED:
+            if data.get("action") in _ACTIONS:
+                requests.append(
+                    ControlRequest(
+                        event_id,
+                        _ACTIONS[data["action"]],
+                        str(data.get("requested_by") or actor),
+                        str(data.get("reason") or ""),
+                    )
+                )
+        elif event_type == CONTROL_RESOLVED:
+            if data.get("request_event_id"):
+                resolved.add(str(data["request_event_id"]))
+        else:
+            decision = data.get("decision")
+            if decision in _LEGACY_REQUESTS:
+                requests.append(
+                    ControlRequest(
+                        event_id,
+                        _LEGACY_REQUESTS[decision],
+                        str(actor),
+                        str(data.get("rationale") or ""),
+                    )
+                )
+            elif decision == CONTROL_RESOLVED:
+                resolved.update(str(item) for item in data.get("evidence") or ())
     return [request for request in requests if str(request.event_id) not in resolved]
 
 
@@ -136,24 +167,26 @@ def stage_resolution(
     now: datetime,
 ) -> None:
     """Mark `requests` settled inside the caller's transaction (with the state change)."""
-    if not requests:
-        return
-    stage_event(
-        session,
-        _DECISION_EVENT,
-        source=_SOURCE,
-        actor=actor,
-        aggregate_type="task",
-        aggregate_id=task_id,
-        payload={
-            "decision": CONTROL_RESOLVED,
-            "rationale": outcome,
-            "evidence": [str(request.event_id) for request in requests],
-        },
-        task_id=task_id,
-        objective_id=objective_id,
-        created_at=now,
-    )
+    for request in requests:
+        stage_event(
+            session,
+            CONTROL_RESOLVED,
+            source=_SOURCE,
+            actor=actor,
+            aggregate_type="task",
+            aggregate_id=task_id,
+            payload={
+                "task_id": task_id,
+                "action": request.action.value,
+                "requested_by": request.requested_by,
+                "reason": request.reason[:_MAX_REASON_CHARS],
+                "outcome": outcome,
+                "request_event_id": request.event_id,
+            },
+            task_id=task_id,
+            objective_id=objective_id,
+            created_at=now,
+        )
 
 
 class TaskControl:
@@ -203,6 +236,40 @@ class TaskControl:
                 session, task, TaskStatus.PAUSED, (TaskStatus.READY,), now, reason or "resumed"
             ):
                 return False
+            payload = {
+                "task_id": task_id,
+                "action": _RESUME,
+                "requested_by": self._actor,
+                "reason": (reason or "resumed")[:_MAX_REASON_CHARS],
+            }
+            requested = stage_event(
+                session,
+                CONTROL_REQUESTED,
+                source=_SOURCE,
+                actor=self._actor,
+                aggregate_type="task",
+                aggregate_id=task_id,
+                payload=payload,
+                task_id=task_id,
+                objective_id=task.objective_id,
+                created_at=now,
+            )
+            stage_event(
+                session,
+                CONTROL_RESOLVED,
+                source=_SOURCE,
+                actor=self._actor,
+                aggregate_type="task",
+                aggregate_id=task_id,
+                payload={
+                    **payload,
+                    "outcome": TaskStatus.READY.value,
+                    "request_event_id": requested.id,
+                },
+                task_id=task_id,
+                objective_id=task.objective_id,
+                created_at=now,
+            )
         return True
 
     async def pending(self, task_id: UUID) -> list[ControlRequest]:
@@ -271,15 +338,16 @@ class TaskControl:
                 return ControlResult(task_id, action, "noop", state)
             stage_event(
                 session,
-                _DECISION_EVENT,
+                CONTROL_REQUESTED,
                 source=_SOURCE,
                 actor=self._actor,
                 aggregate_type="task",
                 aggregate_id=task_id,
                 payload={
-                    "decision": _DECISION_FOR[action],
-                    "rationale": (reason or f"{action.value} requested")[:_MAX_REASON_CHARS],
-                    "evidence": [],
+                    "task_id": task_id,
+                    "action": action.value,
+                    "requested_by": self._actor,
+                    "reason": (reason or f"{action.value} requested")[:_MAX_REASON_CHARS],
                 },
                 task_id=task_id,
                 objective_id=task.objective_id,
@@ -341,6 +409,7 @@ class TaskControl:
 
 __all__ = [
     "CANCEL_REQUESTED",
+    "CONTROL_REQUESTED",
     "CONTROL_RESOLVED",
     "PAUSE_REQUESTED",
     "TASK_CONTROL_SERVICE",

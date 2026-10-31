@@ -182,6 +182,20 @@ PAYLOAD_EXAMPLES = {
     "task.timed_out": {"error": "timeout", "attempt": 1, "max_attempts": 3},
     "task.cancelled": {"reason": "Cancelled"},
     "task.interrupted": {"reason": "shutdown"},
+    "task.control_requested": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "action": "pause",
+        "requested_by": "ORCHESTR",
+        "reason": "Resource pressure",
+    },
+    "task.control_resolved": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "action": "pause",
+        "requested_by": "ORCHESTR",
+        "reason": "Resource pressure",
+        "outcome": "paused",
+        "request_event_id": "00000000-0000-4000-8000-000000000002",
+    },
     "message.processing": {"message_id": str(uuid4()), "target_agent": "LEDGER"},
     "message.requeued": {
         "message_id": str(uuid4()),

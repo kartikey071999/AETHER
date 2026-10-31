@@ -86,6 +86,29 @@ class SecurityServices:
         return {agent_id: self.context_for(agent_id, base) for agent_id in agent_ids}
 
 
+def build_security_policy(
+    settings: AetherSettings,
+    *,
+    security_settings: SecuritySettings | None = None,
+    extra_hosts: Iterable[str] = (),
+    extra_executables: Iterable[str] | None = None,
+) -> SecurityPolicy:
+    """The effective policy: settings plus provider hosts and the running interpreter.
+
+    The single place the runtime and ``aether security show`` build the policy, so the
+    fingerprint they report is identical for identical configuration.
+    """
+    base = security_settings or SecuritySettings()
+    if extra_executables is None:
+        extra_executables = default_extra_executables()
+    hosts = list(dict.fromkeys([*base.allowed_hosts, *extra_hosts]))
+    executables = list(dict.fromkeys([*base.allowed_executables, *extra_executables]))
+    return load_security_policy(
+        settings,
+        base.model_copy(update={"allowed_hosts": hosts, "allowed_executables": executables}),
+    )
+
+
 def build_security_services(
     settings: AetherSettings,
     sessions: async_sessionmaker[AsyncSession],
@@ -102,14 +125,11 @@ def build_security_services(
     running interpreter, see ``default_extra_executables``) join the allowlists before the
     policy is frozen; nothing can be added afterwards.
     """
-    base = security_settings or SecuritySettings()
-    if extra_executables is None:
-        extra_executables = default_extra_executables()
-    hosts = list(dict.fromkeys([*base.allowed_hosts, *extra_hosts]))
-    executables = list(dict.fromkeys([*base.allowed_executables, *extra_executables]))
-    policy = load_security_policy(
+    policy = build_security_policy(
         settings,
-        base.model_copy(update={"allowed_hosts": hosts, "allowed_executables": executables}),
+        security_settings=security_settings,
+        extra_hosts=extra_hosts,
+        extra_executables=extra_executables,
     )
     # Adapters refuse to run in or write to roots that do not exist yet.
     for directory in (policy.workspace_dir, policy.artifact_dir, policy.data_dir):

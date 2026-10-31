@@ -1,7 +1,6 @@
 """SCOUT queues scheduler-owned work, investigates, and consolidates persisted findings."""
 
 import json
-from dataclasses import replace
 from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ValidationError
@@ -298,7 +297,6 @@ class ScoutAgent(BaseAgent):
                 retryable=False,
             )
         contents: list[UntrustedContent] = []
-        tool_ctx = replace(ctx, bus=workflow.ResearchToolBus(ctx, work))
         for source in sources:
             if self.is_cancelled(task.id) or ctx.clock() >= request.review_by:
                 return TaskResult(
@@ -320,7 +318,7 @@ class ScoutAgent(BaseAgent):
                 {"url": source.location, "method": "GET"}
                 if source.kind == "http"
                 else {"path": source.location, "max_bytes": 16384},
-                tool_ctx,
+                ctx,
                 task=task,
                 correlation_id=work.correlation_id,
             )

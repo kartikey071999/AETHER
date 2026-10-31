@@ -190,10 +190,16 @@ def _tail_command(limit: int) -> int:
 
 
 def _security_show_command() -> int:
-    from aether.security import describe_policy, load_security_policy, policy_fingerprint
+    from aether.models import ProviderSettings
+    from aether.runtime.models import allowlist_hosts
+    from aether.runtime.security import build_security_policy
+    from aether.security import describe_policy, policy_fingerprint
 
     try:
-        policy = load_security_policy(load_settings())
+        # Same construction as the runtime, so the fingerprint matches runtime.security_initialized.
+        policy = build_security_policy(
+            load_settings(), extra_hosts=allowlist_hosts(ProviderSettings())
+        )
     except Exception as error:  # noqa: BLE001 - report any failure without a traceback
         print(f"Loading the security policy failed: {type(error).__name__}", file=sys.stderr)
         return 1

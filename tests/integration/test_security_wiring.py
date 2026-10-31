@@ -16,7 +16,7 @@ from aether.agents.base import AgentContext, BaseAgent, TaskResult, TaskResultSt
 from aether.agents.placeholder import build_placeholder_agents
 from aether.agents.security_review import request_security_review
 from aether.communication.messages import AgentId, AgentMessage, MessageType
-from aether.config import AetherSettings
+from aether.config import AetherSettings, load_settings
 from aether.runtime.bootstrap import Runtime, build_runtime
 from aether.security import (
     ApprovalService,
@@ -367,3 +367,32 @@ def test_security_show_prints_fingerprint_and_no_secrets(
     assert "api.example.com" in first.out
     assert "subprocess" in first.out
     assert SECRET not in first.out + first.err
+
+
+async def test_security_show_fingerprint_matches_runtime_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv(
+        "AETHER_DATABASE_URL", "sqlite+aiosqlite:///" + (tmp_path / "a.db").as_posix()
+    )
+    monkeypatch.setenv("AETHER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("AETHER_WORKSPACE_DIR", str(tmp_path / "workspaces"))
+    monkeypatch.setenv("AETHER_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("AETHER_SECURITY_ALLOWED_HOSTS", '["api.example.com"]')
+    # Provider hosts join the allowlist in the runtime, so `show` must include them too.
+    monkeypatch.delenv("AETHER_PROVIDER_MOCK", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "not-a-real-key")
+    runtime = build_runtime(load_settings(), build_placeholder_agents())
+    try:
+        runtime_fingerprint = runtime.security.fingerprint
+        assert len(runtime.security.policy.allowed_executables) == 1  # the interpreter
+        assert "api.groq.com" in runtime.security.policy.allowed_hosts
+    finally:
+        await runtime.close()
+
+    cli.main(["security", "show"])
+    shown = capsys.readouterr().out.splitlines()[0].removeprefix("Policy fingerprint: ")
+
+    assert shown == runtime_fingerprint

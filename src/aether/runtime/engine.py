@@ -41,7 +41,6 @@ from aether.runtime.scheduler import (
     SchedulingCandidate,
 )
 from aether.runtime.security import WARDEN_ONLY_SERVICES, SecurityServices
-from aether.runtime.settings import AgentRuntimeSettings
 from aether.runtime.shutdown import ShutdownSignalHandler
 from aether.runtime.worker import WorkerPool
 from aether.storage.models import TaskRecord, TaskStatus
@@ -78,19 +77,16 @@ class EngineLimits(BaseModel):
     task_interrupt_grace_seconds: float = Field(default=10.0, ge=0)
 
     @classmethod
-    def from_settings(
-        cls, settings: AetherSettings, runtime: AgentRuntimeSettings | None = None
-    ) -> "EngineLimits":
-        runtime = runtime or AgentRuntimeSettings()
+    def from_settings(cls, settings: AetherSettings) -> "EngineLimits":
         return cls(
             max_concurrent_tasks=settings.max_concurrent_tasks,
             task_timeout_seconds=settings.task_timeout_seconds,
             disk_path=settings.data_dir,
-            agent_tick_seconds=runtime.agent_tick_seconds,
-            agent_tick_overrides=runtime.agent_tick_overrides,
-            agent_tick_timeout_seconds=runtime.agent_tick_timeout_seconds,
-            task_control_poll_seconds=runtime.task_control_poll_seconds,
-            task_interrupt_grace_seconds=runtime.task_interrupt_grace_seconds,
+            agent_tick_seconds=settings.agent_tick_seconds,
+            agent_tick_overrides=settings.agent_tick_overrides,
+            agent_tick_timeout_seconds=settings.agent_tick_timeout_seconds,
+            task_control_poll_seconds=settings.task_control_poll_seconds,
+            task_interrupt_grace_seconds=settings.task_interrupt_grace_seconds,
         )
 
     def tick_seconds_for(self, agent_id: AgentId) -> float:

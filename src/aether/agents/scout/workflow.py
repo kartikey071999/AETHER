@@ -37,7 +37,6 @@ from aether.communication.contracts import (
     ResearchRequestPayload,
     ResourceEstimate,
     build_message,
-    validate_message,
 )
 from aether.communication.messages import AgentId, AgentMessage, MessageType
 from aether.security.untrusted import UntrustedContent
@@ -64,21 +63,6 @@ from aether.storage.repositories.tasks import ALLOWED_TASK_TRANSITIONS
 
 class ResearchLimitReached(ValueError):
     """Admission was refused rather than silently growing the queue."""
-
-
-class ResearchToolBus(MessageBus):
-    """Bind the shared tool-review helper's messages to the research correlation."""
-
-    def __init__(self, ctx: AgentContext, work: ResearchWork) -> None:
-        super().__init__(ctx.sessions, clock=ctx.clock)
-        self._parent_bus = ctx.bus
-        self._work = work
-
-    async def publish(self, message: AgentMessage) -> bool:
-        if message.message_type is MessageType.SECURITY_EVALUATE:
-            message = message.model_copy(update={"correlation_id": self._work.correlation_id})
-        validate_message(message)
-        return await self._parent_bus.publish(message)
 
 
 def as_utc(value: datetime) -> datetime:
