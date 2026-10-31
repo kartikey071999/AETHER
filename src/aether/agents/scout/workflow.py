@@ -20,6 +20,7 @@ from aether.agents.scout.schemas import (
     ResearchWork,
     SourceSpec,
 )
+from aether.agents.work_queue import MAX_LIMIT, work_queue
 from aether.communication.bus import MessageBus
 from aether.communication.contracts import (
     CandidateApproach,
@@ -175,10 +176,16 @@ async def _enqueue(
     ctx: AgentContext,
 ) -> UUID:
     key = f"research:{agent.value}:{message.message_id}"
+    queue = work_queue(ctx, agent)
+    existing = await queue.task_by_key(key)
+    if existing is not None:
+        return existing.id
+    # FAILED tasks may still be retried, so they keep occupying the research queue.
+    tasks = [
+        *await queue.open_tasks(limit=MAX_LIMIT),
+        *await queue.finished_tasks(states={TaskStatus.FAILED}, limit=MAX_LIMIT),
+    ]
     async with ctx.sessions() as session:
-        existing = await session.scalar(select(TaskRecord).where(TaskRecord.idempotency_key == key))
-        if existing is not None:
-            return existing.id
         objective = await session.get(ObjectiveRecord, request.objective_id)
         if objective is None:
             raise LookupError("research objective does not exist")
@@ -192,17 +199,12 @@ async def _enqueue(
             if parent is None or parent.objective_id != request.objective_id:
                 raise ValueError("research parent task must belong to the owning objective")
         investigations(request, limits)
-        active = select(TaskRecord).where(
-            TaskRecord.assigned_agent == agent.value,
-            TaskRecord.state.not_in([TaskStatus.COMPLETED, TaskStatus.CANCELLED]),
-        )
-        tasks = list(await session.scalars(active))
         expired_ids: set[UUID] = set()
         for task in tasks:
             if (
                 task.deadline
-                and as_utc(task.deadline) <= ctx.clock()
-                and TaskStatus.CANCELLED in ALLOWED_TASK_TRANSITIONS[TaskStatus(task.state)]
+                and task.deadline <= ctx.clock()
+                and TaskStatus.CANCELLED in ALLOWED_TASK_TRANSITIONS[task.state]
             ):
                 expired_ids.add(task.id)
         generated = list(
@@ -291,15 +293,13 @@ async def generate_objective(
 ) -> UUID:
     async with atomic_research(ctx) as transaction:
         now = ctx.clock()
+        if origin_message_id is not None:
+            existing = await work_queue(transaction, agent).task_by_key(
+                f"research:{agent.value}:{origin_message_id}"
+            )
+            if existing is not None:
+                return existing.objective_id
         async with transaction.sessions() as session:
-            if origin_message_id is not None:
-                existing = await session.scalar(
-                    select(TaskRecord).where(
-                        TaskRecord.idempotency_key == f"research:{agent.value}:{origin_message_id}"
-                    )
-                )
-                if existing is not None:
-                    return existing.objective_id
             count = await session.scalar(
                 select(func.count())
                 .select_from(ObjectiveRecord)
