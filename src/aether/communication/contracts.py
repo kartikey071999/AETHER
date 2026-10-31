@@ -960,7 +960,8 @@ SENDERS: dict[MessageType, frozenset[AgentId]] = {
     ),
     MessageType.RESEARCH_FINDING: frozenset({AgentId.SCOUT, AgentId.ROGUE}),
     MessageType.RESEARCH_CONSOLIDATED: frozenset({AgentId.SCOUT}),
-    MessageType.REQUIREMENT_SUBMIT: _ALL,
+    # ROGUE explores and submits findings to SCOUT; it never creates requirements (spec section 6).
+    MessageType.REQUIREMENT_SUBMIT: _ALL - {AgentId.ROGUE},
     MessageType.REQUIREMENT_EVALUATED: frozenset({AgentId.SCOUT}),
     # WARDEN cannot approve its own operations.
     MessageType.SECURITY_EVALUATE: _ALL - {AgentId.WARDEN},
