@@ -373,12 +373,19 @@ class ScoutAgent(BaseAgent):
         data: str,
         work: ResearchWork,
         ctx: AgentContext,
+        *,
+        kind: str = "llm",
+        limit: int | None = None,
     ) -> T | None:
         if ctx.models is None:
             ctx.logger.info("research.model_fallback", extra={"reason": "not_configured"})
             return None
         if not await workflow.reserve_budget(
-            self.agent_id, work, "llm", work.request.budget.max_llm_requests, ctx
+            self.agent_id,
+            work,
+            kind,
+            work.request.budget.max_llm_requests if limit is None else limit,
+            ctx,
         ):
             return None
         try:

@@ -97,15 +97,22 @@ async def handle_blocker(env: Env, payload: BlockerPayload, message: AgentMessag
         route_to=payload.route_to,
     )
     description = payload.description[:_MAX_TEXT]
+    # A resolution task is a replan; with replans disabled the user decides instead.
+    replans_disabled = route.creates_task and env.limits.max_replans_per_objective <= 0
 
-    if route.escalate:
+    if route.escalate or replans_disabled:
         await _block_task(env, task)
+        reason = (
+            f"{payload.kind.value} blocker persisted after {attempts} attempts: {description[:200]}"
+            if route.escalate
+            else f"{payload.kind.value} blocker needs a decision (automatic replanning is "
+            f"disabled): {description[:200]}"
+        )
         await escalate_objective(
             env,
             objective,
             key=f"blocker:{payload.blocker_id}",
-            reason=f"{payload.kind.value} blocker persisted after {attempts} attempts: "
-            f"{description[:200]}",
+            reason=reason,
             task_id=task.id,
         )
     elif payload.kind is BlockerKind.AUTHORIZATION:
@@ -118,7 +125,8 @@ async def handle_blocker(env: Env, payload: BlockerPayload, message: AgentMessag
     await env.store.record_decision(
         "blocker",
         f"{payload.kind.value} blocker routed to "
-        f"{route.assignee.value if route.assignee else 'user'}: {description[:200]}",
+        f"{route.assignee.value if route.assignee and not replans_disabled else 'user'}: "
+        f"{description[:200]}",
         key=marker,
         evidence=[payload.kind.value, str(attempts), str(payload.route_to.value)],
         objective_id=objective.id,

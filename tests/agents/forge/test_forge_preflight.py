@@ -9,7 +9,7 @@ from aether.agents.base import TaskResult, TaskResultStatus
 from aether.communication.contracts import ResourceEstimate
 from aether.communication.messages import AgentId, MessageType
 from aether.security import DecisionOutcome
-from aether.storage.models import TaskRecord, TaskStatus
+from aether.storage.models import RequirementStatus, TaskRecord, TaskStatus
 from aether.storage.repositories import TaskRepository
 
 
@@ -144,6 +144,13 @@ async def test_rejected_requirement_is_refused(env: ForgeEnv) -> None:
     await env.deliver_plan(task, [write("a.py")])
     result = await env.agent.execute_task(task, env.ctx)
     await assert_refused(env, task, result, "requirement_inactive")
+
+
+async def test_unapproved_requirement_is_refused(env: ForgeEnv) -> None:
+    task = await env.make_task(requirement_status=RequirementStatus.PROPOSED)
+    await env.deliver_plan(task, [write("a.py")])
+    result = await env.agent.execute_task(task, env.ctx)
+    await assert_refused(env, task, result, "requirement_not_approved")
 
 
 async def test_unreviewed_subprocess_waits_for_warden_without_executing(env: ForgeEnv) -> None:
