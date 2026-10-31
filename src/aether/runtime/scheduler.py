@@ -21,7 +21,7 @@ class SchedulingCandidate:
     deadline: datetime | None = None
     estimated_ram_bytes: int = 0
     estimated_disk_bytes: int = 0
-    estimated_cpu_percent: float = 25.0
+    estimated_cpu_percent: float = 25.0  # share of ONE core, not of the whole host
     is_build: bool = False
     dependencies_satisfied: bool = True
 
@@ -35,6 +35,10 @@ class SchedulerPolicy(BaseModel):
     min_free_disk_bytes: int = Field(default=5 * 1024**3, ge=0)
     priority_aging_points_per_hour: float = Field(default=1.0, ge=0)
     max_aging_points: float = Field(default=30.0, ge=0)
+
+    def cpu_ceiling_exceeded(self, host: HostResources) -> bool:
+        """Safety limit on whole-host CPU, independent of any task's estimate."""
+        return host.cpu_percent > self.max_cpu_percent
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,11 +154,11 @@ class Scheduler:
             return "Concurrent task limit reached."
         if candidate.is_build and resources.running_builds >= self._policy.max_concurrent_builds:
             return "Concurrent build limit reached."
-        if (
-            resources.host.cpu_percent + candidate.estimated_cpu_percent
-            > self._policy.max_cpu_percent
-        ):
-            return "Estimated CPU use exceeds the configured limit."
+        if self._policy.cpu_ceiling_exceeded(resources.host):
+            return "deferred: host CPU above the configured ceiling."
+        # The estimate is a share of one core, so compare it with idle capacity in core-percent.
+        if candidate.estimated_cpu_percent > resources.host.available_cpu_percent:
+            return "deferred: host CPU capacity below the task's estimate."
         if candidate.estimated_ram_bytes > resources.host.available_ram_bytes:
             return "Insufficient available RAM for the estimate."
         if (

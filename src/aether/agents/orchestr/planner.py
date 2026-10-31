@@ -83,6 +83,7 @@ DEFAULT_CRITERIA: dict[ObjectiveKind, tuple[str, ...]] = {
     ),
 }
 
+# CPU is a share of ONE core (the scheduler compares it with idle core capacity, not host percent).
 _RESOURCES: dict[StepKind, dict[str, int | float | bool | None]] = {
     StepKind.RESEARCH: {"ram_mb": 256, "disk_mb": 50, "cpu_percent": 15.0, "duration_s": 900},
     StepKind.CONSOLIDATION: {"ram_mb": 128, "disk_mb": 10, "cpu_percent": 10.0, "duration_s": 300},
