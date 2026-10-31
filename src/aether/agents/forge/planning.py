@@ -354,7 +354,6 @@ async def draft_with_llm(
             CompletionMessage(role="user", content=prompt),
         ),
         max_tokens=config.llm_max_tokens,
-        temperature=0,
         response_format="json_object",
         tier=ModelTier.STANDARD,
     )
