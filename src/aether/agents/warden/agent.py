@@ -26,6 +26,7 @@ from aether.agents.base import AgentContext, BaseAgent, TaskResult, TaskResultSt
 from aether.agents.warden.prompts import RISK_SUMMARY_SYSTEM, risk_summary_prompt
 from aether.agents.warden.schemas import RiskSummary
 from aether.agents.warden.workflow import Assessment, RequirementFacts, evaluate
+from aether.agents.work_queue import task_ref_in
 from aether.communication.contracts import (
     AuthorizationRequestPayload,
     InvalidPayload,
@@ -427,7 +428,7 @@ class WardenAgent(BaseAgent):
         if task_id is None:
             return None
         async with ctx.sessions() as session:
-            task = await session.get(TaskRecord, task_id)
+            task = await task_ref_in(session, task_id)
             decision = await session.get(SecurityDecisionRecord, decision_id)
             if task is None or decision is None:
                 return None
@@ -564,7 +565,10 @@ class WardenAgent(BaseAgent):
         Task and objective ids are not part of the reviewed input, so the hash is unchanged.
         """
         async with ctx.sessions() as session:
-            task_id = await _existing(session, TaskRecord, operation.task_id)
+            task = (
+                None if operation.task_id is None else await task_ref_in(session, operation.task_id)
+            )
+            task_id = task.id if task else None
             objective_id = await _existing(session, ObjectiveRecord, operation.objective_id)
         if task_id == operation.task_id and objective_id == operation.objective_id:
             return operation
@@ -684,13 +688,18 @@ class WardenAgent(BaseAgent):
     ) -> None:
         envelope: dict[str, Any] = {}
         async with ctx.sessions() as session:
-            for name, model, value in (
-                ("objective_id", ObjectiveRecord, operation.objective_id),
-                ("task_id", TaskRecord, operation.task_id),
-                ("requirement_id", RequirementRecord, operation.declared_requirement_id),
+            if await _existing(session, ObjectiveRecord, operation.objective_id) is not None:
+                envelope["objective_id"] = operation.objective_id
+            if (
+                operation.task_id is not None
+                and await task_ref_in(session, operation.task_id) is not None
             ):
-                if await _existing(session, model, value) is not None:
-                    envelope[name] = value
+                envelope["task_id"] = operation.task_id
+            if (
+                await _existing(session, RequirementRecord, operation.declared_requirement_id)
+                is not None
+            ):
+                envelope["requirement_id"] = operation.declared_requirement_id
         if correlation_id is not None:
             envelope["correlation_id"] = correlation_id
         message = build_message(

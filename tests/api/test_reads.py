@@ -239,6 +239,45 @@ def test_responses_scrub_credentials_but_keep_reference_ids(
     assert client.get("/agents").json()["items"][0]["config"]["apiKey"] == "***"
 
 
+def test_agent_queue_lists_only_that_agents_open_tasks_by_priority(seeded):
+    client, ids = seeded
+    response = client.get("/agents/forge/queue")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["agent"] == "FORGE" and body["view"] == "open"
+    assert [item["id"] for item in body["items"]] == [str(ids["task"]), str(ids["running"])]
+    assert body["count"] == 2
+    first = body["items"][0]
+    assert first["state"] == "ready" and first["ready_to_run"] is True
+    assert first["depends_on"][0]["task_id"] == str(ids["dependency"])
+    assert "description" not in first and "result" not in first
+
+
+def test_agent_queue_finished_is_explicit_and_scoped(seeded):
+    client, ids = seeded
+    ledger = client.get("/agents/LEDGER/queue", params={"finished": "true"}).json()
+    assert ledger["view"] == "finished"
+    assert [item["id"] for item in ledger["items"]] == [str(ids["dependency"])]
+    assert client.get("/agents/LEDGER/queue").json()["items"] == []
+    assert client.get("/agents/FORGE/queue", params={"finished": "true"}).json()["items"] == []
+
+
+def test_agent_queue_validates_agent_and_limit(seeded):
+    client, _ = seeded
+    assert client.get("/agents/NOBODY/queue").status_code == 404
+    assert client.get("/agents/FORGE/queue", params={"limit": 0}).status_code == 422
+    assert client.get("/agents/FORGE/queue", params={"limit": 201}).status_code == 422
+    assert len(client.get("/agents/FORGE/queue", params={"limit": 1}).json()["items"]) == 1
+
+
+def test_agent_queue_is_a_public_read_and_openapi_documented(client):
+    assert client.get("/agents/FORGE/queue").json()["items"] == []
+    schema = client.get("/openapi.json").json()
+    assert "security" not in schema["paths"]["/agents/{agent_id}/queue"]["get"]
+
+
 def test_openapi_documents_all_routes_and_admin_bearer(client):
     assert client.get("/docs").status_code == 200
     schema = client.get("/openapi.json").json()

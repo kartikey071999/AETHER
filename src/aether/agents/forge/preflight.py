@@ -15,7 +15,7 @@ from aether.agents.forge.schemas import (
     RefusalCode,
     RuntimeScopeDefect,
 )
-from aether.agents.work_queue import work_queue
+from aether.agents.work_queue import TaskAccessDenied, work_queue
 from aether.communication.contracts import BlockerKind
 from aether.communication.messages import AgentId
 from aether.security.operations import OperationKind
@@ -67,8 +67,14 @@ class Preflight:
         self, task: TaskRecord, plan: ForgePlan | None, ctx: AgentContext
     ) -> PreflightReport:
         report = PreflightReport()
-        async with ctx.sessions() as session:
-            fresh = await session.get(TaskRecord, task.id, populate_existing=True)
+        try:
+            fresh = await work_queue(ctx, AgentId.FORGE).task_record(task.id, executing=True)
+        except TaskAccessDenied:
+            report.task = task
+            report.refusals.append(
+                Refusal(RefusalCode.NOT_ASSIGNED, f"task is assigned to {task.assigned_agent}")
+            )
+            return report
         if fresh is None:
             report.refusals.append(Refusal(RefusalCode.TASK_MISSING, "the task does not exist"))
             return report

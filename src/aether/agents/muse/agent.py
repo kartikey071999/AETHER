@@ -41,9 +41,6 @@ from aether.tools import ExecutionFailed, ToolCallContext, ToolInputError, Unkno
 class MuseSettings:
     data_dir: Path = Path("data")
     dedupe_window: timedelta = timedelta(hours=1)
-    # Kept for configuration compatibility; the opening is always chosen deterministically from
-    # explicit preferences (the former model "polish" could only return that same template).
-    polish: bool = False
 
     def __post_init__(self) -> None:
         if self.dedupe_window < timedelta(0):

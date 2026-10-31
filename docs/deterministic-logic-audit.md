@@ -1,4 +1,4 @@
-# Deterministic logic audit (T-053)
+# Deterministic logic audit (T-053, extended in T-054)
 
 Goal from the user: *the list of tasks an agent can see is produced by Python code, which filters
 out finished tasks and tasks not for that agent; an agent that wants finished tasks must ask for
@@ -43,7 +43,46 @@ Agents refactored onto it:
 outside `work_queue.py`. The allowlist is explicit and checked for staleness:
 `orchestr/store.py` and `orchestr/pressure.py` (ORCHESTR is the coordinator that plans, schedules
 and pauses everyone's tasks) and `ledger/queries.py` (LEDGER's system-wide operational read model).
-Point lookups of a task the agent was handed (`session.get(TaskRecord, id)`) remain allowed.
+Point lookups no longer exist in agents (T-054): every agent read of a task goes through
+`work_queue.py`; see "Relation-based reads" below.
+
+### Relation-based reads (T-054)
+
+Agents used to look up tasks directly with `session.get(TaskRecord, id)`. Those reads now go
+through the queue with explicit rights, and the guard fails on any call that passes the bare
+`TaskRecord` class (`session.get`, `existing_id`, ...):
+
+| Call | Who | Returns |
+|------|-----|---------|
+| `task_detail(id, related_to=None, message=None)` | owner, ORCHESTR, LEDGER, plus the relations below | the same detail view as before. |
+| `task_record(id, message=None, executing=False)` | same rights | a detached ORM snapshot for agents that need lease fields (FORGE). `executing=True` additionally lets the agent read an unassigned task it is executing. |
+| `task_ref(id)` / `task_ref_in(session, id)` | any agent | **identity only** (id, state, owner, parent, objective, dependency ids; never title, description or result). Used where an agent only has to confirm a task exists or check its state/links (WARDEN settling, MUSE link validation, LEDGER envelopes, SCOUT security decisions). `task_ref_in` runs inside the caller's own transaction. |
+
+Relation-based rights (anything else is denied and recorded as `task.access_denied`):
+
+* the **message** relation: the agent is the message's `target_agent` and the message refers to the
+  task (envelope `task_id` or payload `task_id`), for example a TASK_ASSIGN, BLOCKER or TEST_REPORT;
+* the **parent/dependency** relation: `related_to` is the agent's own task and the requested task
+  is its parent or one of its dependencies (SCOUT's parent check);
+* the **executing** relation: the agent is executing a task that is not assigned to anyone yet.
+
+`tests/security/test_task_query_guard.py` keeps the explicit allowlist (`orchestr/store.py`,
+`orchestr/pressure.py`, `ledger/queries.py`) and fails when an entry becomes stale.
+
+### Read-only views (T-054)
+
+`src/aether/agents/queue_view.py` renders one agent's queue for operators:
+
+* `aether agents queue <AGENT> [--finished] [--limit N]` (the bare `aether agents` still lists
+  responsibilities);
+* `GET /agents/{agent_id}/queue?finished=false&limit=50` (public read like the other GET routes,
+  `no-store`, 404 for unknown agents, `limit` 1..200);
+* `agent_queue_panel(sessions, agent_id, finished=, limit=)` is the data hook for a dashboard
+  panel (the dashboard itself is untouched; T-062 owns it).
+
+Open view = the agent's open tasks in queue order; `finished=true` = completed, failed and
+cancelled tasks, newest first. Items carry ids, titles, state, priority, `depends_on`,
+`blocked_by` and `ready_to_run`; never descriptions, results or errors.
 
 ## 2. Audit: decisions per agent
 
@@ -98,7 +137,7 @@ Legend: **D** = already deterministic code, **M** = model involved, **→ code**
 | Decision | Status |
 |----------|--------|
 | Rendering, sections, short/long/detail modes, identifier check, dedupe/suppression, routing of non-handoff notices | D |
-| Opening line ("polish") | was **M** (light-tier call whose output was only accepted if it equalled the template) **→ code**: `opening_for(preferences)` only; no model call is made. `MuseSettings.polish` is accepted but has no effect. |
+| Opening line ("polish") | was **M** (light-tier call whose output was only accepted if it equalled the template) **→ code**: `opening_for(preferences)` only; no model call is made. The no-op `MuseSettings.polish` flag was removed in T-054. |
 
 ## 3. What moved (with regression tests)
 
@@ -123,12 +162,23 @@ Legend: **D** = already deterministic code, **M** = model involved, **→ code**
 
 ## 5. Known limitations / follow-ups
 
-* Point lookups (`session.get(TaskRecord, id)`) are still allowed in agents (SCOUT blocker and
-  parent-task checks, FORGE, LEDGER, MUSE and WARDEN settling a specific task). They read a task
-  the agent was explicitly handed or referenced by a message; routing them through `task_detail`
-  would need explicit read rights for those cross-agent relations.
+* `task_ref` is deliberately open to every agent because it exposes identity and links only. If
+  that is ever too wide, narrow it with the same relation rights as `task_detail`.
 * ORCHESTR and LEDGER keep allowlisted system-wide queries; they are the coordinator and the
   record keeper by design.
 * A denial raised inside SCOUT's atomic research transaction is staged in that transaction and is
   rolled back with it (the exception still propagates).
-* No API endpoint exposes the per-agent work queue yet.
+* The dashboard panel hook exists (`agent_queue_panel`) but is not rendered yet; that waits on the
+  dashboard redesign (T-062).
+
+### Borderline candidates reviewed in T-054
+
+Every remaining model decision was re-checked against "clearly deterministic". None qualified, so
+nothing else moved; the reasons are recorded so the next audit does not repeat the work:
+
+| Candidate | Why it stays |
+|-----------|--------------|
+| WARDEN risk summary | Summarizes untrusted evidence text; a template would just echo it. Already skipped when there is no evidence, optional, and never read by the decision. |
+| ORCHESTR extra tasks | Optional additions to a deterministic plan; the validated fallback is the template. |
+| FORGE plan draft | Only used when no spec or template applies. Moving it into code means writing new templates, which needs real usage data and per-template tests, not a refactor. |
+| SCOUT summary / ROGUE ideas and critique | Open-ended synthesis; every decision derived from them is already code. |

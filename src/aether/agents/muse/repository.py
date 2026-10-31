@@ -20,6 +20,7 @@ from aether.agents.muse.schemas import (
     ResponseCheckpoint,
     StoredOutbox,
 )
+from aether.agents.work_queue import task_ref_in
 from aether.communication.contracts import (
     CommunicationRequestPayload,
     UserDecision,
@@ -35,7 +36,6 @@ from aether.storage.models import (
     ObjectiveRecord,
     PersonRecord,
     PreferenceSource,
-    TaskRecord,
     UserPreferenceRecord,
 )
 from aether.storage.repositories._events import add_event, as_utc
@@ -545,7 +545,7 @@ class MuseRepository(PersonRepository):
             objective_id = objective_id or authorization.objective_id
             task_id = task_id or authorization.task_id
         if task_id is not None:
-            task = await session.get(TaskRecord, task_id)
+            task = await task_ref_in(session, task_id)
             if task is None:
                 raise LookupError("Task does not exist")
             if objective_id is not None and objective_id != task.objective_id:

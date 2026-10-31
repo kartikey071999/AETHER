@@ -13,13 +13,13 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from aether.agents.work_queue import task_ref_in
 from aether.communication.contracts import TestCaseResult, TestCounts, VerificationVerdict
 from aether.communication.messages import AgentId
 from aether.storage.models import (
     CapabilityRecord,
     ExecutionRunRecord,
     RunStatus,
-    TaskRecord,
     TestResultRecord,
     TestRunRecord,
     TestVerdict,
@@ -94,9 +94,10 @@ class TestRunStore:
             if record is not None:
                 session.expunge(record)
                 return record
+            linked_task = await task_ref_in(session, task_id) if task_id is not None else None
             record = TestRunRecord(
                 id=run_id,
-                task_id=await existing_id(session, TaskRecord, task_id),
+                task_id=linked_task.id if linked_task else None,
                 capability_id=await existing_id(session, CapabilityRecord, capability_id),
                 execution_run_id=await existing_id(session, ExecutionRunRecord, execution_run_id),
                 suite=suite[:200],

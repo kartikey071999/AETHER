@@ -53,7 +53,6 @@ from aether.storage.models import (
     RequirementRecord,
     RequirementStatus,
     ResearchFindingRecord,
-    TaskRecord,
     TaskStatus,
 )
 from aether.storage.repositories import (
@@ -195,7 +194,7 @@ async def _enqueue(
         if objective.review_at and as_utc(objective.review_at) <= ctx.clock():
             raise ResearchLimitReached("objective review date has elapsed")
         if request.task_id is not None:
-            parent = await session.get(TaskRecord, request.task_id)
+            parent = await queue.task_detail(request.task_id, message=message)
             if parent is None or parent.objective_id != request.objective_id:
                 raise ValueError("research parent task must belong to the owning objective")
         investigations(request, limits)

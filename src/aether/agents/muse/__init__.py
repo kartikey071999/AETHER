@@ -17,8 +17,7 @@ Supported explicit preferences are length (short/normal/long), tone (neutral/dir
 detail (minimal/normal/detailed), formality (neutral/casual/formal), and channel (file/console).
 Both channel hints have a durable markdown artifact; a CLI can consume the console hint.
 All factual content is preserved even in short mode. The fact-free opening line is chosen
-deterministically from explicit tone/formality; no model is called while composing a message
-(the legacy ``MuseSettings.polish`` flag is accepted but has no effect).
+deterministically from explicit tone/formality; no model is called while composing a message.
 
 Optional handoff personalization_context keys:
 decision_options and decision_deadlines map each exact decision string to its choices and
