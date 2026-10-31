@@ -85,6 +85,46 @@ def test_test_run_verdict_migration_preserves_existing_rows(tmp_path, monkeypatc
         engine.dispose()
 
 
+def test_provider_usage_objective_migration_keeps_history_and_round_trips(tmp_path, monkeypatch):
+    database_path = tmp_path / "usage_objective.db"
+    config = _alembic_config(monkeypatch, database_path)
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        command.upgrade(config, "0004_test_run_verdict")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO provider_usage (id, provider, model, agent, request_count, "
+                    "input_tokens, output_tokens, cost_usd, status, occurred_at) "
+                    "VALUES (:id, 'mock', 'm0', 'FORGE', 1, 5, 7, 0, 'succeeded', CURRENT_TIMESTAMP)"
+                ),
+                {"id": "00000000000040008000000000000002"},
+            )
+        command.upgrade(config, "head")
+        inspector = inspect(engine)
+        assert "objective_id" in {c["name"] for c in inspector.get_columns("provider_usage")}
+        indexes = {i["name"]: i["column_names"] for i in inspector.get_indexes("provider_usage")}
+        assert indexes["ix_provider_usage_objective_agent"] == ["objective_id", "agent"]
+        with engine.connect() as connection:
+            row = connection.execute(text("SELECT objective_id, agent FROM provider_usage")).one()
+        assert tuple(row) == (None, "FORGE")
+
+        command.downgrade(config, "0004_test_run_verdict")
+        inspector = inspect(engine)
+        assert "objective_id" not in {c["name"] for c in inspector.get_columns("provider_usage")}
+        assert "ix_provider_usage_objective_agent" not in {
+            i["name"] for i in inspector.get_indexes("provider_usage")
+        }
+        with engine.connect() as connection:
+            assert connection.execute(text("SELECT agent FROM provider_usage")).scalar_one() == (
+                "FORGE"
+            )
+        command.upgrade(config, "head")
+        assert "objective_id" in {c["name"] for c in inspect(engine).get_columns("provider_usage")}
+    finally:
+        engine.dispose()
+
+
 def test_migrations_upgrade_to_models_and_downgrade_cleanly(tmp_path, monkeypatch):
     database_path = tmp_path / "migrations.db"
     config = _alembic_config(monkeypatch, database_path)
