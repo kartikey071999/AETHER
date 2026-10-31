@@ -13,6 +13,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from aether.storage.models import (
     EventCategory,
+    ExecutionRunRecord,
     ResultOutcome,
     RunStatus,
     TaskRecord,
@@ -40,15 +41,30 @@ class TestResultInput:
     message: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class TestRunCounts:
+    __test__ = False
+
+    passed: int = 0
+    failed: int = 0
+    errors: int = 0
+
+
 class _AcceptanceResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
 
     criterion: str = Field(min_length=1)
     passed: bool = Field(strict=True)
     evidence: str = ""
+    tests: list[str] | None = None
 
 
 _ACCEPTANCE_RESULTS = TypeAdapter(list[_AcceptanceResult])
+_STATUS_FOR_VERDICT = {
+    TestVerdict.VERIFIED: RunStatus.SUCCEEDED,
+    TestVerdict.FAILED: RunStatus.FAILED,
+    TestVerdict.INCONCLUSIVE: RunStatus.CANCELLED,
+}
 
 
 class TestRunRepository:
@@ -186,12 +202,23 @@ class TestRunRepository:
         actor: str = "LEDGER",
         now: datetime | None = None,
         correlation_id: UUID | None = None,
+        counts: TestRunCounts | None = None,
+        results: Sequence[TestResultInput] = (),
+        execution_run_id: UUID | None = None,
+        evidence: Sequence[str] | None = None,
+        source: str = "storage.repositories",
     ) -> None:
+        """Record the verdict, status, criteria and (optionally) counts and results in one write.
+
+        ``counts`` replaces the running tally; ``results`` are stored without changing counts.
+        """
         verdict = TestVerdict(verdict)
         criteria = _ACCEPTANCE_RESULTS.validate_python(acceptance_results or [])
         current_time = _current_time(now)
         async with self._sessions() as session, session.begin():
             run = await _lock_running_run(session, run_id)
+            if counts is not None:
+                run.passed, run.failed, run.errors = counts.passed, counts.failed, counts.errors
             failing = run.failed + run.errors > 0 or any(not item.passed for item in criteria)
             if verdict is TestVerdict.VERIFIED and (not criteria or failing):
                 raise ValueError(
@@ -204,13 +231,28 @@ class TestRunRepository:
                 started_at = started_at.replace(tzinfo=UTC)
             if current_time < started_at:
                 raise ValueError("A test run cannot finish before it starts")
-            run.status = (
-                RunStatus.SUCCEEDED if verdict is TestVerdict.VERIFIED else RunStatus.FAILED
-            )
+            run.status = _STATUS_FOR_VERDICT[verdict]
             run.verdict = verdict
-            run.acceptance_results = [item.model_dump(mode="json") for item in criteria]
-            run.report_path = report_path
+            run.acceptance_results = [
+                item.model_dump(mode="json", exclude_none=True) for item in criteria
+            ]
+            run.report_path = report_path[:1024] if report_path else None
             run.finished_at = current_time
+            if execution_run_id is not None and await session.get(
+                ExecutionRunRecord, execution_run_id
+            ):
+                run.execution_run_id = execution_run_id
+            session.add_all(
+                TestResultRecord(
+                    test_run_id=run_id,
+                    name=result.name[:500],
+                    outcome=ResultOutcome(result.outcome),
+                    duration_ms=result.duration_ms,
+                    message=result.message,
+                )
+                for result in results
+            )
+            await session.flush()
             skipped = await session.scalar(
                 select(func.count())
                 .select_from(TestResultRecord)
@@ -233,12 +275,16 @@ class TestRunRepository:
                     "skipped": skipped,
                     "verdict": verdict,
                     "duration_seconds": (current_time - started_at).total_seconds(),
-                    "evidence": [item.evidence for item in criteria if item.evidence],
+                    "evidence": list(evidence)
+                    if evidence is not None
+                    else [item.evidence for item in criteria if item.evidence],
                 },
                 category=EventCategory.TEST,
                 correlation_id=correlation_id,
                 objective_id=await _objective_id(session, run),
                 task_id=run.task_id,
+                idempotency_key=f"test.run_finished:{run.id}",
+                source=source,
             )
 
     async def get(self, run_id: UUID) -> TestRunRecord | None:
@@ -284,7 +330,7 @@ async def _lock_running_run(session: AsyncSession, run_id: UUID) -> TestRunRecor
     run = await session.get(TestRunRecord, run_id, with_for_update=True)
     if run is None:
         raise LookupError(f"Test run {run_id} does not exist")
-    if run.status != RunStatus.RUNNING or run.finished_at is not None:
+    if run.status not in (RunStatus.PENDING, RunStatus.RUNNING) or run.finished_at is not None:
         raise InvalidTestRunTransition(f"Test run {run_id} is already {run.status}")
     return run
 

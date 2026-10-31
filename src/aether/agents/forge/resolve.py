@@ -18,15 +18,16 @@ _BULLET = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
 
 
 async def load_requirement(ctx: AgentContext, task: TaskRecord) -> RequirementRecord | None:
-    """The task's requirement, else the objective's approved capability requirement.
+    """The requirement ORCHESTR linked to the task.
 
-    Plans are made before research adopts an approach, so implementation tasks often carry no
-    ``requirement_id``; FORGE then retrieves the structured requirement from the shared records.
+    Only legacy tasks (created before ORCHESTR linked requirements) carry no ``requirement_id``;
+    for those FORGE still falls back to the objective's latest approved capability requirement,
+    and logs that it did.
     """
     async with ctx.sessions() as session:
         if task.requirement_id is not None:
             return await session.get(RequirementRecord, task.requirement_id)
-        return await session.scalar(
+        fallback = await session.scalar(
             select(RequirementRecord)
             .where(
                 RequirementRecord.objective_id == task.objective_id,
@@ -36,6 +37,14 @@ async def load_requirement(ctx: AgentContext, task: TaskRecord) -> RequirementRe
             .order_by(RequirementRecord.created_at.desc(), RequirementRecord.id)
             .limit(1)
         )
+    if fallback is not None:
+        ctx.logger.warning(
+            "forge.legacy_requirement_fallback: task %s has no linked requirement; using %s",
+            task.id,
+            fallback.id,
+            extra={"task_id": str(task.id), "requirement_id": str(fallback.id)},
+        )
+    return fallback
 
 
 def description_criteria(description: str) -> tuple[str, ...]:

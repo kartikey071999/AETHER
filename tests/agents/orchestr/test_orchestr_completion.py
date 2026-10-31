@@ -20,6 +20,7 @@ CRITERION = "PDF text is extracted correctly"
 
 async def complete_all(harness: Harness, objective_id: UUID) -> None:
     """Drive every task to COMPLETED the way the worker pool would, releasing dependents."""
+    await harness.approve_requirement(objective_id)
     for _ in range(12):
         ready = [
             task
@@ -143,7 +144,10 @@ async def test_failed_report_appends_rework_then_escalates(harness: Harness) -> 
     assert any(key.startswith("rework.") for key in tasks)
     assert any(key.startswith("reverify.") for key in tasks)
     assert (await harness.get_objective(objective_id)).status == "active"
-
+    # Rework and re-verification tasks keep the requirement the original tasks were linked to.
+    follow_ups = [task for key, task in tasks.items() if key.startswith(("rework.", "reverify."))]
+    assert follow_ups and all(task.requirement_id is not None for task in follow_ups)
+    assert {task.requirement_id for task in follow_ups} == {tasks["implementation"].requirement_id}
     for _ in range(3):
         await harness.send(
             AgentId.LEDGER, report(VerificationVerdict.FAILED), objective_id=objective_id

@@ -56,6 +56,7 @@ class RefusalCode(StrEnum):
     NO_LEASE = "no_live_lease"
     NO_REQUIREMENT = "requirement_missing"
     REQUIREMENT_INACTIVE = "requirement_inactive"
+    REQUIREMENT_NOT_APPROVED = "requirement_not_approved"
     OBJECTIVE_MISMATCH = "objective_mismatch"
     NO_ACCEPTANCE_CRITERIA = "acceptance_criteria_missing"
     NO_PLAN = "implementation_plan_missing"

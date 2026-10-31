@@ -781,25 +781,26 @@ async def consolidate(
         if requirement_ids:
             # SCOUT evaluated the evidence and adopted the approach: the requirement is approved
             # for implementation (operations still need WARDEN; completion needs LEDGER).
-            await publish(
-                AgentId.SCOUT,
-                AgentId.LEDGER,
-                RequirementEvaluatedPayload(
-                    requirement_id=requirement_ids[0],
-                    objective_id=finding.objective_id,
-                    title=requirement_title,
-                    requirement_type=RequirementType.CAPABILITY,
-                    acceptance_criteria=criteria,
-                    source_finding_id=finding.id,
-                    security_review_required=True,
-                    outcome=EvaluationOutcome.APPROVED,
-                    rationale=decision.rationale,
-                ),
-                transaction,
-                key=finding.id,
-                suffix="evaluated:LEDGER",
-                correlation_id=message.correlation_id,
-            )
+            for target in (AgentId.LEDGER, AgentId.ORCHESTR):
+                await publish(
+                    AgentId.SCOUT,
+                    target,
+                    RequirementEvaluatedPayload(
+                        requirement_id=requirement_ids[0],
+                        objective_id=finding.objective_id,
+                        title=requirement_title,
+                        requirement_type=RequirementType.CAPABILITY,
+                        acceptance_criteria=criteria,
+                        source_finding_id=finding.id,
+                        security_review_required=True,
+                        outcome=EvaluationOutcome.APPROVED,
+                        rationale=decision.rationale,
+                    ),
+                    transaction,
+                    key=finding.id,
+                    suffix=f"evaluated:{target.value}",
+                    correlation_id=message.correlation_id,
+                )
         statuses = {
             ConsolidationDecision.ADOPT: FindingStatus.ADOPTED,
             ConsolidationDecision.REJECT: FindingStatus.REJECTED,

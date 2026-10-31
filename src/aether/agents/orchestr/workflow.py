@@ -11,6 +11,7 @@ from aether.agents.orchestr.blockers import (
 from aether.agents.orchestr.completion import handle_test_report
 from aether.agents.orchestr.env import Env
 from aether.agents.orchestr.intake import ObjectiveRejected, create_objective
+from aether.agents.orchestr.linking import handle_consolidated, handle_evaluated
 from aether.agents.orchestr.planner import plan_idempotency_key
 from aether.agents.orchestr.planning import plan_objective
 from aether.agents.orchestr.priority import format_boost_reason, format_set_reason
@@ -391,8 +392,8 @@ _HANDLERS: dict[MessageType, Handler] = {
     MessageType.PROGRESS_UPDATE: _quiet,
     MessageType.COMMUNICATION_DELIVERED: _quiet,
     MessageType.IMPLEMENTATION_PLAN: _observe,
-    MessageType.RESEARCH_CONSOLIDATED: _observe,
-    MessageType.REQUIREMENT_EVALUATED: _observe,
+    MessageType.RESEARCH_CONSOLIDATED: handle_consolidated,
+    MessageType.REQUIREMENT_EVALUATED: handle_evaluated,
     MessageType.CAPABILITY_REGISTER: _observe,
     MessageType.EXECUTION_RESULT: _observe,
 }

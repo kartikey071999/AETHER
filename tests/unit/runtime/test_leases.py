@@ -1,5 +1,5 @@
 import asyncio
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from runtime_helpers import event_counts, get_task, make_task
 
@@ -80,6 +80,56 @@ async def test_release_sets_final_status_and_clears_lease(sessions, objective_id
     assert task.lease_owner is None and task.lease_expires_at is None
     counts = await event_counts(sessions, task_id)
     assert counts["task.lease_released"] == 1 and counts["task.completed"] == 1
+
+
+def _utc(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+async def test_lease_sets_started_and_completed_timestamps(sessions, objective_id, clock) -> None:
+    leases = LeaseManager(sessions, clock=clock)
+    task_id = await make_task(sessions, objective_id)
+    assert (await get_task(sessions, task_id)).started_at is None
+
+    await leases.acquire(task_id, "w1", TTL)
+    started = clock()
+    task = await get_task(sessions, task_id)
+    assert _utc(task.started_at) == _utc(started)
+    assert task.completed_at is None
+
+    clock.advance(5)
+    await leases.release(task_id, "w1", TaskStatus.COMPLETED, outcome_event="task.completed")
+    task = await get_task(sessions, task_id)
+    assert _utc(task.started_at) == _utc(started)
+    assert _utc(task.completed_at) == _utc(started) + timedelta(seconds=5)
+
+
+async def test_retry_keeps_first_start_and_has_no_completion(sessions, objective_id, clock) -> None:
+    leases = LeaseManager(sessions, clock=clock)
+    task_id = await make_task(sessions, objective_id)
+    await leases.acquire(task_id, "w1", TTL)
+    first_start = _utc((await get_task(sessions, task_id)).started_at)
+
+    clock.advance(5)
+    await leases.release(task_id, "w1", TaskStatus.READY, refund_attempt=True)
+    task = await get_task(sessions, task_id)
+    assert task.completed_at is None
+
+    clock.advance(5)
+    await leases.acquire(task_id, "w2", TTL)
+    assert _utc((await get_task(sessions, task_id)).started_at) == first_start
+
+
+async def test_recovery_failure_sets_completed_at(sessions, objective_id, clock) -> None:
+    leases = LeaseManager(sessions, clock=clock)
+    task_id = await make_task(sessions, objective_id, max_attempts=1)
+    await leases.acquire(task_id, "dead", TTL)
+    clock.advance(31)
+    await leases.recover_expired()
+
+    task = await get_task(sessions, task_id)
+    assert task.state == TaskStatus.FAILED
+    assert task.started_at is not None and task.completed_at is not None
 
 
 async def test_release_back_to_ready_and_cancel_follow_transition_graph(

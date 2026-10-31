@@ -36,6 +36,13 @@ APPROVAL_KINDS = frozenset(
     }
 )
 _INACTIVE = frozenset({RequirementStatus.REJECTED.value, RequirementStatus.SUPERSEDED.value})
+_UNAPPROVED = frozenset(
+    {
+        RequirementStatus.PROPOSED.value,
+        RequirementStatus.EVALUATING.value,
+        RequirementStatus.NEEDS_EVIDENCE.value,
+    }
+)
 
 
 def _aware(value: datetime | None) -> datetime | None:
@@ -148,6 +155,13 @@ class Preflight:
                 Refusal(
                     RefusalCode.REQUIREMENT_INACTIVE,
                     f"the linked requirement is {requirement.status}",
+                )
+            )
+        elif requirement.status in _UNAPPROVED:
+            report.refusals.append(
+                Refusal(
+                    RefusalCode.REQUIREMENT_NOT_APPROVED,
+                    f"the linked requirement is {requirement.status}, not approved",
                 )
             )
         elif requirement.objective_id != task.objective_id:

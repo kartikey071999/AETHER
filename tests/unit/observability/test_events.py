@@ -166,6 +166,7 @@ PAYLOAD_EXAMPLES = {
     },
     "objective.priority_changed": {"from_priority": 10, "to_priority": 20, "reason": "Urgent"},
     "objective.status_changed": {"from_status": "active", "to_status": "paused"},
+    "task.requirement_linked": {"requirement_id": str(uuid4()), "reason": "Approved"},
     "task.dependency_added": {"depends_on_task_id": str(uuid4())},
     "task.dependency_removed": {"depends_on_task_id": str(uuid4())},
     "task.lease_acquired": {

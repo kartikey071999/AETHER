@@ -361,6 +361,7 @@ async def test_agents_are_constructed_with_runtime_settings(
         assert engine.agent(agent_id).limits == ResearchLimits(max_sources=2)  # type: ignore[attr-defined]
     assert engine.tick_hooks == {
         AgentId.ORCHESTR: "tick",
+        AgentId.LEDGER: "tick",
         AgentId.WARDEN: "resume_waiting_tasks",
         AgentId.MUSE: "resume_pending",
     }

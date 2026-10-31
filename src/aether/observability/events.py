@@ -111,6 +111,11 @@ class TaskAssignedPayload(EventPayload):
     reason: str
 
 
+class TaskRequirementLinkedPayload(EventPayload):
+    requirement_id: UUID
+    reason: str = ""
+
+
 class TaskDependencyPayload(EventPayload):
     depends_on_task_id: UUID
 
@@ -513,6 +518,7 @@ EVENT_TYPES: dict[str, type[BaseModel]] = {
     "task.estimates_changed": TaskEstimatesChangedPayload,
     "task.transitioned": TaskTransitionedPayload,
     "task.assigned": TaskAssignedPayload,
+    "task.requirement_linked": TaskRequirementLinkedPayload,
     "task.dependency_added": TaskDependencyPayload,
     "task.dependency_removed": TaskDependencyPayload,
     "task.lease_acquired": TaskLeaseAcquiredPayload,

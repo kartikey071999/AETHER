@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -175,9 +175,12 @@ class TestRunView(LedgerView):
     report_path: str | None
     started_at: datetime
     finished_at: datetime | None
+    stored_verdict: str | None = Field(default=None, validation_alias="verdict")
 
     @property
     def verdict(self) -> VerificationVerdict | None:
+        if self.stored_verdict:
+            return VerificationVerdict(self.stored_verdict)
         return verdict_for_status(self.status)
 
 

@@ -9,6 +9,7 @@ from aether.agents.orchestr.communication import UpdateEvent, UpdateKind
 from aether.agents.orchestr.completion import evaluate_completion
 from aether.agents.orchestr.env import Env, as_utc
 from aether.agents.orchestr.intake import LIMIT_DEFERRAL_REASON
+from aether.agents.orchestr.linking import held_for_requirement
 from aether.agents.orchestr.planning import plan_objective
 from aether.agents.orchestr.pressure import is_build, manage_pressure
 from aether.agents.orchestr.priorities import refresh_all, task_rank
@@ -153,6 +154,8 @@ async def _release(env: Env, active: list[ObjectiveRecord], report: TickReport) 
         for task in pending
         if all(dep_states.get(dep) == TaskStatus.COMPLETED.value for dep in dependencies[task.id])
     ]
+    held = await held_for_requirement(env, ready)
+    ready = [task for task in ready if task.id not in held]
     if not ready:
         return
     try:
