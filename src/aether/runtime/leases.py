@@ -1,5 +1,6 @@
 """Exclusive, expiring task leases backed by compare-and-set updates."""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -26,10 +27,14 @@ def _outcome_payload(details: dict[str, Any]) -> dict[str, Any]:
 
 
 # Terminal-ish targets that need several hops to respect the allowed transition graph.
+# Cancelling a running task passes through BLOCKED: it was stopped, it did not fail.
 _ROUTES: dict[TaskStatus, tuple[TaskStatus, ...]] = {
     TaskStatus.READY: (TaskStatus.RETRYING, TaskStatus.READY),
-    TaskStatus.CANCELLED: (TaskStatus.FAILED, TaskStatus.CANCELLED),
+    TaskStatus.CANCELLED: (TaskStatus.BLOCKED, TaskStatus.CANCELLED),
 }
+
+# Extra writes committed atomically with a successful release (session, objective_id, now).
+ReleaseStage = Callable[[AsyncSession, UUID | None, datetime], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,11 +161,13 @@ class LeaseManager:
         details: dict[str, Any] | None = None,
         outcome_event: str | None = None,
         refund_attempt: bool = False,
+        stage: ReleaseStage | None = None,
     ) -> bool:
         """Release a lease held by `owner`, moving the task to `final_status`.
 
         READY and CANCELLED are reached through the intermediate states the transition graph
-        requires. Returns False when the caller no longer owns a RUNNING lease.
+        requires. `stage` adds writes to the same transaction once the compare-and-set
+        succeeded. Returns False when the caller no longer owns a RUNNING lease.
         """
         now = self._clock()
         route = _ROUTES.get(final_status, (final_status,))
@@ -224,6 +231,8 @@ class LeaseManager:
                     task_id=task_id,
                     objective_id=objective_id,
                 )
+            if stage is not None:
+                await stage(session, objective_id, now)
         return True
 
     async def owned_by(self, owner_prefix: str) -> list[tuple[UUID, str]]:

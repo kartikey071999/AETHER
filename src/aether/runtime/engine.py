@@ -3,7 +3,8 @@
 import asyncio
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -28,6 +29,7 @@ from aether.observability.events import build_event
 from aether.observability.logging import log_event
 from aether.observability.recorder import EventRecorder
 from aether.runtime._support import Clock, as_utc, utc_now
+from aether.runtime.control import TASK_CONTROL_SERVICE, TaskControl
 from aether.runtime.leases import RUNTIME_ACTOR, LeaseManager
 from aether.runtime.lifecycle import Lifecycle, LifecycleState
 from aether.runtime.models import ModelServices
@@ -38,12 +40,14 @@ from aether.runtime.scheduler import (
     SchedulerResources,
     SchedulingCandidate,
 )
-from aether.runtime.security import SecurityServices
+from aether.runtime.security import WARDEN_ONLY_SERVICES, SecurityServices
+from aether.runtime.settings import AgentRuntimeSettings
 from aether.runtime.shutdown import ShutdownSignalHandler
 from aether.runtime.worker import WorkerPool
 from aether.storage.models import TaskRecord, TaskStatus
 
 _MIB = 1024 * 1024
+_MAX_ERROR_CHARS = 2000
 
 
 class ResourceSnapshotter(Protocol):
@@ -64,14 +68,50 @@ class EngineLimits(BaseModel):
     message_batch_size: int = Field(default=10, ge=1)
     shutdown_timeout_seconds: float = Field(default=30.0, ge=0)
     disk_path: Path = Path(".")
+    # Periodic agent hooks: interval measured with the engine clock, checked every poll.
+    agent_tick_seconds: float = Field(default=30.0, gt=0)
+    agent_tick_overrides: dict[AgentId, float] = Field(default_factory=dict)
+    agent_tick_timeout_seconds: float = Field(default=120.0, gt=0)
+    tick_poll_seconds: float = Field(default=1.0, gt=0)
+    # Cooperative pause/cancel of running tasks.
+    task_control_poll_seconds: float = Field(default=5.0, gt=0)
+    task_interrupt_grace_seconds: float = Field(default=10.0, ge=0)
 
     @classmethod
-    def from_settings(cls, settings: AetherSettings) -> "EngineLimits":
+    def from_settings(
+        cls, settings: AetherSettings, runtime: AgentRuntimeSettings | None = None
+    ) -> "EngineLimits":
+        runtime = runtime or AgentRuntimeSettings()
         return cls(
             max_concurrent_tasks=settings.max_concurrent_tasks,
             task_timeout_seconds=settings.task_timeout_seconds,
             disk_path=settings.data_dir,
+            agent_tick_seconds=runtime.agent_tick_seconds,
+            agent_tick_overrides=runtime.agent_tick_overrides,
+            agent_tick_timeout_seconds=runtime.agent_tick_timeout_seconds,
+            task_control_poll_seconds=runtime.task_control_poll_seconds,
+            task_interrupt_grace_seconds=runtime.task_interrupt_grace_seconds,
         )
+
+    def tick_seconds_for(self, agent_id: AgentId) -> float:
+        return self.agent_tick_overrides.get(agent_id, self.agent_tick_seconds)
+
+
+TickHook = Callable[[AgentContext], Awaitable[Any]]
+
+# Periodic hooks agents already expose under their own names (adapted, not renamed).
+TICK_HOOK_ALIASES = ("resume_waiting_tasks", "resume_pending")
+
+
+def tick_hook(agent: BaseAgent) -> tuple[str, TickHook] | None:
+    """The agent's periodic hook: an overridden `tick`, else a known alias; None if neither."""
+    if getattr(type(agent), "tick", BaseAgent.tick) is not BaseAgent.tick:
+        return "tick", agent.tick
+    for name in TICK_HOOK_ALIASES:
+        hook = getattr(agent, name, None)
+        if callable(hook):
+            return name, hook
+    return None
 
 
 class Engine:
@@ -89,6 +129,8 @@ class Engine:
         permission_service: PermissionService | None = None,
         security: SecurityServices | None = None,
         models: ModelServices | None = None,
+        agent_services: Mapping[AgentId, Mapping[str, Any]] | None = None,
+        task_control: TaskControl | None = None,
     ) -> None:
         self._sessions = database_sessions
         self._agents: dict[AgentId, BaseAgent] = {}
@@ -125,6 +167,15 @@ class Engine:
                 agent_id: models.context_for(agent_id, self._contexts.get(agent_id, self._context))
                 for agent_id in self._agents
             }
+        self._task_control = task_control or TaskControl(database_sessions, clock=clock)
+        self._inject_services(agent_services or {})
+        self._tick_hooks = {
+            agent_id: hook
+            for agent_id, agent in self._agents.items()
+            if (hook := tick_hook(agent)) is not None
+        }
+        self._tick_wakes = {agent_id: asyncio.Event() for agent_id in self._tick_hooks}
+        self._agent_locks = {agent_id: asyncio.Lock() for agent_id in self._agents}
         self._pool = WorkerPool(
             self._leases,
             self._context,
@@ -135,6 +186,10 @@ class Engine:
             lease_ttl=lease_ttl,
             renew_interval=self._limits.lease_renew_seconds,
             owner=self._owner,
+            control=self._task_control,
+            control_poll=self._limits.task_control_poll_seconds,
+            interrupt_grace=self._limits.task_interrupt_grace_seconds,
+            on_outcome=self._on_task_outcome,
         )
         self._lifecycle = Lifecycle()
         self._loops: list[asyncio.Task[None]] = []
@@ -173,12 +228,67 @@ class Engine:
     def models(self) -> ModelServices | None:
         return self._models
 
+    @property
+    def task_control(self) -> TaskControl:
+        """Durable pause/cancel requests; ORCHESTR gets the same plane as a service."""
+        return self._task_control
+
+    @property
+    def tick_hooks(self) -> dict[AgentId, str]:
+        """The periodic hook name the engine calls for each agent that has one."""
+        return {agent_id: name for agent_id, (name, _) in self._tick_hooks.items()}
+
     def agent(self, agent_id: AgentId) -> BaseAgent:
         return self._agents[agent_id]
 
     def context_for(self, agent_id: AgentId) -> AgentContext:
         """The injected context for one agent: shared services, WARDEN-only approvals."""
         return self._contexts.get(agent_id, self._context)
+
+    def request_tick(self, agent_id: AgentId) -> None:
+        """Run `agent_id`'s periodic hook as soon as possible (no-op if it has none)."""
+        wake = self._tick_wakes.get(agent_id)
+        if wake is not None:
+            wake.set()
+
+    async def run_agent_tick(self, agent_id: AgentId) -> Any:
+        """Run one bounded, exception-safe tick; failures are recorded and return None."""
+        hook = self._tick_hooks.get(agent_id)
+        if hook is None:
+            return None
+        name, call = hook
+        try:
+            async with self._agent_locks[agent_id]:
+                async with asyncio.timeout(self._limits.agent_tick_timeout_seconds):
+                    return await call(self.context_for(agent_id))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._logger.exception("%s tick hook %s failed", agent_id, name)
+            await self._record_tick_error(agent_id, name, exc)
+            return None
+
+    def _inject_services(self, agent_services: Mapping[AgentId, Mapping[str, Any]]) -> None:
+        unknown = set(agent_services) - set(self._agents)
+        if unknown:
+            raise ValueError(f"services for unregistered agents: {sorted(map(str, unknown))}")
+        for agent_id in self._agents:
+            extra = dict(agent_services.get(agent_id, {}))
+            if agent_id is AgentId.ORCHESTR:
+                extra.setdefault(
+                    TASK_CONTROL_SERVICE, self._task_control.bound_to(AgentId.ORCHESTR.value)
+                )
+            if agent_id is not AgentId.WARDEN and set(extra) & set(WARDEN_ONLY_SERVICES):
+                raise ValueError(f"{agent_id.value} must not receive WARDEN-only services")
+            if not extra:
+                continue
+            base = self._contexts.get(agent_id, self._context)
+            self._contexts[agent_id] = replace(base, services={**base.services, **extra})
+
+    def _on_task_outcome(self, task_id: UUID, agent_id: AgentId, status: TaskStatus) -> None:
+        if status is TaskStatus.WAITING_FOR_APPROVAL:
+            # Apply WARDEN decisions recorded while the task was still running.
+            self.request_tick(AgentId.WARDEN)
 
     async def start(self) -> None:
         self._lifecycle.transition(LifecycleState.STARTING)
@@ -198,6 +308,8 @@ class Engine:
                 )
             for agent in self._agents.values():
                 self._spawn(self._agent_loop(agent), f"agent-loop-{agent.agent_id.value}")
+            for agent_id in self._tick_hooks:
+                self._spawn(self._tick_loop(agent_id), f"agent-tick-{agent_id.value}")
             self._spawn(self._scheduler_loop(), "scheduler-loop")
             self._spawn(self._recovery_loop(), "recovery-loop")
             self._lifecycle.transition(LifecycleState.RUNNING)
@@ -376,7 +488,8 @@ class Engine:
     async def _process_message(self, agent: BaseAgent, message: AgentMessage) -> None:
         await self._bus.mark_processing(message.message_id, consumer=self._owner)
         try:
-            await agent.dispatch_message(message, self.context_for(agent.agent_id))
+            async with self._agent_locks[agent.agent_id]:
+                await agent.dispatch_message(message, self.context_for(agent.agent_id))
         except UnsupportedMessageType as exc:
             await self._bus.mark_failed(message.message_id, json.dumps(exc.to_dict()))
         except Exception as exc:
@@ -384,6 +497,47 @@ class Engine:
             await self._bus.mark_failed(message.message_id, f"{type(exc).__name__}: {exc}")
         else:
             await self._bus.mark_processed(message.message_id)
+
+    async def _tick_loop(self, agent_id: AgentId) -> None:
+        """Tick once on start, then every interval or when woken; never dies on a failure."""
+        interval = timedelta(seconds=self._limits.tick_seconds_for(agent_id))
+        wake = self._tick_wakes[agent_id]
+        wake.clear()
+        await self.run_agent_tick(agent_id)
+        next_due = self._clock() + interval
+        while not self._loops_stopping.is_set():
+            if wake.is_set() or self._clock() >= next_due:
+                wake.clear()
+                await self.run_agent_tick(agent_id)
+                next_due = self._clock() + interval
+                continue
+            remaining = (next_due - self._clock()).total_seconds()
+            await self._wait_for_wake(wake, min(self._limits.tick_poll_seconds, remaining))
+
+    async def _wait_for_wake(self, wake: asyncio.Event, seconds: float) -> None:
+        waiters = [
+            asyncio.ensure_future(wake.wait()),
+            asyncio.ensure_future(self._loops_stopping.wait()),
+        ]
+        try:
+            await asyncio.wait(waiters, timeout=max(seconds, 0.0), return_when="FIRST_COMPLETED")
+        finally:
+            for waiter in waiters:
+                waiter.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
+
+    async def _record_tick_error(self, agent_id: AgentId, hook: str, exc: Exception) -> None:
+        try:
+            await self._emit(
+                "error.raised",
+                {
+                    "error_type": type(exc).__name__,
+                    "message": (str(exc) or type(exc).__name__)[:_MAX_ERROR_CHARS],
+                    "details": {"agent_id": agent_id.value, "hook": hook},
+                },
+            )
+        except Exception:
+            self._logger.exception("failed to record tick failure for %s", agent_id)
 
     async def _scheduler_loop(self) -> None:
         while not self._loops_stopping.is_set():

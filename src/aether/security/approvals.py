@@ -72,6 +72,11 @@ class ApprovalService:
         self._policy = policy
         self._clock = clock
 
+    @property
+    def policy(self) -> SecurityPolicy:
+        """The immutable process-wide policy decisions are bounded by (read-only)."""
+        return self._policy
+
     async def record_decision(
         self,
         decided_by: AgentId | str,

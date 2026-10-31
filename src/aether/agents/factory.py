@@ -8,11 +8,16 @@ falls back to an inert placeholder otherwise, so no shared file changes when an 
 import importlib
 import logging
 from collections.abc import Mapping
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from aether.agents.base import BaseAgent
-from aether.agents.placeholder import placeholder_class
+from aether.agents.placeholder import PlaceholderAgent, placeholder_class
 from aether.agents.registry import AGENT_DEFINITIONS
 from aether.communication.messages import AgentId
+
+if TYPE_CHECKING:
+    from aether.agents.scout.schemas import ResearchLimits
 
 _LOGGER = logging.getLogger("aether.agents.factory")
 
@@ -61,22 +66,54 @@ def resolve_agent_class(agent_id: AgentId) -> type[BaseAgent]:
 
 def build_agents(
     overrides: Mapping[AgentId, type[BaseAgent]] | None = None,
+    *,
+    options: Mapping[AgentId, Mapping[str, Any]] | None = None,
 ) -> list[BaseAgent]:
     """One agent per canonical definition, in registry order.
 
     `overrides` replaces the class used for specific agents (e.g. test doubles); each override
-    must be a `BaseAgent` subclass declaring the matching `agent_id`.
+    must be a `BaseAgent` subclass declaring the matching `agent_id`. `options` are constructor
+    keyword arguments for implemented agent packages (see `runtime_agent_options`); they are
+    not passed to overrides or placeholders, whose constructors take no arguments.
     """
     overrides = dict(overrides or {})
-    unknown = set(overrides) - {definition.agent_id for definition in AGENT_DEFINITIONS}
+    options = dict(options or {})
+    known = {definition.agent_id for definition in AGENT_DEFINITIONS}
+    unknown = (set(overrides) | set(options)) - known
     if unknown:
-        raise AgentFactoryError(f"overrides for unknown agents: {sorted(map(str, unknown))}")
+        raise AgentFactoryError(
+            f"overrides or options for unknown agents: {sorted(map(str, unknown))}"
+        )
     agents: list[BaseAgent] = []
     for definition in AGENT_DEFINITIONS:
         agent_id = definition.agent_id
         if agent_id in overrides:
             cls = _check_agent_class(agent_id, overrides[agent_id], f"override for {agent_id}")
+            agents.append(cls())
+            continue
+        cls = resolve_agent_class(agent_id)
+        if issubclass(cls, PlaceholderAgent):
+            agents.append(cls())
         else:
-            cls = resolve_agent_class(agent_id)
-        agents.append(cls())
+            agents.append(cls(**dict(options.get(agent_id, {}))))
     return agents
+
+
+def runtime_agent_options(
+    *,
+    data_dir: Path,
+    research_limits: "ResearchLimits | None" = None,
+) -> dict[AgentId, dict[str, Any]]:
+    """Constructor options derived from runtime settings for the agents that take any.
+
+    MUSE gets its data directory (outbox location); SCOUT and ROGUE get the research limits.
+    """
+    from aether.agents.muse import MuseSettings
+    from aether.agents.scout.schemas import ResearchLimits
+
+    limits = research_limits or ResearchLimits()
+    return {
+        AgentId.MUSE: {"settings": MuseSettings(data_dir=Path(data_dir))},
+        AgentId.SCOUT: {"limits": limits},
+        AgentId.ROGUE: {"limits": limits},
+    }

@@ -206,11 +206,26 @@ class BaseAgent(ABC):
         return ToolInvocation(value=value)
 
     async def cancel(self, task_id: UUID) -> None:
-        """Request cancellation; long-running work should poll `is_cancelled`."""
+        """Request cancellation; long-running work should poll `is_cancelled`.
+
+        The runtime also uses this signal for a cooperative pause of a running task.
+        """
         self._cancelled.add(task_id)
 
     def is_cancelled(self, task_id: UUID) -> bool:
         return task_id in self._cancelled
+
+    def clear_cancellation(self, task_id: UUID) -> None:
+        """Forget a stop signal once the runtime has settled it (e.g. a paused task resumes)."""
+        self._cancelled.discard(task_id)
+
+    async def tick(self, ctx: AgentContext) -> Any:
+        """Optional periodic hook the runtime calls on start and every agent tick interval.
+
+        The default does nothing. Implementations must be idempotent and read all state from
+        the database; the runtime bounds each call with a timeout and records failures.
+        """
+        return None
 
     async def heartbeat(self) -> AgentHealth:
         status = HealthStatus.HEALTHY if self._started else HealthStatus.UNHEALTHY
