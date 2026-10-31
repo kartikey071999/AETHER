@@ -167,7 +167,9 @@ async def _apply_status(
         for task in tasks:
             state = TaskStatus(task.state)
             if state in _CANCELLABLE:
-                await _move(env, task, TaskStatus.CANCELLED, "objective cancelled")
+                if not await _move(env, task, TaskStatus.CANCELLED, "objective cancelled"):
+                    # A worker moved the task first (e.g. leased it): stop it cooperatively.
+                    await _request_cancel(env, task, payload.reason)
             elif state is TaskStatus.RUNNING:
                 await _request_cancel(env, task, payload.reason)
     elif wanted in (ObjectiveState.PAUSED, ObjectiveState.DEFERRED):
@@ -211,11 +213,12 @@ async def _request_cancel(env: Env, task: TaskRecord, reason: str) -> None:
     )
 
 
-async def _move(env: Env, task: TaskRecord, status: TaskStatus, reason: str) -> None:
+async def _move(env: Env, task: TaskRecord, status: TaskStatus, reason: str) -> bool:
     try:
         await env.store.tasks.transition(task.id, status, actor=ACTOR, details={"reason": reason})
     except InvalidTaskTransition:
-        return
+        return False
+    return True
 
 
 # --- tasks ---------------------------------------------------------------------------------
