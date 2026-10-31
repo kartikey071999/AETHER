@@ -53,12 +53,12 @@ async def test_unavailable_and_unsuitable_providers_are_skipped(guard):
 
 
 @pytest.mark.parametrize("tier", [ModelTier.LIGHT, ModelTier.STANDARD, ModelTier.REASONING])
-async def test_azure_never_routes_nonpremium_even_if_catalog_claims_support(guard, tier):
+async def test_azure_serves_nonpremium_tiers_when_nothing_cheaper_exists(guard, tier):
+    # The assignment, not a blanket premium-only rule, decides when Azure is used.
     astra = provider("azure_openai", [tier])
     opus = provider("azure_anthropic", [tier])
-    with pytest.raises(NoModelAvailable):
-        await ModelRouter([astra, opus], guard).complete(request(tier))
-    assert not astra.requests and not opus.requests
+    result = await ModelRouter([astra, opus], guard).complete(request(tier))
+    assert result.provider == "azure_anthropic" and not astra.requests
 
 
 async def test_none_rejects_without_usage(guard, database):

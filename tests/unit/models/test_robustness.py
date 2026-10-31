@@ -10,6 +10,7 @@ from model_helpers import records
 from pydantic import ValidationError
 from sqlalchemy import select
 
+from aether.communication.messages import AgentId
 from aether.models import (
     AzureAnthropicProvider,
     AzureOpenAIProvider,
@@ -211,7 +212,9 @@ async def test_empty_sdk_completion_records_measured_cost_and_retries_with_more_
         permissions,
         client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
     )
-    result = await ModelRouter([provider], BudgetGuard(usage, settings)).complete(request())
+    result = await ModelRouter([provider], BudgetGuard(usage, settings)).complete(
+        request(agent=AgentId.MUSE)
+    )
     # The length-truncated empty reply is retried once on the same model with doubled tokens.
     assert result.model == "openai/gpt-oss-20b"
     assert [call.kwargs["max_tokens"] for call in create.await_args_list] == [128, 256]
@@ -301,6 +304,8 @@ def test_invalid_price_keys_are_rejected(key):
 async def test_overrides_apply_to_routing_reservation_response_and_ledger(usage, database):
     settings = ProviderSettings(
         _env_file=None,
+        # No assignment: the final fallback orders models by configured price.
+        AETHER_MODEL_ASSIGNMENT={"ORCHESTR": []},
         prices={
             "groq/openai/gpt-oss-120b": {"input_per_mtok": 10, "output_per_mtok": 10},
             "groq/qwen/qwen3.8-27b": {"input_per_mtok": 1, "output_per_mtok": 2},

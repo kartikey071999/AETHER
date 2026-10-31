@@ -401,9 +401,72 @@ def test_models_status_reports_usage_and_no_key_material(
     assert "azure_anthropic: configured=no available=no models=-" in out.out
     assert "ollama: configured=no available=no models=-" in out.out
     assert "today: requests 0/2000, tokens 0/2000000, cost $0.000000/$10.00" in out.out
-    assert "requests 0/50, tokens 0/100000, cost $0.000000/$1.00" in out.out
+    # Groq keeps its budget line; Azure caps are a silent safety net with no usage display.
+    assert out.out.count("  today: requests ") == 2
+    assert "requests 0/1000" not in out.out and "tokens 0/3000000" not in out.out
+    assert "cost unknown" not in out.out and "AETHER_PROVIDER_PRICES" not in out.out
+    assert (
+        "ORCHESTR: 1. azure_openai/gpt-6-astra, 2. azure_anthropic/claude-opus-4-8 (unavailable),"
+        " 3. groq/openai/gpt-oss-120b" in out.out
+    )
+    assert "LEDGER: 1. groq/openai/gpt-oss-20b [light only], 2. azure_openai/gpt-6-astra" in out.out
+    assert (
+        "FORGE: 1. azure_anthropic/claude-opus-4-8 (unavailable), 2. azure_openai/gpt-6-astra"
+        in (out.out)
+    )
+    assert out.out.count("today: no usage") == 7
     for forbidden in (SECRET, "private-astra", "https://", "2026-01-01"):
         assert forbidden not in out.out + out.err
+
+
+def test_models_status_reports_todays_usage_per_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import asyncio
+
+    from sqlite_schema import sqlite_url
+
+    from aether.storage.database import Database
+    from aether.storage.repositories.provider_usage import ProviderUsageRepository
+
+    _cli_env(tmp_path, monkeypatch)
+    monkeypatch.setenv("AETHER_PROVIDER_MOCK", "0")
+    monkeypatch.setenv(
+        "AETHER_MODEL_ASSIGNMENT", '{"scout": ["groq/openai/gpt-oss-120b"], "default": []}'
+    )
+
+    async def record() -> None:
+        database = Database(sqlite_url(tmp_path / "cli.db"))
+        try:
+            usage = ProviderUsageRepository(database.sessions)
+            for _ in range(2):
+                await usage.record(
+                    provider="azure_openai",
+                    model="gpt-6-astra",
+                    agent="ORCHESTR",
+                    input_tokens=100,
+                    output_tokens=20,
+                )
+            await usage.record(
+                provider="groq", model="openai/gpt-oss-20b", agent="LEDGER", input_tokens=5
+            )
+        finally:
+            await database.close()
+
+    asyncio.run(record())
+    cli.main(["models", "status"])
+    out = capsys.readouterr().out
+
+    lines = out.splitlines()
+    orchestr = lines.index(next(line for line in lines if line.startswith("ORCHESTR: ")))
+    assert lines[orchestr + 1] == "  today: azure_openai/gpt-6-astra requests 2"
+    ledger = lines.index(next(line for line in lines if line.startswith("LEDGER: ")))
+    assert lines[ledger + 1] == "  today: groq/openai/gpt-oss-20b requests 1"
+    assert not any(line.startswith("azure_openai: ") and "tokens" in line for line in lines)
+    azure = lines.index(next(line for line in lines if line.startswith("azure_openai: ")))
+    assert not lines[azure + 1].startswith("  today:")
+    assert "SCOUT: 1. groq/openai/gpt-oss-120b (unavailable)" in out
+    assert "default: no assignment (final fallback only)" in out
 
 
 def test_models_test_runs_one_completion_in_mock_mode(

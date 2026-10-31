@@ -225,16 +225,44 @@ estimated cost, finish reason, and uncertainty flags. Close the router with
 `await router.aclose()` at shutdown. Multiple routers must share a semaphore
 if they are to share the global concurrency limit.
 
-Routing prefers suitable installed Ollama models, then Groq. Explicitly
-declare local-model suitability with, for example,
+Routing follows a per-agent model assignment: an ordered `provider/model` list
+per agent. The router walks the requesting agent's list and uses the first entry
+whose provider is available, whose model is offered for the request tier, which
+is within budget, and whose model circuit is closed. Each skip is recorded with
+its reason. Defaults prefer Azure `gpt-6-astra` (astra) and `claude-opus-4-8`
+(opus); Groq is used only where listed:
+
+| Agent | Assignment (in order) |
+|---|---|
+| ORCHESTR | astra, opus, groq `openai/gpt-oss-120b` |
+| SCOUT | astra, groq `openai/gpt-oss-120b` |
+| ROGUE | opus, astra, groq `qwen/qwen3.8-27b` |
+| FORGE | opus, astra |
+| WARDEN | opus, astra |
+| LEDGER | groq `openai/gpt-oss-20b` (light tier only), astra |
+| MUSE | astra, groq `openai/gpt-oss-20b` |
+
+`AETHER_MODEL_ASSIGNMENT` (JSON, keyed by agent id case-insensitively, or `default` for
+agents without an entry) replaces the named agents' lists. Unlisted agents keep the
+defaults. Entries are `"provider/model"` strings or `{"provider", "model", "tiers"}`
+objects. If no assigned entry is usable, any other eligible model is the final
+fallback (suitable Ollama models first, then the cheapest), unless
+`AETHER_PROVIDER_ASSIGNMENT_FINAL_FALLBACK=false`. An explicit `provider=`/`model=` on
+the request bypasses the assignment. After `AETHER_PROVIDER_MODEL_CIRCUIT_FAILURES`
+(default 3, 0 disables) consecutive failed calls, one provider/model is skipped for
+every agent for `AETHER_PROVIDER_MODEL_CIRCUIT_COOLDOWN_SECONDS` (default 300). This
+circuit is in-process and is not persisted. `provider.request_completed` records
+`assignment` (`assigned`/`fallback`), `assignment_rank` and the `skipped` entries.
+`aether models status` lists each agent's assignment and the provider/model its calls
+used today. `aether models test --agent SCOUT` routes the probe as that agent.
+
+Explicitly declare local-model suitability with, for example,
 `AETHER_PROVIDER_OLLAMA_MODELS={"qwen-local:latest":["light","standard"]}`.
-Installed names must match exactly; `OllamaProvider.refresh_models()` refreshes
-discovery after installations. Groq's `openai/gpt-oss-20b` serves light/standard;
-`openai/gpt-oss-120b` and `qwen/qwen3.8-27b` serve standard/reasoning/premium,
-with the cheaper eligible model tried first. Azure `claude-opus-4-8` and
-`gpt-6-astra` are premium-only, even with an explicit override. Astra is the
-last premium fallback unless `provider="azure_openai"` or `model="gpt-6-astra"`
-explicitly selects it. `tier="none"` rejects LLM use for deterministic work.
+Ollama is used when assigned or as the final fallback. Installed names must match
+exactly; `OllamaProvider.refresh_models()` refreshes discovery after installations.
+Groq's `openai/gpt-oss-20b` serves light/standard, and `openai/gpt-oss-120b` and
+`qwen/qwen3.8-27b` serve standard/reasoning/premium. Azure astra and opus serve every
+LLM tier. `tier="none"` rejects LLM use for deterministic work.
 `response_format="json_object"` or `json_schema={...}` enables structured
 output where supported; Anthropic requires a schema for JSON output.
 Temperature is optional and omitted by default. Anthropic's installed SDK does
@@ -284,12 +312,14 @@ apply additionally. Defaults are:
 | Provider | Requests/day | Tokens/day | Estimated USD/day | Tokens/request | Concurrent |
 |---|---:|---:|---:|---:|---:|
 | Groq | 2,000 | 2,000,000 | 10 | 32,768 | 2 |
-| Azure Astra | 50 | 100,000 | 1 | 8,192 | 1 |
-| Azure Anthropic | 50 | 200,000 | 5 | 16,384 | 1 |
+| Azure Astra | 1,000 | 3,000,000 | - | 8,192 | 4 |
+| Azure Anthropic | 300 | 1,500,000 | - | 16,384 | 2 |
 | Ollama | unlimited | unlimited | no API cost | 32,768 | 2 |
 
 Override caps with `AETHER_PROVIDER_BUDGETS` (JSON); unspecified fields retain
 their provider defaults. `AETHER_PROVIDER_MODEL_BUDGETS` adds per-model limits.
+The Azure caps are an internal safety net: they are enforced but `aether models status`
+does not display Azure usage or budgets.
 PostgreSQL advisory transaction locks serialize admission across processes;
 SQLite uses immediate transactions for offline tests. Successful calls replace
 reservations with measured usage; failed calls retain conservative estimates
@@ -315,11 +345,10 @@ prices return zero **with `cost_estimate_unknown=True`**, not an assertion of fr
 inference. Override any model using `AETHER_PROVIDER_PRICES` JSON, for example
 `{"groq/openai/gpt-oss-20b":{"input_per_mtok":0.075,"output_per_mtok":0.30}}`.
 Both rates must be finite and nonnegative, in USD per million tokens; overrides
-apply to routing, reservations, responses, and final accounting. Azure prices
-are unknown by default, not guessed. A provider or model USD ceiling refuses
-unknown-price models unless the provider's budget explicitly sets `allow_unpriced=true`,
-for example `AETHER_PROVIDER_BUDGETS={"azure_openai":{"allow_unpriced":true}}`.
-That opt-in cannot enforce actual dollar usage; request/token caps still apply. Byte-based
+apply to routing, reservations, responses, and final accounting. A provider or model
+USD ceiling refuses unknown-price models unless the provider's budget sets
+`allow_unpriced=true` (both Azure providers do). `allow_unpriced` is only accepted together
+with daily request and token caps. Byte-based
 input reservations are conservative estimates, not model-specific tokenizers.
 Timeouts/unknown failure consumption remain estimates, not billing reports.
 

@@ -25,7 +25,7 @@ from aether.storage.database import Database
 from aether.storage.models import EventRecord
 
 if TYPE_CHECKING:
-    from aether.runtime.models import ModelServices, ProviderStatus
+    from aether.runtime.models import AgentModelStatus, ModelServices, ProviderStatus
 
 
 def _positive_int(value: str) -> int:
@@ -112,6 +112,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("light", "standard", "reasoning", "premium"),
         default="light",
         help="model tier to request (default: light)",
+    )
+    model_test.add_argument(
+        "--agent",
+        choices=[agent.value for agent in AgentId],
+        default=AgentId.ORCHESTR.value,
+        help="route with this agent's model assignment (default: ORCHESTR)",
     )
     web = commands.add_parser("web", help="inspect the web research tools")
     web_commands = web.add_subparsers(dest="web_command", required=True)
@@ -336,6 +342,22 @@ def _format_provider(status: ProviderStatus) -> list[str]:
     return lines
 
 
+def _format_agent(status: AgentModelStatus) -> list[str]:
+    ranked = ", ".join(
+        f"{entry.rank}. {entry.label}{'' if entry.available else ' (unavailable)'}"
+        for entry in status.assignments
+    )
+    lines = [f"{status.agent}: {ranked or 'no assignment (final fallback only)'}"]
+    if status.usage:
+        used = "; ".join(
+            f"{row.provider}/{row.model} requests {row.requests}" for row in status.usage
+        )
+        lines.append(f"  today: {used}")
+    else:
+        lines.append("  today: no usage")
+    return lines
+
+
 async def _models_status() -> int:
     async with _model_services() as services:
         try:
@@ -351,10 +373,26 @@ async def _models_status() -> int:
         for status in statuses:
             for line in _format_provider(status):
                 print(line)
+        print()
+        fallback = (
+            "then any other eligible model as the final fallback"
+            if services.settings.assignment_final_fallback
+            else "no final fallback"
+        )
+        print(f"Agent model assignments (first usable entry is used; {fallback}):")
+        try:
+            agents = await services.agent_status()
+        except Exception as error:  # noqa: BLE001 - report any failure without a traceback
+            print(f"Reading agent usage failed: {type(error).__name__}", file=sys.stderr)
+            agents = await services.assignments()
+            failed = 1
+        for agent in agents:
+            for line in _format_agent(agent):
+                print(line)
         return failed
 
 
-async def _models_test(tier: str) -> int:
+async def _models_test(tier: str, agent: str = "ORCHESTR") -> int:
     from aether.communication.messages import AgentId
     from aether.models import CompletionRequest, ModelTier, NoModelAvailable
 
@@ -362,7 +400,7 @@ async def _models_test(tier: str) -> int:
         messages=[{"role": "user", "content": "Reply with the single word: ok"}],
         max_tokens=16,
         tier=ModelTier(tier),
-        agent=AgentId.ORCHESTR,
+        agent=AgentId(agent),
     )
     async with _model_services() as services:
         try:
@@ -379,11 +417,11 @@ async def _models_test(tier: str) -> int:
     return 0
 
 
-def _models_command(command: str, tier: str) -> int:
+def _models_command(command: str, tier: str, agent: str = "ORCHESTR") -> int:
     try:
         if command == "status":
             return asyncio.run(_models_status())
-        return asyncio.run(_models_test(tier))
+        return asyncio.run(_models_test(tier, agent))
     except Exception as error:  # noqa: BLE001 - report any failure without a traceback
         print(f"Models {command} failed: {type(error).__name__}", file=sys.stderr)
         return 1
@@ -531,7 +569,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     if arguments.command == "models":
-        status = _models_command(arguments.models_command, getattr(arguments, "tier", "light"))
+        status = _models_command(
+            arguments.models_command,
+            getattr(arguments, "tier", "light"),
+            getattr(arguments, "agent", AgentId.ORCHESTR.value),
+        )
         if status:
             raise SystemExit(status)
         return
