@@ -24,11 +24,13 @@ from aether.models import (
     ProviderSettings,
     provider_hosts,
 )
+from aether.models.assignment import DEFAULT_ASSIGNMENT
+from aether.models.costs import estimate_cost
 from aether.models.facade import AgentModels, ModelCallContext, ModelUnavailable
 from aether.models.governor import ModelGovernor
 from aether.observability.recorder import EventRecorder
 from aether.security import PermissionService
-from aether.storage.repositories.provider_usage import ProviderUsageRepository
+from aether.storage.repositories.provider_usage import AgentModelUsage, ProviderUsageRepository
 
 OLLAMA = "ollama"
 
@@ -54,6 +56,24 @@ class ProviderStatus:
     available: bool
     models: tuple[str, ...]
     usage: ProviderUsage | None = None
+    # A configured model has no known price: spend is bounded only by request/token caps.
+    cost_unknown: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AssignedModel:
+    rank: int
+    label: str
+    available: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AgentModelStatus:
+    """One agent's ranked model assignment and today's recorded usage per provider/model."""
+
+    agent: str
+    assignments: tuple[AssignedModel, ...]
+    usage: tuple[AgentModelUsage, ...] = ()
 
 
 def allowlist_hosts(provider_settings: ProviderSettings) -> frozenset[str]:
@@ -128,9 +148,48 @@ class ModelServices:
                     configured=configured,
                     available=configured and bool(names),
                     models=names,
+                    cost_unknown=configured
+                    and any(
+                        estimate_cost(provider.name, name, 1, 1, prices=self.settings.prices)[1]
+                        for name in names
+                    ),
                 )
             )
         return statuses
+
+    async def assignments(self) -> list[AgentModelStatus]:
+        """Every agent's ranked assignment, marking entries no configured provider offers."""
+        offered: set[str] = set()
+        for status in await self.describe():
+            if status.available:
+                offered.update(f"{status.name}/{model}" for model in status.models)
+        agents = [agent.value for agent in AgentId]
+        if DEFAULT_ASSIGNMENT in self.settings.model_assignment:
+            agents.append(DEFAULT_ASSIGNMENT)
+        return [
+            AgentModelStatus(
+                agent=agent,
+                assignments=tuple(
+                    AssignedModel(rank, entry.label(), entry.key in offered)
+                    for rank, entry in enumerate(self.settings.assignments(agent), start=1)
+                ),
+            )
+            for agent in agents
+        ]
+
+    async def agent_status(self, *, now: datetime | None = None) -> list[AgentModelStatus]:
+        """``assignments`` plus today's recorded usage per agent and provider/model."""
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        day = current.replace(hour=0, minute=0, second=0, microsecond=0)
+        rows = await self.usage.usage_by_agent(since=day, until=day + timedelta(days=1))
+        statuses = await self.assignments()
+        known = {status.agent for status in statuses}
+        extra = sorted({row.agent for row in rows} - known)
+        statuses += [AgentModelStatus(agent=agent, assignments=()) for agent in extra]
+        return [
+            replace(status, usage=tuple(row for row in rows if row.agent == status.agent))
+            for status in statuses
+        ]
 
     async def status(self, *, now: datetime | None = None) -> list[ProviderStatus]:
         """``describe`` plus today's recorded usage against each provider's budget."""

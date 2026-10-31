@@ -23,6 +23,15 @@ class UsageTotals:
     active: int
 
 
+@dataclass(frozen=True)
+class AgentModelUsage:
+    agent: str
+    provider: str
+    model: str
+    requests: int
+    tokens: int
+
+
 class ProviderUsageRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
@@ -196,6 +205,36 @@ class ProviderUsageRepository:
                 task_id=task_id,
             )
             return usage.id
+
+    async def usage_by_agent(self, *, since: datetime, until: datetime) -> list[AgentModelUsage]:
+        """Provider calls and tokens per (agent, provider, model) recorded in ``[since, until)``."""
+        statement = (
+            select(
+                ProviderUsageRecord.agent,
+                ProviderUsageRecord.provider,
+                ProviderUsageRecord.model,
+                func.coalesce(func.sum(ProviderUsageRecord.request_count), 0),
+                func.coalesce(
+                    func.sum(ProviderUsageRecord.input_tokens + ProviderUsageRecord.output_tokens),
+                    0,
+                ),
+            )
+            .where(
+                ProviderUsageRecord.occurred_at >= since, ProviderUsageRecord.occurred_at < until
+            )
+            .group_by(
+                ProviderUsageRecord.agent, ProviderUsageRecord.provider, ProviderUsageRecord.model
+            )
+            .order_by(
+                ProviderUsageRecord.agent, ProviderUsageRecord.provider, ProviderUsageRecord.model
+            )
+        )
+        async with self._sessions() as session:
+            rows = (await session.execute(statement)).all()
+        return [
+            AgentModelUsage(agent or "SYSTEM", provider, model, int(requests), int(tokens))
+            for agent, provider, model, requests, tokens in rows
+        ]
 
     async def objective_agent_usage(self, objective_id: UUID, agent: str) -> tuple[int, int]:
         """(provider calls, tokens) ever attributed to one objective and agent."""
