@@ -7,6 +7,8 @@ the task without running the agent again.
 
 import asyncio
 from datetime import timedelta
+from pathlib import Path
+from uuid import UUID
 
 import pytest
 from reliability_support import (
@@ -19,11 +21,16 @@ from reliability_support import (
     task_state,
     wait_until,
 )
+from sqlalchemy import select
 
 from aether.agents.base import TaskResult
+from aether.communication.contracts import ObjectiveUpdatePayload, build_message
+from aether.communication.messages import AgentId
 from aether.runtime.control import TaskControl
 from aether.runtime.leases import LeaseManager
-from aether.storage.models import TaskRecord, TaskStatus
+from aether.runtime.scenario import CapabilityScenario, ScenarioTiming, scenario_settings
+from aether.storage.database import Database
+from aether.storage.models import ObjectiveRecord, TaskRecord, TaskStatus
 
 
 @pytest.mark.parametrize(
@@ -148,3 +155,66 @@ async def test_repeated_cancel_requests_cancel_once(sessions, objective_id) -> N
 
 async def _is(sessions, task_id, state: TaskStatus) -> bool:
     return await task_state(sessions, task_id) is state
+
+
+# -- the full runtime: an objective cancelled mid-flight, then a restart ---------------------
+
+FAST = ScenarioTiming(
+    tick_seconds=0.2, poll_seconds=0.05, recovery_seconds=1.0, shutdown_seconds=0.5
+)
+_TERMINAL = {TaskStatus.COMPLETED.value, TaskStatus.FAILED.value, TaskStatus.CANCELLED.value}
+
+
+async def _objective_tasks(database: Database, objective_id: UUID) -> dict[UUID, str]:
+    async with database.sessions() as session:
+        rows = await session.execute(
+            select(TaskRecord.id, TaskRecord.state).where(TaskRecord.objective_id == objective_id)
+        )
+        return dict(rows.all())
+
+
+async def test_objective_cancel_cascades_to_its_tasks_and_survives_restart(
+    tmp_path: Path,
+) -> None:
+    settings = scenario_settings(tmp_path)
+    async with CapabilityScenario(settings, timing=FAST) as first:
+        runtime = first.runtime
+        assert runtime is not None
+        objective_id = await first.submit_objective(tag="cancelled")
+
+        async def planned() -> bool:
+            return bool(await _objective_tasks(runtime.database, objective_id))
+
+        await wait_until(planned, timeout=30.0)
+        await runtime.engine.bus.publish(
+            build_message(
+                AgentId.MUSE,
+                AgentId.ORCHESTR,
+                ObjectiveUpdatePayload(
+                    objective_id=objective_id, reason="user cancelled", status="cancelled"
+                ),
+            )
+        )
+
+        async def settled() -> bool:
+            states = await _objective_tasks(runtime.database, objective_id)
+            return all(state in _TERMINAL for state in states.values())
+
+        await wait_until(settled, timeout=30.0)
+        before = await _objective_tasks(runtime.database, objective_id)
+        leases_before = await event_counts(runtime.database.sessions)
+
+    assert TaskStatus.CANCELLED.value in before.values()
+
+    async with CapabilityScenario(settings, timing=FAST, create_schema=False) as second:
+        runtime = second.runtime
+        assert runtime is not None
+        await asyncio.sleep(1.5)  # several scheduler, tick and recovery cycles
+        after = await _objective_tasks(runtime.database, objective_id)
+        async with runtime.database.sessions() as session:
+            objective = await session.get(ObjectiveRecord, objective_id)
+        leases_after = await event_counts(runtime.database.sessions)
+
+    assert after == before  # nothing was resurrected or re-run by the restart
+    assert objective is not None and objective.status == "cancelled"
+    assert leases_after["task.lease_acquired"] == leases_before["task.lease_acquired"]
