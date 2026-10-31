@@ -7,7 +7,7 @@ from collections.abc import Iterable, Mapping
 from datetime import timedelta
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 from urllib.parse import urlsplit
 
 from pydantic import Field
@@ -15,9 +15,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from aether.agents.registry import AGENT_DEFINITIONS, AgentDefinition
 from aether.communication.messages import AgentId
-from aether.config import AetherSettings
 from aether.security.errors import PolicyMutationError
 from aether.security.operations import Operation, OperationKind, normalize_host
+
+if TYPE_CHECKING:  # config imports the agent limit models, which import security
+    from aether.config import AetherSettings
 
 _K = OperationKind
 
@@ -305,7 +307,7 @@ class SecurityPolicy:
 
     @classmethod
     def from_settings(
-        cls, settings: AetherSettings, security: SecuritySettings | None = None
+        cls, settings: "AetherSettings", security: SecuritySettings | None = None
     ) -> "SecurityPolicy":
         security = security or SecuritySettings()
         return cls(
@@ -450,7 +452,7 @@ class SecurityPolicy:
 
 
 def load_security_policy(
-    settings: AetherSettings, security: SecuritySettings | None = None
+    settings: "AetherSettings", security: SecuritySettings | None = None
 ) -> SecurityPolicy:
     """Build the process-wide policy once at startup; changing it requires a restart."""
     return SecurityPolicy.from_settings(settings, security)

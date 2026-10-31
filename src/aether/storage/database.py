@@ -1,5 +1,7 @@
 """Async SQLAlchemy engine and session lifecycle."""
 
+from typing import TYPE_CHECKING
+
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -7,7 +9,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from aether.config import AetherSettings
+if TYPE_CHECKING:  # config imports the agent limit models, which import storage
+    from aether.config import AetherSettings
 
 
 class Database:
@@ -24,7 +27,7 @@ class Database:
         )
 
     @classmethod
-    def from_settings(cls, settings: AetherSettings) -> "Database":
+    def from_settings(cls, settings: "AetherSettings") -> "Database":
         return cls(settings.database_url.get_secret_value())
 
     async def close(self) -> None:
