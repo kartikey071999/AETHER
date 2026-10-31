@@ -44,6 +44,7 @@ _CANCELLABLE = (
     TaskStatus.BLOCKED,
     TaskStatus.PAUSED,
     TaskStatus.WAITING_FOR_APPROVAL,
+    TaskStatus.WAITING_FOR_VERIFICATION,
     TaskStatus.RETRYING,
     TaskStatus.FAILED,
 )

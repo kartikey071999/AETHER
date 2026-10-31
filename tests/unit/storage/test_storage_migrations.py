@@ -125,6 +125,74 @@ def test_provider_usage_objective_migration_keeps_history_and_round_trips(tmp_pa
         engine.dispose()
 
 
+def test_message_claims_migration_backfills_inconclusive_runs_and_round_trips(
+    tmp_path, monkeypatch
+):
+    database_path = tmp_path / "claims.db"
+    config = _alembic_config(monkeypatch, database_path)
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        command.upgrade(config, "0005_provider_usage_objective")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO messages (id, source_agent, target_agent, message_type, "
+                    "correlation_id, timestamp, payload, priority, requires_response, status, "
+                    "created_at) VALUES (:id, 'ORCHESTR', 'FORGE', 'task_assign', :id, "
+                    "CURRENT_TIMESTAMP, '{}', 50, 0, 'processing', CURRENT_TIMESTAMP)"
+                ),
+                {"id": "00000000000040008000000000000003"},
+            )
+            for run_id, status, verdict in (
+                ("00000000000040008000000000000004", "cancelled", "inconclusive"),
+                ("00000000000040008000000000000005", "cancelled", None),
+                ("00000000000040008000000000000006", "failed", "failed"),
+            ):
+                connection.execute(
+                    text(
+                        "INSERT INTO test_runs (id, suite, status, verdict, passed, failed, "
+                        "errors, acceptance_results, started_at) VALUES (:id, 'offline', "
+                        ":status, :verdict, 0, 0, 0, '[]', CURRENT_TIMESTAMP)"
+                    ),
+                    {"id": run_id, "status": status, "verdict": verdict},
+                )
+
+        command.upgrade(config, "head")
+        inspector = inspect(engine)
+        message_columns = {c["name"] for c in inspector.get_columns("messages")}
+        assert {"claimed_by", "claimed_at", "claim_expires_at"} <= message_columns
+        with engine.connect() as connection:
+            message = connection.execute(
+                text("SELECT status, claimed_by, claim_expires_at FROM messages")
+            ).one()
+            statuses = dict(connection.execute(text("SELECT id, status FROM test_runs")).all())
+        assert tuple(message) == ("processing", None, None)  # legacy rows count as expired
+        assert statuses == {
+            "00000000000040008000000000000004": "inconclusive",
+            "00000000000040008000000000000005": "cancelled",
+            "00000000000040008000000000000006": "failed",
+        }
+
+        command.downgrade(config, "0005_provider_usage_objective")
+        message_columns = {c["name"] for c in inspect(engine).get_columns("messages")}
+        assert not {"claimed_by", "claimed_at", "claim_expires_at"} & message_columns
+        with engine.connect() as connection:
+            assert connection.execute(text("SELECT status FROM messages")).scalar_one() == (
+                "processing"
+            )
+            assert (
+                connection.execute(
+                    text("SELECT status FROM test_runs WHERE verdict = 'inconclusive'")
+                ).scalar_one()
+                == "cancelled"
+            )
+
+        command.upgrade(config, "head")
+        assert "claim_expires_at" in {c["name"] for c in inspect(engine).get_columns("messages")}
+    finally:
+        engine.dispose()
+
+
 def test_migrations_upgrade_to_models_and_downgrade_cleanly(tmp_path, monkeypatch):
     database_path = tmp_path / "migrations.db"
     config = _alembic_config(monkeypatch, database_path)

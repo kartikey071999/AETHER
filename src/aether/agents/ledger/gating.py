@@ -74,7 +74,7 @@ async def waiting_verification_tasks(
 ) -> list[TaskRecord]:
     statement = select(TaskRecord).where(
         TaskRecord.assigned_agent == AgentId.LEDGER.value,
-        TaskRecord.state == TaskStatus.WAITING_FOR_APPROVAL.value,
+        TaskRecord.state == TaskStatus.WAITING_FOR_VERIFICATION.value,
     )
     async with sessions() as session:
         return list(await session.scalars(statement))

@@ -30,8 +30,10 @@ async def recover_runtime_state(
 ) -> RecoveryReport:
     """Recover work left behind by a previous process.
 
-    Assumes this process is the only consumer for `agent_ids`, so delivered/processing messages
-    belong to a dead consumer and are returned to pending.
+    Only messages whose claim has expired (or that predate claims) are returned to pending, so a
+    second engine starting against the same database leaves a live engine's in-flight messages
+    alone. A crashed engine's messages come back once its claim expires; a cleanly stopped one
+    releases them at shutdown.
     """
     recovered = await leases.recover_expired()
     requeued = await bus.requeue_in_flight(agent_ids)

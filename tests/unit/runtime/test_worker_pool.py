@@ -189,6 +189,20 @@ async def test_blocked_and_approval_results_map_to_task_states(sessions, objecti
     assert (await get_task(sessions, second)).state == TaskStatus.WAITING_FOR_APPROVAL
 
 
+async def test_verification_wait_maps_to_its_own_task_state(sessions, objective_id) -> None:
+    async def verification(_task: TaskRecord) -> TaskResult:
+        return TaskResult(status=TaskResultStatus.WAITING_FOR_VERIFICATION)
+
+    pool = build_pool(sessions)
+    task_id = await make_task(sessions, objective_id)
+
+    await pool.submit(task_id, StubAgent(verification))
+    await pool.join()
+
+    assert (await get_task(sessions, task_id)).state == TaskStatus.WAITING_FOR_VERIFICATION
+    assert (await event_counts(sessions, task_id))["task.waiting_for_verification"] == 1
+
+
 async def test_cancel_stops_running_task_and_records_cancellation(sessions, objective_id) -> None:
     pool = build_pool(sessions)
     agent = StubAgent(Gate())

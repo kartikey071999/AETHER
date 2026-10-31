@@ -22,6 +22,7 @@ ALLOWED_TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
             TaskStatus.WAITING_FOR_APPROVAL,
             TaskStatus.BLOCKED,
             TaskStatus.CANCELLED,
+            TaskStatus.WAITING_FOR_VERIFICATION,
         }
     ),
     TaskStatus.RUNNING: frozenset(
@@ -32,9 +33,13 @@ ALLOWED_TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
             TaskStatus.BLOCKED,
             TaskStatus.PAUSED,
             TaskStatus.WAITING_FOR_APPROVAL,
+            TaskStatus.WAITING_FOR_VERIFICATION,
         }
     ),
     TaskStatus.WAITING_FOR_APPROVAL: frozenset(
+        {TaskStatus.READY, TaskStatus.BLOCKED, TaskStatus.CANCELLED}
+    ),
+    TaskStatus.WAITING_FOR_VERIFICATION: frozenset(
         {TaskStatus.READY, TaskStatus.BLOCKED, TaskStatus.CANCELLED}
     ),
     TaskStatus.BLOCKED: frozenset({TaskStatus.PENDING, TaskStatus.READY, TaskStatus.CANCELLED}),

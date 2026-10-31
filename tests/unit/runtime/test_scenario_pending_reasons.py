@@ -65,3 +65,23 @@ def test_dependencies_and_unexplained_tasks_and_finished_tasks() -> None:
     assert reasons[waiting.id].startswith("waiting:")
     assert reasons[silent.id] == "no scheduler decision recorded yet"
     assert first.id not in reasons and done.id not in reasons
+
+
+def test_a_pending_task_with_an_escalation_says_so() -> None:
+    build = _task("FORGE")
+    approved = SimpleNamespace(id=uuid4(), status="approved")
+    build.requirement_id = approved.id
+    escalation = SimpleNamespace(
+        task_id=build.id, payload={"decision": "escalated", "rationale": "deferred for resources"}
+    )
+    trace = SimpleNamespace(
+        tasks=[build],
+        dependencies=[],
+        requirements=[approved],
+        scheduler_deferrals=[_deferral({build.id: "Concurrent task limit reached."})],
+        orchestr_decisions=[escalation],
+    )
+
+    assert pending_reasons(trace) == {
+        build.id: "Concurrent task limit reached. [escalated to the user]"
+    }

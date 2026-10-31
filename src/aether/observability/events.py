@@ -184,7 +184,10 @@ class MessageProcessingPayload(MessageDeliveredPayload):
 
 
 class MessageRequeuedPayload(MessageDeliveredPayload):
+    """``consumer`` is the consumer whose claim was given up."""
+
     previous_status: str
+    reason: str | None = None
 
 
 class MessageProcessedPayload(MessageDeliveredPayload):
@@ -538,6 +541,7 @@ EVENT_TYPES: dict[str, type[BaseModel]] = {
     "task.completed": TaskOutcomePayload,
     "task.blocked": TaskOutcomePayload,
     "task.waiting_for_approval": TaskOutcomePayload,
+    "task.waiting_for_verification": TaskOutcomePayload,
     "task.failed": TaskOutcomePayload,
     "task.timed_out": TaskOutcomePayload,
     "task.cancelled": TaskOutcomePayload,

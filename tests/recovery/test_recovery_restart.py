@@ -25,6 +25,7 @@ from reliability_support import (
 )
 from sqlalchemy import func, select, update
 
+from aether.communication.bus import MessageBus
 from aether.communication.messages import AgentId, MessageType
 from aether.runtime.scenario import CapabilityScenario, ScenarioTiming, scenario_settings
 from aether.storage.database import Database
@@ -59,16 +60,17 @@ async def test_restart_resumes_pending_and_in_flight_work_exactly_once(
     finished = await make_task(sessions, objective_id, state=TaskStatus.COMPLETED, title="done")
 
     # The dead consumer had fully handled `done`, was handling `processing` and had only
-    # claimed `delivered`; `fresh` was published while no engine was running.
+    # claimed `delivered`; `fresh` was published while no engine was running. Its claims lapsed.
     bus = build_engine(sessions, [RecordingAgent()]).bus
+    dead_bus = MessageBus(sessions, clock=lambda: past)
     done, processing, delivered = (assign_message() for _ in range(3))
     for message in (done, processing, delivered):
         assert await bus.publish(message)
-    claimed = await bus.claim(AgentId.FORGE, 3, consumer=DEAD_OWNER)
+    claimed = await dead_bus.claim(AgentId.FORGE, 3, consumer=DEAD_OWNER)
     assert len(claimed) == 3
     for message in (done, processing):
-        await bus.mark_processing(message.message_id, consumer=DEAD_OWNER)
-    await bus.mark_processed(done.message_id)
+        await dead_bus.mark_processing(message.message_id, consumer=DEAD_OWNER)
+    await dead_bus.mark_processed(done.message_id, consumer=DEAD_OWNER)
     fresh = assign_message()
     await bus.publish(fresh)
 
@@ -203,7 +205,8 @@ async def test_redelivered_objective_after_crash_is_created_and_planned_once(
         await wait_until(planned, timeout=30.0)
         await wait_until(lambda: _message_processed(runtime.database), timeout=30.0)
 
-    # The process "died" after ORCHESTR acted but before the bus recorded the outcome.
+    # The process "died" after ORCHESTR acted but before the bus recorded the outcome; its
+    # claim has lapsed by the time the next engine starts.
     database = Database(settings.database_url.get_secret_value())
     try:
         message = await _create_message(database)
@@ -211,7 +214,11 @@ async def test_redelivered_objective_after_crash_is_created_and_planned_once(
             await session.execute(
                 update(MessageRecord)
                 .where(MessageRecord.id == message.id)
-                .values(status="processing")
+                .values(
+                    status="processing",
+                    claimed_by="engine-dead",
+                    claim_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+                )
             )
         titles = [row.title for row in await _objective_rows(database, "")]
     finally:
