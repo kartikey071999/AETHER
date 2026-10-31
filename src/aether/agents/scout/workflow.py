@@ -528,6 +528,17 @@ async def stored_finding(
         )
 
 
+def settle_classification(draft: FindingDraft) -> FindingDraft:
+    """Code, not the model, decides evidence-dependent labels.
+
+    A hypothesis must rest on cited evidence; one that cites nothing is recorded as untested.
+    (``VERIFIED`` is already refused by ``FindingDraft`` itself.)
+    """
+    if draft.classification is FindingClassification.HYPOTHESIS and not draft.evidence_indices:
+        return draft.model_copy(update={"classification": FindingClassification.UNTESTED})
+    return draft
+
+
 async def save_finding(
     agent: AgentId,
     work: ResearchWork,
@@ -539,6 +550,7 @@ async def save_finding(
         raise ValueError("a persisted research task is required to save a finding")
     if any(index < 0 or index >= len(contents) for index in draft.evidence_indices):
         raise ValueError("model cited evidence that was not collected")
+    draft = settle_classification(draft)
     async with atomic_research(ctx) as transaction:
         existing = await stored_finding(agent, work.request.task_id, transaction)
         if existing is not None:

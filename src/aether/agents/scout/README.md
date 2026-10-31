@@ -38,7 +38,8 @@ for the scheduler, without executing it inline.
 Questions, excerpts and candidate proposals are quoted `UntrustedContent`.
 Instruction-like source content is quarantined, never used for model decisions,
 and cannot change permissions. Models cannot assert verified classification or
-invent evidence indices. Summaries and rankings are JSON-schema validated;
+invent evidence indices; a hypothesis that cites no evidence is stored as untested
+(`settle_classification`). Summaries and rankings are JSON-schema validated;
 unavailable, over-budget or invalid responses use deterministic fallbacks. When
 no model answers, conventional (SCOUT) research still adopts a
 "Standard-library implementation" at confidence 0.65 if all evidence is clean,

@@ -26,6 +26,7 @@ class PlanRefinement(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # Accepted for compatibility but ignored: the plan kind is always classified in code.
     kind: str | None = None
     extra_tasks: list[ExtraTask] = Field(default_factory=list, max_length=8)
     notes: str = Field(default="", max_length=1000)

@@ -224,6 +224,42 @@ async def test_model_failure_invalid_json_and_fabricated_verification_fallback(
     assert len(await records(context, FindingEvidenceRecord)) == 2
 
 
+@pytest.mark.parametrize(
+    ("indices", "claimed", "stored"),
+    [
+        ([], "hypothesis", FindingClassification.UNTESTED),
+        ([0], "hypothesis", FindingClassification.HYPOTHESIS),
+        ([], "assumption", FindingClassification.ASSUMPTION),
+    ],
+)
+async def test_code_settles_evidence_dependent_classification(
+    context, objective_id, fake_tools, models, indices, claimed, stored
+):
+    facade, provider = models(AgentId.SCOUT, [scout_json(indices=indices, classification=claimed)])
+    ctx = replace(context, tools=fake_tools, models=facade)
+    agent = ScoutAgent()
+    await agent.handle_message(request(objective_id, scope=scope()), ctx)
+    result = await agent.execute_task(await queued(ctx, AgentId.SCOUT), ctx)
+    assert result.status is TaskResultStatus.COMPLETED
+    assert len(provider.requests) == 1
+    finding = (await records(context, ResearchFindingRecord))[0]
+    assert finding.classification == stored
+
+
+def test_settle_classification_is_pure_and_only_downgrades_uncited_hypotheses():
+    from aether.agents.scout.workflow import settle_classification
+
+    cited = FindingDraft.model_validate_json(scout_json())
+    uncited = FindingDraft.model_validate_json(scout_json(indices=[]))
+    assert settle_classification(cited) is cited
+    settled = settle_classification(uncited)
+    assert settled.classification is FindingClassification.UNTESTED
+    assert uncited.classification is FindingClassification.HYPOTHESIS
+    assert settled.model_dump(exclude={"classification"}) == uncited.model_dump(
+        exclude={"classification"}
+    )
+
+
 async def test_injected_page_cannot_change_decisions_or_permissions(
     context, objective_id, fake_tools, models
 ):
