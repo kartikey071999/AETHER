@@ -64,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     events_commands = events.add_subparsers(dest="events_command", required=True)
     tail = events_commands.add_parser("tail", help="print the most recent events")
     tail.add_argument("--limit", type=_positive_int, default=20, help="number of events to show")
+    security = commands.add_parser("security", help="inspect the runtime security policy")
+    security_commands = security.add_subparsers(dest="security_command", required=True)
+    security_commands.add_parser(
+        "show", help="print the effective, redacted security policy and its fingerprint"
+    )
     database = commands.add_parser("db", help="manage the PostgreSQL schema")
     database_commands = database.add_subparsers(dest="database_command", required=True)
     database_commands.add_parser("upgrade", help="apply pending database migrations")
@@ -165,6 +170,19 @@ def _tail_command(limit: int) -> int:
     return 0
 
 
+def _security_show_command() -> int:
+    from aether.security import describe_policy, load_security_policy, policy_fingerprint
+
+    try:
+        policy = load_security_policy(load_settings())
+    except Exception as error:  # noqa: BLE001 - report any failure without a traceback
+        print(f"Loading the security policy failed: {type(error).__name__}", file=sys.stderr)
+        return 1
+    print(f"Policy fingerprint: {policy_fingerprint(policy)}")
+    print(json.dumps(describe_policy(policy), indent=2, sort_keys=True))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = build_parser()
     arguments = parser.parse_args(argv)
@@ -191,6 +209,12 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if arguments.command == "events" and arguments.events_command == "tail":
         status = _tail_command(arguments.limit)
+        if status:
+            raise SystemExit(status)
+        return
+
+    if arguments.command == "security" and arguments.security_command == "show":
+        status = _security_show_command()
         if status:
             raise SystemExit(status)
         return
