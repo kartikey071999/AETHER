@@ -97,6 +97,7 @@ class SafeFiles:
             limit = operation.arguments.get("max_bytes", self._policy.max_response_bytes)
             if not isinstance(limit, int) or not 0 < limit <= self._policy.max_response_bytes:
                 raise await refuse("read limit is outside the policy maximum")
+            limit = min(limit, grant.limits.max_output_bytes or limit)
             if not path.is_file():
                 raise FileNotFoundError(f"{operation.target} is not a readable file")
             size = path.stat().st_size

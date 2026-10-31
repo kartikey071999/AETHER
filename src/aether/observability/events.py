@@ -608,6 +608,10 @@ def build_event(event_type: str, **kwargs: Any) -> AetherEvent:
 # --- security / tools events (T-020) ---
 
 
+class SecurityOperationBlockedHashedPayload(SecurityOperationBlockedPayload):
+    input_hash: str | None = Field(default=None, min_length=64, max_length=64)
+
+
 class SecurityOperationAuthorizedPayload(EventPayload):
     operation: str
     kind: str
@@ -628,6 +632,7 @@ class SecurityUserAuthorizationRequestedPayload(EventPayload):
 
 EVENT_TYPES.update(
     {
+        "security.operation_blocked": SecurityOperationBlockedHashedPayload,
         "security.operation_authorized": SecurityOperationAuthorizedPayload,
         "security.user_authorization_requested": SecurityUserAuthorizationRequestedPayload,
     }
@@ -638,3 +643,19 @@ EVENT_CATEGORIES.update(
         "security.user_authorization_requested": EventCategory.SECURITY,
     }
 )
+
+
+# --- security wiring (T-022) ---
+
+
+class RuntimeSecurityInitializedPayload(EventPayload):
+    """Non-secret summary of the security services built at startup."""
+
+    policy_fingerprint: str = Field(min_length=64, max_length=64)
+    tool_count: int = Field(ge=0)
+    tools: list[str] = Field(default_factory=list)
+    allowlist_sizes: dict[str, int] = Field(default_factory=dict)
+
+
+EVENT_TYPES["runtime.security_initialized"] = RuntimeSecurityInitializedPayload
+EVENT_CATEGORIES["runtime.security_initialized"] = EventCategory.RUNTIME

@@ -16,6 +16,13 @@ FORBIDDEN_MODULES = (
     "asyncssh",
     "paramiko",
     "aether.tools.adapters",
+    "aether.tools.registry",
+    "aether.security.permissions",
+    "aether.security.approvals",
+)
+# Privileged services agents may only reach through their injected context.
+FORBIDDEN_IMPORTED_NAMES = frozenset(
+    {"ToolRegistry", "PermissionService", "ApprovalService", "build_default_registry"}
 )
 FORBIDDEN_CALLS = {
     "os": {"system", "popen", "execv", "execve", "execvp", "startfile", "fork", "forkpty"},
@@ -46,6 +53,7 @@ def _forbidden_uses(code: str) -> list[str]:
                 f"{node.module}.{alias.name}"
                 for alias in node.names
                 if _is_forbidden_call(node.module, alias.name)
+                or (node.module.startswith("aether") and alias.name in FORBIDDEN_IMPORTED_NAMES)
             ]
         elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
             if _is_forbidden_call(node.value.id, node.attr):
@@ -71,10 +79,28 @@ def test_agents_and_models_do_not_bypass_the_tool_registry() -> None:
         f"{path.relative_to(SOURCE_ROOT)}: {name}"
         for path in files
         for name in _forbidden_uses(path.read_text(encoding="utf-8"))
-        # T-021's sole HTTP boundary authorizes and redeems each actual outbound request.
-        if not (path == SOURCE_ROOT / "models" / "transport.py" and name in {"httpx", "httpx2"})
+        if name not in MODEL_BOUNDARY_EXCEPTIONS.get(path.relative_to(SOURCE_ROOT).as_posix(), ())
     ]
     assert violations == []
+
+
+# The model-provider boundary is trusted infrastructure (like aether.tools): it is injected with
+# PermissionService so it can authorize every outbound LLM request itself, and transport.py is the
+# only module that may perform HTTP. Agents remain fully guarded. Keep this list explicit.
+MODEL_BOUNDARY_EXCEPTIONS: dict[str, frozenset[str]] = {
+    "models/transport.py": frozenset({"httpx", "httpx2", "aether.security.PermissionService"}),
+    "models/base.py": frozenset({"aether.security.PermissionService"}),
+    "models/providers.py": frozenset({"aether.security.PermissionService"}),
+}
+
+
+def test_model_boundary_exceptions_are_minimal() -> None:
+    for relative, allowed in MODEL_BOUNDARY_EXCEPTIONS.items():
+        path = SOURCE_ROOT / relative
+        assert path.is_file(), f"stale exception for {relative}"
+        used = set(_forbidden_uses(path.read_text(encoding="utf-8")))
+        assert used <= allowed
+        assert allowed <= used, f"unused exception in {relative}: {sorted(allowed - used)}"
 
 
 def test_guard_detects_direct_privileged_calls() -> None:
@@ -83,6 +109,9 @@ def test_guard_detects_direct_privileged_calls() -> None:
         "import urllib.request\n"
         "from asyncio import create_subprocess_shell\n"
         "from aether.tools.adapters import SafeSubprocess\n"
+        "from aether.security.permissions import Authorization\n"
+        "from aether.security import PermissionService\n"
+        "from aether.tools import ToolRegistry\n"
         "import httpx, httpx2\n"
         "os.system('x')\n"
         "os.spawnl(0, 'x')\n"
@@ -93,6 +122,9 @@ def test_guard_detects_direct_privileged_calls() -> None:
         "urllib.request",
         "asyncio.create_subprocess_shell",
         "aether.tools.adapters",
+        "aether.security.permissions",
+        "aether.security.PermissionService",
+        "aether.tools.ToolRegistry",
         "httpx",
         "httpx2",
         "os.system",

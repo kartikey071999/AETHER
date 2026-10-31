@@ -1,6 +1,8 @@
 """SafeSubprocess: allowlisted argv execution with confinement, timeouts, and audit records."""
 
 import asyncio
+import logging
+import math
 import os
 import time
 from collections.abc import Callable, Mapping
@@ -24,6 +26,7 @@ from aether.security.untrusted import UntrustedContent
 from aether.storage.models import RunStatus
 from aether.storage.repositories.execution import ExecutionRunRepository
 from aether.tools.adapters._base import ExecutionFailed, admit
+from aether.tools.adapters._containment import ProcessContainment
 from aether.tools.registry import OperationSpec
 
 SOURCE = "aether.tools.subprocess"
@@ -31,14 +34,22 @@ SECRET_ENV_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "DATABASE_URL", "CRE
 _CHUNK = 64 * 1024
 _READER_GRACE_SECONDS = 5.0
 _KILL_WAIT_SECONDS = 5.0
+_LOGGER = logging.getLogger(__name__)
 
 
-def scrub_environment(environment: Mapping[str, str]) -> dict[str, str]:
-    """Copy of ``environment`` without variables whose names suggest secrets."""
+def scrub_environment(
+    environment: Mapping[str, str], *, no_network: bool = False
+) -> dict[str, str]:
+    """Remove secret-like variables and, for no_network, all proxy variables.
+
+    no_network is advisory for subprocesses (including Windows): environment scrubbing
+    is not a network sandbox and cannot prevent a child opening sockets directly.
+    """
     return {
         name: value
         for name, value in environment.items()
         if not any(marker in name.upper() for marker in SECRET_ENV_MARKERS)
+        and not (no_network and "PROXY" in name.upper())
     }
 
 
@@ -108,6 +119,31 @@ async def _pump(stream: asyncio.StreamReader | None, path: Path, cap: int) -> tu
     return written, truncated
 
 
+async def _wait_for_exit(process: asyncio.subprocess.Process) -> int:
+    # Process.wait() can wait for pipes inherited by surviving descendants, even after exit.
+    while process.returncode is None:
+        await asyncio.sleep(0.01)
+    return process.returncode
+
+
+async def _terminate(
+    containment: ProcessContainment, process: asyncio.subprocess.Process | None
+) -> None:
+    try:
+        containment.terminate(process.pid if process else None)
+    except OSError:
+        _LOGGER.exception("OS process containment cleanup failed; using psutil fallback")
+        if process is not None:
+            await asyncio.to_thread(kill_process_tree, process.pid)
+        raise
+    if process is not None and process.returncode is None:
+        # Also covers a suspended Windows child whose job assignment failed.
+        await asyncio.to_thread(kill_process_tree, process.pid)
+    if process is not None:
+        await _wait_for_exit(process)
+        await process.wait()
+
+
 class SafeSubprocess:
     """Runs an argv list (never a shell) only after a matching single-use Authorization."""
 
@@ -173,8 +209,10 @@ class SafeSubprocess:
         ):
             raise await refuse("argv must be a non-empty list of strings starting with the target")
         timeout = operation.arguments.get("timeout_seconds", policy.subprocess_timeout_seconds)
-        if not isinstance(timeout, int | float) or not 0 < timeout <= (
-            policy.subprocess_timeout_seconds
+        if (
+            not isinstance(timeout, int | float)
+            or not math.isfinite(timeout)
+            or not 0 < timeout <= (policy.subprocess_timeout_seconds)
         ):
             raise await refuse("timeout is outside the policy limit")
         executable = policy.resolve_executable(operation.target)
@@ -183,6 +221,8 @@ class SafeSubprocess:
             raise await refuse("executable is not allowlisted")
         if cwd is None or not cwd.is_dir():
             raise await refuse("working directory is not an existing allowed directory")
+        limits = grant.limits
+        timeout = min(timeout, limits.max_runtime_seconds or timeout)
 
         run_id = uuid4()
         output_root = policy.confine_path(self._output_dir or policy.artifact_dir / "executions")
@@ -194,69 +234,81 @@ class SafeSubprocess:
 
         await self._record_start(operation, grant, run_id, stdout_path, stderr_path, correlation_id)
         started = time.monotonic()
-        try:
-            process = await asyncio.create_subprocess_exec(
-                str(executable),
-                *argv[1:],
-                cwd=str(cwd),
-                env=scrub_environment(os.environ),
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except OSError as error:
-            await self._record_finish(
-                operation,
-                run_id,
-                RunStatus.FAILED,
-                None,
-                time.monotonic() - started,
-                {"error": f"{type(error).__name__}: {error}"},
-                correlation_id,
-            )
-            raise ExecutionFailed(f"could not start {operation.describe()}") from error
-
-        cap = policy.max_output_bytes
-        readers = [
-            asyncio.ensure_future(_pump(process.stdout, stdout_path, cap)),
-            asyncio.ensure_future(_pump(process.stderr, stderr_path, cap)),
-        ]
+        containment: ProcessContainment | None = None
+        process: asyncio.subprocess.Process | None = None
+        readers: list[asyncio.Task[tuple[int, bool]]] = []
+        launch: asyncio.Task[asyncio.subprocess.Process] | None = None
         timed_out = False
-        killed: list[int] = []
         try:
+            containment = ProcessContainment()
+            launch = asyncio.create_task(
+                asyncio.create_subprocess_exec(
+                    str(executable),
+                    *argv[1:],
+                    cwd=str(cwd),
+                    env=scrub_environment(os.environ, no_network=limits.no_network),
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    **containment.spawn_options,
+                )
+            )
+            process = await asyncio.shield(launch)
+            containment.attach(process.pid)
+            cap = min(policy.max_output_bytes, limits.max_output_bytes or policy.max_output_bytes)
+            readers = [
+                asyncio.create_task(_pump(process.stdout, stdout_path, cap)),
+                asyncio.create_task(_pump(process.stderr, stderr_path, cap)),
+            ]
             try:
-                exit_code: int | None = await asyncio.wait_for(process.wait(), timeout)
+                exit_code = await asyncio.wait_for(_wait_for_exit(process), timeout)
             except TimeoutError:
                 timed_out = True
-                killed = await asyncio.to_thread(kill_process_tree, process.pid)
-                exit_code = await process.wait()
+            await _terminate(containment, process)
+            exit_code = process.returncode
             done, pending = await asyncio.wait(readers, timeout=_READER_GRACE_SECONDS)
             for reader in pending:
                 reader.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            stdout_info = readers[0].result() if readers[0] in done else (0, True)
+            stderr_info = readers[1].result() if readers[1] in done else (0, True)
         except (asyncio.CancelledError, Exception) as error:
             cancelled = isinstance(error, asyncio.CancelledError)
-            await asyncio.shield(asyncio.to_thread(kill_process_tree, process.pid))
-            for reader in readers:
-                reader.cancel()
-            await asyncio.shield(
-                self._record_finish(
-                    operation,
-                    run_id,
-                    RunStatus.CANCELLED if cancelled else RunStatus.FAILED,
-                    None,
-                    time.monotonic() - started,
-                    {"cancelled": cancelled, "error": None if cancelled else type(error).__name__},
-                    correlation_id,
+            try:
+                try:
+                    if (
+                        process is None
+                        and launch is not None
+                        and not launch.cancelled()
+                        and (not launch.done() or launch.exception() is None)
+                    ):
+                        process = await asyncio.shield(launch)
+                finally:
+                    if containment is not None:
+                        await asyncio.shield(_terminate(containment, process))
+            finally:
+                for reader in readers:
+                    reader.cancel()
+                await asyncio.gather(*readers, return_exceptions=True)
+                await asyncio.shield(
+                    self._record_finish(
+                        operation,
+                        run_id,
+                        RunStatus.CANCELLED if cancelled else RunStatus.FAILED,
+                        None,
+                        time.monotonic() - started,
+                        {"cancelled": cancelled, "error": type(error).__name__},
+                        correlation_id,
+                    )
                 )
-            )
+            if isinstance(error, OSError):
+                raise ExecutionFailed(f"could not execute {operation.describe()}") from error
             raise
         duration = time.monotonic() - started
-        stdout_info = readers[0].result() if readers[0] in done else (0, True)
-        stderr_info = readers[1].result() if readers[1] in done else (0, True)
         usage = {
             "duration_seconds": round(duration, 3),
             "timed_out": timed_out,
-            "killed_processes": len(killed),
+            "containment": "windows_job" if os.name == "nt" else "posix_session",
             "stdout_bytes": stdout_info[0],
             "stderr_bytes": stderr_info[0],
             "stdout_truncated": stdout_info[1],

@@ -44,8 +44,11 @@ async def test_redirect_to_disallowed_host_is_refused(
             registry, approve, {"url": url, "headers": {"Authorization": "Bearer fake"}}
         )
     assert "redirect refused" in raised.value.detail
-    assert [str(request.url) for request in http_requests] == [url]
-    assert all(request.url.host == "api.example.com" for request in http_requests)
+    assert len(http_requests) == 1
+    assert http_requests[0].url.host == "93.184.216.34"
+    assert http_requests[0].url.path == "/redirect-out"
+    assert http_requests[0].headers["host"] == "api.example.com"
+    assert http_requests[0].extensions["sni_hostname"] == "api.example.com"
     finished = await events_of("execution.finished")
     assert finished[0].payload["success"] is False
 

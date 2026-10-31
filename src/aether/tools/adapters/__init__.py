@@ -8,7 +8,7 @@ from aether.security.operations import OperationKind
 from aether.security.permissions import PermissionService
 from aether.tools.adapters._base import ExecutionFailed
 from aether.tools.adapters.files import FileReadInput, FileWriteInput, SafeFiles
-from aether.tools.adapters.http import HttpInput, HttpResult, SafeHttp
+from aether.tools.adapters.http import HttpInput, HttpResult, Resolver, SafeHttp
 from aether.tools.adapters.subprocess import (
     SafeSubprocess,
     SubprocessInput,
@@ -25,6 +25,7 @@ def build_default_registry(
     recorder: EventRecorder,
     *,
     http_transport: httpx.AsyncBaseTransport | None = None,
+    http_resolver: Resolver | None = None,
 ) -> ToolRegistry:
     """Registry with the standard tools: run_process, http_request, read_file, write_file."""
     registry = ToolRegistry(permissions)
@@ -43,7 +44,13 @@ def build_default_registry(
             "http_request",
             OperationKind.HTTP_REQUEST,
             HttpInput,
-            SafeHttp(permissions, sessions, recorder, transport=http_transport),
+            SafeHttp(
+                permissions,
+                sessions,
+                recorder,
+                transport=http_transport,
+                **({"resolver": http_resolver} if http_resolver is not None else {}),
+            ),
             "Send an HTTP(S) request to an allowlisted host.",
         )
     )
