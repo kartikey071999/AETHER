@@ -11,8 +11,11 @@ from pydantic import AwareDatetime
 from sqlalchemy.exc import SQLAlchemyError
 
 from aether.agents.muse import record_user_response
+from aether.agents.queue_view import agent_queue_panel
 from aether.api.queries import READ_COLLECTIONS
 from aether.api.schemas import (
+    DEFAULT_LIMIT,
+    MAX_LIMIT,
     AuthorizationResponse,
     ControlInput,
     ObjectiveSubmission,
@@ -46,6 +49,25 @@ async def health(api: Services) -> JSONResponse:
 @reads.get("/agents", response_model=Page)
 async def agents(api: Services, page: Pagination) -> JSONResponse:
     return api.response(await api.repository.agents(**page))
+
+
+@reads.get("/agents/{agent_id}/queue")
+async def agent_queue(
+    agent_id: str,
+    api: Services,
+    finished: bool = False,
+    limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
+) -> JSONResponse:
+    """The agent's own work queue: open tasks by priority, or finished ones with ``finished=true``."""
+    try:
+        agent = AgentId(agent_id.upper())
+    except ValueError:
+        raise HTTPException(404, "Unknown agent") from None
+    return api.response(
+        await agent_queue_panel(
+            api.database.sessions, agent, finished=finished, limit=limit, clock=api.clock
+        )
+    )
 
 
 @reads.get("/objectives", response_model=Page)
