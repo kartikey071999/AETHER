@@ -54,7 +54,7 @@ def _clip(text: object, limit: int) -> str:
 def _command(step: PlanStep, limit: int) -> str:
     argv = step.arguments.get("argv")
     if isinstance(argv, list):
-        return " ".join(_clip(item, 80) for item in argv)[:limit]
+        return " ".join(_clip(item, 260) for item in argv)[:limit]
     return ""
 
 
