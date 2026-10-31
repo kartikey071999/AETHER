@@ -104,9 +104,64 @@ is returned as `UntrustedContent`. Every allow and block is an audit event.
 
 A continuously running worker lifecycle, wiring the tool registry into agent
 workflows, message delivery/recovery, a complete requirement workflow,
-independent test verification, personalization storage, API, and dashboard
+independent test verification, personalization storage, and dashboard
 remain future phases. No arbitrary software installation or shell execution is
 exposed by this foundation.
+
+## Local API
+
+After applying migrations, run `uv run aether api serve`. The read-mostly FastAPI
+service binds to `AETHER_API_HOST=127.0.0.1` and `AETHER_API_PORT=8000` by default;
+OpenAPI documentation is at `/docs`. It opens the persistent database without
+starting runtime workers or contacting model providers. Run `aether run` separately
+to process submitted objectives, authorization responses, and running-task controls.
+
+`GET /health` checks the database schema and reports the latest persisted heartbeat;
+it does not assert that workers are alive. Read endpoints are unauthenticated:
+`/agents`, `/objectives`, `/objectives/{id}`, `/tasks`, `/tasks/{id}`, `/requirements`,
+`/capabilities`, `/security/decisions`, `/security/pending-approvals`,
+`/scheduler/decisions`, `/resources`, `/errors`, `/executions`, `/tests`, `/events`,
+`/messages`, and `/providers/usage`. Collections return
+`{"items": [...], "total": N, "limit": 50, "offset": 0}`.
+Use `limit` (1-200) and `offset` (nonnegative) on every collection, and on task
+detail's nested dependencies, executions, and events. Embedded test results,
+capability verification runs, and recovery attempts have their own bounded pages
+starting at offset zero. `/tasks` filters by `state` and `agent`; `/events` by
+`type` and `task_id`; `/messages` by `correlation_id`.
+Objective progress is the percentage of completed persisted tasks, not an
+independent verification verdict (unknown when there are no tasks).
+Provider usage aggregates the current UTC day against configured provider and
+model budgets, including outstanding reservations. Empty tables return empty
+collections, never demonstration data. Resource measurements are read from
+`resource_measurements`; no measurements are invented when none have been recorded.
+
+Set a private `AETHER_API_TOKEN` to enable administrative endpoints. Missing or
+blank tokens return 503 for every write; enabled writes require
+`Authorization: Bearer <token>` and compare tokens in constant time. Tokens use
+`SecretStr`, never appear in API logs, and must not be passed in URL parameters.
+Responses are scrubbed using the shared secret-pattern rules and configured
+credential values; validation errors omit raw input, and access logging is
+disabled by the CLI. Keep the default loopback binding: reads include operational
+and personal message content despite credential redaction. If deliberately
+exposing the host beyond loopback, put it behind authenticated HTTPS.
+
+`POST /objectives` accepts the `objective.create` contract (for example,
+`{"title": "Evaluate a local capability", "completion_criteria": ["Offline tests pass"]}`),
+with `generated=false` only. It publishes a validated MUSE-to-ORCHESTR message
+and returns HTTP 202 with `message_id`, `correlation_id`, and `status="queued"`.
+It does not claim an objective has already been created.
+`POST /authorizations/{id}/respond` takes
+`{"decision": "approved"|"denied", "text": "...", "person_id": null, "response_id": null}`.
+It calls MUSE's trusted `record_user_response`, returns the linked `request_id`
+and `interaction_id` with HTTP 202, and never grants authorization itself.
+The request must be pending, unexpired, and already delivered to the supplied
+audience (null means the unscoped user outbox); WARDEN still applies its
+operation-bound authorization checks. Reuse `response_id` to retry the same response.
+`POST /tasks/{id}/pause`, `/cancel`, and `/resume` accept an optional
+`{"reason": "..."}`. Pause/cancel apply immediately when possible (HTTP 200),
+or queue cooperative control for running workers (HTTP 202), preserving live
+leases. Resume requires a paused task or returns 409. Missing records return 404;
+unavailable database operations return 503 without exception details.
 
 ## Model providers
 

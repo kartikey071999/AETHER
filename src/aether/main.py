@@ -93,6 +93,9 @@ def build_parser() -> argparse.ArgumentParser:
     database_commands.add_parser("upgrade", help="apply pending database migrations")
     database_commands.add_parser("check", help="verify connectivity to the configured database")
     database_commands.add_parser("create", help="create the configured database if it is missing")
+    api = commands.add_parser("api", help="serve the local persistent-state HTTP API")
+    api_commands = api.add_subparsers(dest="api_command", required=True)
+    api_commands.add_parser("serve", help="serve the API using AETHER_API_HOST and AETHER_API_PORT")
     return parser
 
 
@@ -322,6 +325,20 @@ def _models_command(command: str, tier: str) -> int:
 def main(argv: Sequence[str] | None = None) -> None:
     parser = build_parser()
     arguments = parser.parse_args(argv)
+
+    if arguments.command == "api" and arguments.api_command == "serve":
+        import uvicorn
+
+        from aether.api import create_app
+
+        settings = load_settings()
+        uvicorn.run(
+            create_app(settings),
+            host=settings.api_host,
+            port=settings.api_port,
+            access_log=False,
+        )
+        return
 
     if arguments.command == "agents":
         for definition in AGENT_DEFINITIONS:
