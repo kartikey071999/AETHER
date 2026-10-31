@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException
 
+from aether.api.dashboard import dashboard
 from aether.api.routers import admin, reads
 from aether.api.services import ApiServices
 from aether.config import AetherSettings, load_settings
@@ -49,6 +50,7 @@ def create_app(
     app.state.services = api
     app.include_router(reads)
     app.include_router(admin)
+    app.include_router(dashboard)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_input(request: Request, error: RequestValidationError) -> JSONResponse:
