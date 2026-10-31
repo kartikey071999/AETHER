@@ -28,6 +28,14 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import select
 
+from aether.agents.factory import build_agents, runtime_agent_options
+from aether.agents.forge.schemas import ForgeConfig
+from aether.agents.forge.templates import (
+    TEXT_STATISTICS_MODULE,
+    TEXT_STATISTICS_MODULE_FILE,
+    TEXT_STATISTICS_TEST_FILE,
+    TEXT_STATISTICS_TESTS,
+)
 from aether.agents.orchestr.limits import OrchestrLimits
 from aether.agents.scout.schemas import ResearchLimits, SourceSpec
 from aether.communication.contracts import ObjectiveCreatePayload, build_message
@@ -68,8 +76,8 @@ ACCEPTANCE_CRITERIA = (
     "AC3: non-ASCII text is counted by Unicode code points",
 )
 REFERENCE_PATH = "reference/text_statistics.md"
-MODULE_FILE = "text_statistics.py"
-TEST_FILE = "test_text_statistics.py"
+MODULE_FILE = TEXT_STATISTICS_MODULE_FILE
+TEST_FILE = TEXT_STATISTICS_TEST_FILE
 
 REFERENCE_TEXT = """# Counting text statistics in Python
 
@@ -79,27 +87,8 @@ empty for an empty string. `len(text)` counts Unicode code points, not encoded b
 `json.dumps` serialises the result.
 """
 
-GOOD_MODULE = '''"""text_statistics: word, line and character counts for a UTF-8 string."""
-
-import json
-import sys
-
-
-def text_statistics(text: str) -> dict[str, int]:
-    return {
-        "words": len(text.split()),
-        "lines": len(text.splitlines()),
-        "characters": len(text),
-    }
-
-
-def to_json(text: str) -> str:
-    return json.dumps(text_statistics(text), sort_keys=True)
-
-
-if __name__ == "__main__":
-    print(to_json(" ".join(sys.argv[1:]) or "a b c"))
-'''
+# FORGE builds the module and acceptance tests from its deterministic capability template.
+GOOD_MODULE = TEXT_STATISTICS_MODULE
 
 # Splitting on a single space and counting encoded bytes: wrong for "" and non-ASCII text.
 BUGGY_MODULE = '''"""text_statistics: word, line and character counts for a UTF-8 string."""
@@ -124,27 +113,7 @@ if __name__ == "__main__":
     print(to_json(" ".join(sys.argv[1:]) or "a b c"))
 '''
 
-ACCEPTANCE_TESTS = '''"""Acceptance tests for text_statistics; test names carry the criterion ids (AC1..AC3)."""
-
-import json
-
-from text_statistics import text_statistics, to_json
-
-
-def test_ac1_counts_three_words_for_a_b_c():
-    assert text_statistics("a b c")["words"] == 3
-
-
-def test_ac2_empty_string_reports_zeros():
-    assert text_statistics("") == {"words": 0, "lines": 0, "characters": 0}
-
-
-def test_ac3_non_ascii_counted_by_code_points():
-    stats = text_statistics("na\\u00efve caf\\u00e9 \\u65e5\\u672c")
-    assert stats["characters"] == 13
-    assert stats["words"] == 3
-    assert json.loads(to_json("\\u00e9"))["characters"] == 1
-'''
+ACCEPTANCE_TESTS = TEXT_STATISTICS_TESTS
 
 
 # --------------------------------------------------------------------------------------------
@@ -389,6 +358,8 @@ class CapabilityScenario:
     security_settings: SecuritySettings | None = None
     timing: ScenarioTiming = field(default_factory=ScenarioTiming)
     max_replans: int = 2
+    # FORGE configuration; ``None`` keeps the runtime default (templates, no LLM refinement).
+    forge_config: ForgeConfig | None = None
     create_schema: bool = True
     # None reads the real host; tests pin resources so machine load cannot defer or pause work.
     resource_monitor: ResourceSnapshotter | None = None
@@ -399,8 +370,16 @@ class CapabilityScenario:
             timing=self.timing, max_replans=self.max_replans, base=self.settings
         )
         write_reference_source(settings)
+        agents = None
+        if self.forge_config is not None:
+            options = runtime_agent_options(
+                data_dir=settings.data_dir, research_limits=settings.research
+            )
+            options[AgentId.FORGE] = {"config": self.forge_config}
+            agents = build_agents(options=options)
         runtime = build_runtime(
             settings,
+            agents,
             security_settings=scenario_security(self.security_settings),
             provider_settings=self.provider_settings
             or ProviderSettings(_env_file=None, mock=True, max_retries=0),

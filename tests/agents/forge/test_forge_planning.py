@@ -1,5 +1,7 @@
+import asyncio
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -7,10 +9,24 @@ from forge_support import ForgeEnv, write
 
 from aether.agents.base import TaskResultStatus
 from aether.agents.forge.failure import classify_failure, is_retryable, route_for
-from aether.agents.forge.planning import build_template_plan, extract_spec, relative_path
+from aether.agents.forge.planning import (
+    DRAFT_ATTEMPT_KEY,
+    build_template_plan,
+    draft_attempt_id,
+    extract_spec,
+    relative_path,
+)
+from aether.agents.forge.resolve import resolve_plan
 from aether.agents.forge.schemas import FailureClass, ForgeConfig, ForgeSpec, PlanDefect
+from aether.agents.forge.templates import (
+    TEXT_STATISTICS_MODULE,
+    TEXT_STATISTICS_MODULE_FILE,
+    TEXT_STATISTICS_TEST_FILE,
+    match_template,
+)
 from aether.communication.messages import AgentId, MessageType
-from aether.models.facade import ModelUnavailable
+from aether.models.contracts import CompletionRequest, CompletionResponse
+from aether.models.facade import AgentModels, ModelCallContext, ModelUnavailable
 from aether.storage.models import TaskRecord
 
 
@@ -166,6 +182,137 @@ async def test_llm_drafting_can_be_disabled(make_env: Callable[..., ForgeEnv]) -
     result = await env.agent.execute_task(task, env.ctx)
     assert result.status is TaskResultStatus.BLOCKED
     assert env.llm_requests == []
+
+
+def test_llm_draft_budget_fits_a_complete_plan() -> None:
+    # 1500 tokens truncated real plans; the draft now has room for a full JSON plan.
+    assert ForgeConfig().llm_max_tokens >= 4096
+
+
+async def test_draft_uses_json_mode_and_is_attempted_once_per_task(env: ForgeEnv) -> None:
+    task = await env.make_task()
+    env.llm_replies.extend(['{"steps": [{"tool": "write_file", "argu', json.dumps(LLM_PLAN)])
+
+    first = await env.agent.execute_task(task, env.ctx)
+    second = await env.agent.execute_task(task, env.ctx)
+
+    assert first.status is second.status is TaskResultStatus.BLOCKED
+    [request] = env.llm_requests  # the re-run (or a redelivery) does not draft again
+    assert request.response_format == "json_object"
+    assert request.max_tokens == ForgeConfig().llm_max_tokens
+    [marker] = [
+        message
+        for message in await env.messages(MessageType.PROGRESS_UPDATE, task_id=task.id)
+        if message.payload["details"].get(DRAFT_ATTEMPT_KEY)
+    ]
+    assert marker.id == draft_attempt_id(task.id)
+
+
+async def test_unusable_draft_is_reported_as_a_model_failure(env: ForgeEnv) -> None:
+    reports: list[tuple[AgentId, ModelCallContext, str]] = []
+
+    async def report(agent: AgentId, ctx: ModelCallContext, reason: str) -> None:
+        reports.append((agent, ctx, reason))
+
+    async def complete(request: CompletionRequest) -> CompletionResponse:
+        env.llm_requests.append(request)
+        return CompletionResponse(
+            text="not json",
+            model="m",
+            provider="mock",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=0,
+        )
+
+    ctx = replace(env.ctx, models=AgentModels(AgentId.FORGE, complete, report_unusable=report))
+    task = await env.make_task()
+    result = await env.agent.execute_task(task, ctx)
+    assert result.status is TaskResultStatus.BLOCKED
+    [(agent, call, reason)] = reports
+    assert agent is AgentId.FORGE and call.objective_id == task.objective_id
+    assert reason == "invalid_plan_json"
+
+
+async def _text_statistics_task(env: ForgeEnv) -> TaskRecord:
+    return await env.make_task(
+        description="Implement the text_statistics capability described by the requirement."
+    )
+
+
+async def test_known_capability_uses_its_template_without_an_llm(env: ForgeEnv) -> None:
+    task = await _text_statistics_task(env)
+    env.llm_replies.append(json.dumps(LLM_PLAN))
+
+    waiting = await env.agent.execute_task(task, env.ctx)
+    assert waiting.status is TaskResultStatus.WAITING_FOR_APPROVAL  # the smoke run is reviewed
+    await env.approve_plan(task)
+    result = await env.agent.execute_task(task, env.ctx)
+
+    assert result.status is TaskResultStatus.COMPLETED, result
+    assert env.llm_requests == []
+    workspace = env.workspace(task)
+    assert (workspace / TEXT_STATISTICS_MODULE_FILE).read_text() == TEXT_STATISTICS_MODULE
+    assert (workspace / TEXT_STATISTICS_TEST_FILE).is_file()
+    process = next(item for item in result.evidence if item["type"] == "process")
+    assert '"words": 3' in process["stdout"]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        '{"steps": [{"tool": "write_file", "arguments": {"path": "a',  # truncated JSON
+        "",
+        ModelUnavailable(["mock/m: TruncatedCompletion"]),
+    ],
+)
+async def test_failed_refinement_falls_back_to_the_template_not_a_blocker(
+    make_env: Callable[..., ForgeEnv], reply: str | Exception
+) -> None:
+    env = make_env(ForgeConfig(llm_refine_templates=True))
+    task = await _text_statistics_task(env)
+    env.llm_replies.append(reply)
+
+    result = await env.agent.execute_task(task, env.ctx)
+
+    assert result.status is TaskResultStatus.WAITING_FOR_APPROVAL, result
+    assert len(env.llm_requests) == 1
+    [plan] = await env.messages(MessageType.IMPLEMENTATION_PLAN)
+    paths = [step["arguments"].get("path", "") for step in plan.payload["steps"]]
+    assert any(path.endswith(TEXT_STATISTICS_MODULE_FILE) for path in paths)
+    assert not await env.messages(MessageType.BLOCKER)
+
+
+async def test_concurrent_resolutions_share_one_refined_plan(
+    make_env: Callable[..., ForgeEnv],
+) -> None:
+    # The assignment handler and the task run resolve the same task concurrently; the later
+    # resolution must reuse the drafted plan rather than save the template as a competing plan.
+    env = make_env(ForgeConfig(llm_refine_templates=True))
+    task = await _text_statistics_task(env)
+    env.llm_replies.append(json.dumps(LLM_PLAN))
+
+    results = await asyncio.gather(*(resolve_plan(env.ctx, task, env.config) for _ in range(3)))
+
+    plans = [plan for plan, refusal in results if plan is not None and refusal is None]
+    assert len(plans) == 3
+    assert len({plan.plan_id for plan in plans}) == 1
+    assert len(env.llm_requests) == 1
+    assert len(await env.messages(MessageType.IMPLEMENTATION_PLAN)) == 1
+
+
+async def test_capability_templates_can_be_disabled(make_env: Callable[..., ForgeEnv]) -> None:
+    env = make_env(ForgeConfig(capability_templates=False))
+    task = await _text_statistics_task(env)
+    env.llm_replies.append(json.dumps(LLM_PLAN))
+    result = await env.agent.execute_task(task, env.ctx)
+    assert result.status is TaskResultStatus.COMPLETED, result
+    assert result.outputs["plan_source"] == "llm"
+
+
+def test_match_template_is_word_bounded() -> None:
+    assert match_template("Add a text_statistics capability") is not None
+    assert match_template(None, "", "a text_statisticsX helper") is None
 
 
 async def test_runtime_change_is_confined_to_a_copy_and_never_deployed(env: ForgeEnv) -> None:

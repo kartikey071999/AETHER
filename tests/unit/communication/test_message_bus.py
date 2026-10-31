@@ -104,6 +104,17 @@ async def test_republishing_same_message_id_is_idempotent(sessions) -> None:
     assert (await events_for(sessions, message.message_id))["message.published"] == 1
 
 
+async def test_concurrent_publishers_of_one_id_see_exactly_one_success(sessions) -> None:
+    # The id doubles as a once-only claim (e.g. FORGE's single LLM draft per task), so a
+    # publisher that lost the insert race must not report that it published.
+    bus = MessageBus(sessions)
+    message = make_message()
+
+    results = await asyncio.gather(*(bus.publish(message) for _ in range(4)))
+
+    assert sorted(results) == [False, False, False, True]
+
+
 async def test_publish_losing_a_concurrent_insert_race_reports_not_created(
     sessions, monkeypatch
 ) -> None:

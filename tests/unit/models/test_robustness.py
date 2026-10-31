@@ -62,7 +62,8 @@ def response(**overrides):
 
 @pytest.mark.parametrize("estimated", [False, True])
 async def test_empty_completion_falls_back_with_usage_and_event(guard, database, estimated):
-    empty = response(usage_estimated=estimated)
+    # A blank completion that did not hit the length limit is not retried on the same model.
+    empty = response(usage_estimated=estimated, finish_reason="stop")
     first = MockProvider(
         [empty],
         models=[
@@ -186,7 +187,7 @@ async def test_remote_providers_reject_empty_text(permissions, provider_type, mo
         await provider.aclose()
 
 
-async def test_empty_sdk_completion_records_measured_cost_and_falls_back(
+async def test_empty_sdk_completion_records_measured_cost_and_retries_with_more_tokens(
     permissions, usage, database
 ):
     data = {
@@ -211,8 +212,9 @@ async def test_empty_sdk_completion_records_measured_cost_and_falls_back(
         client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
     )
     result = await ModelRouter([provider], BudgetGuard(usage, settings)).complete(request())
-    assert result.model == "openai/gpt-oss-120b"
-    assert [call.kwargs["max_tokens"] for call in create.await_args_list] == [128, 128]
+    # The length-truncated empty reply is retried once on the same model with doubled tokens.
+    assert result.model == "openai/gpt-oss-20b"
+    assert [call.kwargs["max_tokens"] for call in create.await_args_list] == [128, 256]
     assert all(call.kwargs["reasoning_effort"] == "low" for call in create.await_args_list)
     rows, events = await records(database)
     failed = next(row for row in rows if row.status == "failed")
@@ -493,7 +495,8 @@ async def test_missing_usage_on_empty_sdk_response_keeps_conservative_reservatio
         await ModelRouter([provider], BudgetGuard(usage, settings)).complete(
             request(model="openai/gpt-oss-20b")
         )
-    create.assert_awaited_once()
+    # One bounded length retry with a doubled budget, then no further attempts.
+    assert [call.kwargs["max_tokens"] for call in create.await_args_list] == [128, 256]
     rows, events = await records(database)
     assert rows[0].input_tokens == request().input_token_estimate()
     assert rows[0].output_tokens == 128

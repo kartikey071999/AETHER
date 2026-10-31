@@ -69,12 +69,13 @@ async def test_none_rejects_without_usage(guard, database):
     assert not mock.requests
 
 
-async def test_astra_only_after_other_premium_options_fail(guard, database):
+async def test_astra_only_after_other_premium_options_fail(usage, settings, database):
     groq = provider("groq", [ModelTier.PREMIUM], responses=[ProviderError("groq")])
     opus = provider(
         "azure_anthropic", [ModelTier.PREMIUM], responses=[ProviderError("azure_anthropic")]
     )
     astra = provider("azure_openai", [ModelTier.PREMIUM])
+    guard = BudgetGuard(usage, settings.model_copy(update={"max_models_per_request": 3}))
     result = await ModelRouter([astra, opus, groq], guard).complete(request(ModelTier.PREMIUM))
     assert result.provider == "azure_openai"
     rows, events = await records(database)

@@ -72,6 +72,16 @@ class AetherSettings(BaseSettings):
     min_free_disk_gb: float = Field(default=5.0, ge=0)
     task_timeout_seconds: int = Field(default=1800, ge=1)
     max_task_retries: int = Field(default=3, ge=0, le=20)
+    api_token: SecretStr | None = Field(default=None, repr=False)
+    api_host: str = Field(default="127.0.0.1", min_length=1)
+    api_port: int = Field(default=8000, ge=1, le=65535)
+
+    @field_validator("api_token", mode="before")
+    @classmethod
+    def _empty_api_token(cls, value: SecretStr | str | None) -> SecretStr | str | None:
+        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+        return None if raw is not None and not raw.strip() else value
+
     resource_sample_seconds: float = Field(default=30.0, ge=1, allow_inf_nan=False)
     resource_retention_days: int = Field(default=30, ge=1)
     resource_event_seconds: float = Field(default=300.0, ge=60, allow_inf_nan=False)

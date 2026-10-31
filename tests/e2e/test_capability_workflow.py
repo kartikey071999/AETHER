@@ -12,7 +12,9 @@ from pathlib import Path
 import pytest
 from reliability_support import QuietMonitor
 
+from aether.agents.forge.schemas import ForgeConfig
 from aether.communication.messages import AgentId, MessageType
+from aether.models.contracts import CompletionRequest
 from aether.runtime.scenario import (
     ACCEPTANCE_CRITERIA,
     MODULE_FILE,
@@ -68,13 +70,24 @@ def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
+def _forge_requests(provider: ScriptedCapabilityProvider) -> list[CompletionRequest]:
+    return [
+        request
+        for request in provider.requests
+        if request.messages and request.messages[0].content.startswith("You are FORGE")
+    ]
+
+
 async def test_happy_path_verifies_the_capability_and_reports_it(tmp_path: Path) -> None:
     settings = scenario_settings(tmp_path)
+    provider = ScriptedCapabilityProvider()
     async with CapabilityScenario(
-        settings, model_providers=[ScriptedCapabilityProvider()], resource_monitor=QUIET
+        settings, model_providers=[provider], resource_monitor=QUIET
     ) as scenario:
         trace = await _run(scenario, capability_finished, tag="happy")
     report = _report(trace)
+    # text_statistics is a known capability: FORGE used its template and never asked an LLM.
+    assert _forge_requests(provider) == [], report
 
     # 1. The objective was decomposed into tasks with dependencies.
     assert trace.objective.completion_criteria == list(ACCEPTANCE_CRITERIA)
@@ -200,15 +213,19 @@ async def test_happy_path_verifies_the_capability_and_reports_it(tmp_path: Path)
 
 
 async def test_buggy_module_fails_verification_and_is_never_verified(tmp_path: Path) -> None:
+    provider = ScriptedCapabilityProvider(buggy=True)
     scenario = CapabilityScenario(
         scenario_settings(tmp_path),
-        model_providers=[ScriptedCapabilityProvider(buggy=True)],
+        model_providers=[provider],
         max_replans=0,
         resource_monitor=QUIET,
+        # FORGE asks the LLM before its deterministic template, so the buggy draft is used.
+        forge_config=ForgeConfig(llm_refine_templates=True),
     )
     async with scenario:
         trace = await _run(scenario, verification_failed, tag="buggy")
     report = _report(trace)
+    assert len(_forge_requests(provider)) == 1, report
 
     [test_run] = trace.test_runs
     assert (test_run.passed, test_run.failed) == (1, 2), report

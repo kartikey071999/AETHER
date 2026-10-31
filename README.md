@@ -73,12 +73,15 @@ to observe. ORCHESTR contexts expose `resource_measurements` and `execution_runs
 `ExecutionRunRepository.history(task_id=..., agent=..., operation=..., limit=...)`
 provides finished runs for future estimates without changing estimates automatically.
 
-`aether.api.create_app(database.sessions)` creates a read-only FastAPI application
-with `GET /resources`, returning measurement rows as a JSON array. Optional
-`since`, `until`, and `task_id` filters and `limit` (default 100, maximum 1000) /
-`offset` pagination bound responses. The caller owns database/server lifecycle;
-the factory opens no listener and does not start a second sampler. Other API
-surfaces and dashboard integration remain future work.
+`aether.api.create_app(settings, database=database)` creates the local FastAPI
+application with `GET /resources` and the operational routes described below.
+Resource history uses `ResourceMeasurementRepository.range` and returns the
+standard `items`/`total`/`limit`/`offset` Page envelope, newest first with UTC
+timestamps. Optional timezone-aware `since` (inclusive), `until` (exclusive), and
+`task_id` filters and `limit` (default 100, 1-1000) / `offset` (nonnegative)
+pagination bound responses. A range requires `since < until` when both are
+supplied; invalid queries return 422. An injected database remains caller-owned;
+the factory opens no listener and does not start a second sampler.
 
 Inter-agent contracts live in `aether.communication.contracts`: one frozen
 Pydantic payload model per `MessageType` (`PAYLOAD_MODELS`, `validate_payload`),
@@ -130,9 +133,67 @@ is returned as `UntrustedContent`. Every allow and block is an audit event.
 
 A continuously running worker lifecycle, wiring the tool registry into agent
 workflows, message delivery/recovery, a complete requirement workflow,
-independent test verification, personalization storage, API, and dashboard
+independent test verification, personalization storage, and dashboard
 remain future phases. No arbitrary software installation or shell execution is
 exposed by this foundation.
+
+## Local API
+
+After applying migrations, run `uv run aether api serve`. The read-mostly FastAPI
+service binds to `AETHER_API_HOST=127.0.0.1` and `AETHER_API_PORT=8000` by default;
+OpenAPI documentation is at `/docs`. It opens the persistent database without
+starting runtime workers or contacting model providers. Run `aether run` separately
+to process submitted objectives, authorization responses, and running-task controls.
+
+`GET /health` checks the database schema and reports the latest persisted heartbeat;
+it does not assert that workers are alive. Read endpoints are unauthenticated:
+`/agents`, `/objectives`, `/objectives/{id}`, `/tasks`, `/tasks/{id}`, `/requirements`,
+`/capabilities`, `/security/decisions`, `/security/pending-approvals`,
+`/scheduler/decisions`, `/resources`, `/errors`, `/executions`, `/tests`, `/events`,
+`/messages`, and `/providers/usage`. Collections return
+`{"items": [...], "total": N, "limit": 50, "offset": 0}`.
+Use `limit` (1-200, default 50; `/resources` uses 1-1000, default 100) and
+`offset` (nonnegative) on every collection, and on task
+detail's nested dependencies, executions, and events. Embedded test results,
+capability verification runs, and recovery attempts have their own bounded pages
+starting at offset zero. `/tasks` filters by `state` and `agent`; `/events` by
+`type` and `task_id`; `/messages` by `correlation_id`.
+Objective progress is the percentage of completed persisted tasks, not an
+independent verification verdict (unknown when there are no tasks).
+Provider usage aggregates the current UTC day against configured provider and
+model budgets, including outstanding reservations. Empty tables return empty
+collections, never demonstration data. Resource measurements are read from
+`resource_measurements` through the measurement repository, with optional
+timezone-aware `since`/`until` and `task_id` filters; no measurements are invented
+when none have been recorded.
+
+Set a private `AETHER_API_TOKEN` to enable administrative endpoints. Missing or
+blank tokens return 503 for every write; enabled writes require
+`Authorization: Bearer <token>` and compare tokens in constant time. Tokens use
+`SecretStr`, never appear in API logs, and must not be passed in URL parameters.
+Responses are scrubbed using the shared secret-pattern rules and configured
+credential values; validation errors omit raw input, and access logging is
+disabled by the CLI. Keep the default loopback binding: reads include operational
+and personal message content despite credential redaction. If deliberately
+exposing the host beyond loopback, put it behind authenticated HTTPS.
+
+`POST /objectives` accepts the `objective.create` contract (for example,
+`{"title": "Evaluate a local capability", "completion_criteria": ["Offline tests pass"]}`),
+with `generated=false` only. It publishes a validated MUSE-to-ORCHESTR message
+and returns HTTP 202 with `message_id`, `correlation_id`, and `status="queued"`.
+It does not claim an objective has already been created.
+`POST /authorizations/{id}/respond` takes
+`{"decision": "approved"|"denied", "text": "...", "person_id": null, "response_id": null}`.
+It calls MUSE's trusted `record_user_response`, returns the linked `request_id`
+and `interaction_id` with HTTP 202, and never grants authorization itself.
+The request must be pending, unexpired, and already delivered to the supplied
+audience (null means the unscoped user outbox); WARDEN still applies its
+operation-bound authorization checks. Reuse `response_id` to retry the same response.
+`POST /tasks/{id}/pause`, `/cancel`, and `/resume` accept an optional
+`{"reason": "..."}`. Pause/cancel apply immediately when possible (HTTP 200),
+or queue cooperative control for running workers (HTTP 202), preserving live
+leases. Resume requires a paused task or returns 409. Missing records return 404;
+unavailable database operations return 503 without exception details.
 
 ## Model providers
 
@@ -173,8 +234,26 @@ an error instead of silently discarding the requested sampling control.
 
 Whitespace-only or missing completion text raises `EmptyCompletion(ProviderError)`,
 including finish reason, input/output counts, and whether usage is estimated.
-The router records the failed attempt's usage and falls back, without retrying
-that model. Nonempty text with a length finish reason is returned with that reason.
+The router records the failed attempt's usage and falls back. Nonempty plain text with
+a length finish reason is returned with that reason; JSON output cut off at the limit
+raises `TruncatedCompletion`. A length-truncated attempt is retried once on the same
+model with doubled `max_tokens` (capped by `AETHER_PROVIDER_LENGTH_RETRY_MAX_TOKENS`,
+default 8192) instead of cascading. One request reaches at most
+`AETHER_PROVIDER_MAX_MODELS_PER_REQUEST` (default 2) models; budget-refused models do
+not count.
+
+Agent calls carrying an objective are also governed per objective and agent
+(`ModelGovernor`): `AETHER_PROVIDER_AGENT_BUDGETS` (JSON, keyed by agent id or
+`default`) sets `max_tokens_per_objective` / `max_requests_per_objective`
+(defaults: FORGE 20,000 / 8, ORCHESTR 40,000 / 20, others 150,000 / 50). Before each
+attempt the projected spend is checked; exhaustion raises `AgentBudgetExceeded` (a
+`ModelUnavailable`, so agents fall back deterministically) and records
+`provider.budget_exhausted` once. After `AETHER_PROVIDER_CIRCUIT_BREAKER_FAILURES`
+(default 5, 0 disables) consecutive failed or unusable completions
+(`AgentModels.report_unusable`) the circuit opens for that objective and agent and
+`provider.circuit_opened` is recorded. Calls for one objective and agent are
+serialised. The ledger is in memory: a restart resets it, and the daily provider
+budgets still apply.
 `ModelInfo.min_max_tokens` defaults to 1; Groq gpt-oss/Qwen and Azure Astra use 128.
 Smaller requests are raised to that minimum. Optional `CompletionRequest.max_tokens_cap`
 limits output tokens; provider/model per-request budgets limit input plus output.

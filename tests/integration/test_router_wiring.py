@@ -236,7 +236,7 @@ async def test_contexts_expose_no_router_guard_or_provider(runtime: Runtime) -> 
     for agent_id in ALL_AGENTS:
         ctx = runtime.engine.context_for(agent_id)
         public = {name for name in dir(ctx.models) if not name.startswith("_")}
-        assert public == {"agent_id", "complete"}
+        assert public == {"agent_id", "complete", "report_unusable"}
         assert not [item for item in _reachable(ctx) if isinstance(item, privileged)], agent_id
 
 

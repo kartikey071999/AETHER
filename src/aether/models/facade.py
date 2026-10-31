@@ -21,6 +21,13 @@ class ModelUnavailable(RuntimeError):
         super().__init__("no eligible model: " + "; ".join(self.reasons))
 
 
+class AgentBudgetExceeded(ModelUnavailable):
+    """This agent's per-objective LLM budget is spent or its circuit breaker is open.
+
+    Agents must fall back to deterministic behaviour; retrying cannot succeed for the objective.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class ModelCallContext:
     """The task/objective a completion is attributed to (for budgets and audit events)."""
@@ -29,24 +36,40 @@ class ModelCallContext:
     objective_id: UUID | None = None
 
 
+UnusableReporter = Callable[[AgentId, ModelCallContext, str], Awaitable[None]]
+
+
+async def _ignore_report(agent: AgentId, ctx: ModelCallContext, reason: str) -> None:
+    return None
+
+
 class AgentModels:
-    __slots__ = ("_complete", "agent_id")
+    __slots__ = ("_complete", "_report", "agent_id")
 
     agent_id: AgentId
     _complete: Callable[[CompletionRequest], Awaitable[CompletionResponse]]
+    _report: UnusableReporter
 
     def __init__(
         self,
         agent_id: AgentId,
         complete: Callable[[CompletionRequest], Awaitable[CompletionResponse]],
+        *,
+        report_unusable: UnusableReporter | None = None,
     ) -> None:
         agent = AgentId(agent_id)
 
         async def routed(request: CompletionRequest) -> CompletionResponse:
             return await complete(request)
 
+        reporter = report_unusable or _ignore_report
+
+        async def report(agent: AgentId, ctx: ModelCallContext, reason: str) -> None:
+            await reporter(agent, ctx, reason)
+
         object.__setattr__(self, "agent_id", agent)
         object.__setattr__(self, "_complete", routed)
+        object.__setattr__(self, "_report", report)
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("AgentModels is read-only")
@@ -76,3 +99,12 @@ class AgentModels:
             }
         )
         return await self._complete(stamped)
+
+    async def report_unusable(
+        self, ctx: ModelCallContext | None = None, *, reason: str = "invalid_output"
+    ) -> None:
+        """Count a completion the agent could not use (e.g. invalid JSON) as a model failure.
+
+        Repeated unusable output trips the per-objective circuit breaker for this agent.
+        """
+        await self._report(self.agent_id, ctx or ModelCallContext(), reason)
