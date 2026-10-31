@@ -33,7 +33,8 @@ from aether.workflows.definition import (
     resolve,
 )
 
-RUNNABLE = frozenset({WorkflowStatus.APPROVED, WorkflowStatus.VERIFIED})
+# Only verified workflows run for real (approved ones are dry-run by LEDGER first).
+RUNNABLE = frozenset({WorkflowStatus.VERIFIED})
 
 
 class WorkflowNotFound(LookupError):

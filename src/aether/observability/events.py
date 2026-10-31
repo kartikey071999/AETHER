@@ -899,8 +899,18 @@ class WorkflowRunFinishedPayload(EventPayload):
     error: str | None = Field(default=None, max_length=500)
 
 
+class WorkflowDefinitionStatusChangedPayload(EventPayload):
+    name: str = Field(min_length=1, max_length=120)
+    version: int = Field(ge=1)
+    from_status: str | None = Field(default=None, max_length=24)
+    to_status: str = Field(min_length=1, max_length=24)
+    actor: str = Field(min_length=1, max_length=24)
+    rationale: str = Field(default="", max_length=500)
+
+
 for _type, _model in (
     ("skill.completed", SkillCompletedPayload),
+    ("workflow.definition_status_changed", WorkflowDefinitionStatusChangedPayload),
     ("workflow.definition_registered", WorkflowDefinitionRegisteredPayload),
     ("workflow.run_started", WorkflowRunStartedPayload),
     ("workflow.step_finished", WorkflowStepFinishedPayload),
