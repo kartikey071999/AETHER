@@ -5,8 +5,15 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from decimal import Decimal
 
-from aether.models.base import EmptyCompletion, ModelProvider, ProviderError, retry_delay
-from aether.models.budgets import BudgetExceeded, BudgetGuard
+from aether.models.base import (
+    LENGTH_FINISH_REASONS,
+    EmptyCompletion,
+    ModelProvider,
+    ProviderError,
+    TruncatedCompletion,
+    retry_delay,
+)
+from aether.models.budgets import BudgetExceeded, BudgetGuard, RouteSpend
 from aether.models.contracts import CompletionRequest, CompletionResponse, ModelInfo, ModelTier
 from aether.models.costs import estimate_cost
 from aether.models.settings import ProviderSettings
@@ -40,17 +47,31 @@ class ModelRouter:
         self.semaphore = semaphore or asyncio.Semaphore(max_concurrent_llm_requests)
         self.sleeper = sleeper
 
-    async def complete(self, request: CompletionRequest) -> CompletionResponse:
+    async def complete(
+        self, request: CompletionRequest, *, spend: RouteSpend | None = None
+    ) -> CompletionResponse:
+        """Route one completion.
+
+        At most ``settings.max_models_per_request`` distinct models receive a provider call;
+        ``spend`` accumulates calls and charged tokens and may carry hard limits.
+        """
         if request.tier is ModelTier.NONE:
             raise ValueError("deterministic work must not call an LLM")
         request = request.model_copy(deep=True)
+        spend = spend if spend is not None else RouteSpend()
         reasons: list[str] = []
+        tried = 0
+        capped = False
+        limit = self.settings.max_models_per_request
         async with self.semaphore:
             for provider in self.providers:
                 if request.provider and request.provider != provider.name:
                     continue
                 if provider.name in _PREMIUM_ONLY and request.tier is not ModelTier.PREMIUM:
                     continue
+                if tried >= limit or spend.refusal:
+                    capped = tried >= limit
+                    break
                 if not provider.available():
                     reasons.append(f"{provider.name}: unavailable")
                     continue
@@ -67,9 +88,13 @@ class ModelRouter:
                 ]
                 eligible.sort(key=lambda model: self._cost(provider.name, model, request))
                 for model in eligible:
+                    if tried >= limit or spend.refusal:
+                        capped = tried >= limit
+                        break
+                    calls = spend.requests
                     try:
                         routed = self.budgets.prepare_request(provider.name, model, request)
-                        return await self._try_model(provider, routed)
+                        return await self._try_model(provider, model, routed, spend)
                     except (BudgetExceeded, ProviderError, OperationBlocked) as error:
                         # Only safe classification is retained; never propagate SDK text into events.
                         detail = (
@@ -78,6 +103,12 @@ class ModelRouter:
                             else type(error).__name__
                         )
                         reasons.append(f"{provider.name}/{model.name}: {detail}")
+                    finally:
+                        # Only a model that actually received a call counts towards the cap.
+                        if spend.requests > calls:
+                            tried += 1
+        if capped:
+            reasons.append(f"stopped after {tried} model(s): fallback limit reached")
         raise NoModelAvailable(reasons or ["no provider supports the requested tier/model"])
 
     def _cost(self, provider: str, model: ModelInfo, request: CompletionRequest) -> Decimal:
@@ -90,9 +121,17 @@ class ModelRouter:
         )[0]
 
     async def _try_model(
-        self, provider: ModelProvider, request: CompletionRequest
+        self,
+        provider: ModelProvider,
+        model: ModelInfo,
+        request: CompletionRequest,
+        spend: RouteSpend,
     ) -> CompletionResponse:
-        for attempt in range(self.settings.max_retries + 1):
+        attempt = 0
+        transient_retries = 0
+        length_retried = False
+        while True:
+            spend.check(request)
             reservation = await self.budgets.reserve(provider.name, request)
             response: CompletionResponse | None = None
             error: BaseException | None = None
@@ -104,6 +143,12 @@ class ModelRouter:
                     raise ProviderError(provider.name, code="response_identity_mismatch")
                 if not response.text.strip():
                     raise EmptyCompletion(response)
+                if (
+                    request.response_format != "text"
+                    and response.finish_reason in LENGTH_FINISH_REASONS
+                ):
+                    # Structured output cut off at the limit cannot be valid JSON.
+                    raise TruncatedCompletion(response)
                 cost, unknown = estimate_cost(
                     provider.name,
                     request.model,
@@ -126,7 +171,7 @@ class ModelRouter:
                 error = caught
                 raise
             finally:
-                await self.budgets.finish(
+                charged = await self.budgets.finish(
                     reservation,
                     request,
                     response=response if error is None else None,
@@ -134,18 +179,44 @@ class ModelRouter:
                     latency_ms=(time.monotonic() - started) * 1000,
                     attempt=attempt + 1,
                 )
+                spend.add(*charged)
+            attempt += 1
             if error is None:
                 if response is None:
                     raise RuntimeError("provider returned no completion")
                 return response
+            if isinstance(error, EmptyCompletion) and error.truncated and not length_retried:
+                # One retry on the same model with a larger output budget; never a loop.
+                length_retried = True
+                larger = self._length_retry(provider, model, request)
+                if larger is not None:
+                    request = larger
+                    continue
+                raise error
             if not (
                 isinstance(error, ProviderError)
                 and error.transient
-                and attempt < self.settings.max_retries
+                and transient_retries < self.settings.max_retries
             ):
                 raise error
-            await self.sleeper(retry_delay(self.settings, attempt))
-        raise RuntimeError("unreachable retry state")
+            await self.sleeper(retry_delay(self.settings, transient_retries))
+            transient_retries += 1
+
+    def _length_retry(
+        self, provider: ModelProvider, model: ModelInfo, request: CompletionRequest
+    ) -> CompletionRequest | None:
+        ceiling = self.settings.length_retry_max_tokens
+        if request.max_tokens_cap is not None:
+            ceiling = min(ceiling, request.max_tokens_cap)
+        larger = min(request.max_tokens * 2, ceiling)
+        if larger <= request.max_tokens:
+            return None
+        try:
+            return self.budgets.prepare_request(
+                provider.name, model, request.model_copy(update={"max_tokens": larger})
+            )
+        except BudgetExceeded:
+            return None
 
     async def aclose(self) -> None:
         for provider in self.providers:

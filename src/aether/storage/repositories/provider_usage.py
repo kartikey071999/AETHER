@@ -27,6 +27,10 @@ class ProviderUsageRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
 
+    @property
+    def sessions(self) -> async_sessionmaker[AsyncSession]:
+        return self._sessions
+
     @asynccontextmanager
     async def locked(self, provider: str) -> AsyncIterator[AsyncSession]:
         """Serialize quota admission across processes, not just a single router."""

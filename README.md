@@ -234,8 +234,26 @@ an error instead of silently discarding the requested sampling control.
 
 Whitespace-only or missing completion text raises `EmptyCompletion(ProviderError)`,
 including finish reason, input/output counts, and whether usage is estimated.
-The router records the failed attempt's usage and falls back, without retrying
-that model. Nonempty text with a length finish reason is returned with that reason.
+The router records the failed attempt's usage and falls back. Nonempty plain text with
+a length finish reason is returned with that reason; JSON output cut off at the limit
+raises `TruncatedCompletion`. A length-truncated attempt is retried once on the same
+model with doubled `max_tokens` (capped by `AETHER_PROVIDER_LENGTH_RETRY_MAX_TOKENS`,
+default 8192) instead of cascading. One request reaches at most
+`AETHER_PROVIDER_MAX_MODELS_PER_REQUEST` (default 2) models; budget-refused models do
+not count.
+
+Agent calls carrying an objective are also governed per objective and agent
+(`ModelGovernor`): `AETHER_PROVIDER_AGENT_BUDGETS` (JSON, keyed by agent id or
+`default`) sets `max_tokens_per_objective` / `max_requests_per_objective`
+(defaults: FORGE 20,000 / 8, ORCHESTR 40,000 / 20, others 150,000 / 50). Before each
+attempt the projected spend is checked; exhaustion raises `AgentBudgetExceeded` (a
+`ModelUnavailable`, so agents fall back deterministically) and records
+`provider.budget_exhausted` once. After `AETHER_PROVIDER_CIRCUIT_BREAKER_FAILURES`
+(default 5, 0 disables) consecutive failed or unusable completions
+(`AgentModels.report_unusable`) the circuit opens for that objective and agent and
+`provider.circuit_opened` is recorded. Calls for one objective and agent are
+serialised. The ledger is in memory: a restart resets it, and the daily provider
+budgets still apply.
 `ModelInfo.min_max_tokens` defaults to 1; Groq gpt-oss/Qwen and Azure Astra use 128.
 Smaller requests are raised to that minimum. Optional `CompletionRequest.max_tokens_cap`
 limits output tokens; provider/model per-request budgets limit input plus output.

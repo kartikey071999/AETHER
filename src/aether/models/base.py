@@ -44,15 +44,31 @@ class ProviderError(RuntimeError):
         super().__init__(f"{provider}: {code}")
 
 
+LENGTH_FINISH_REASONS = frozenset({"length", "max_tokens"})
+
+
 class EmptyCompletion(ProviderError):
     """An unusable completion whose measured (or estimated) usage still counts."""
+
+    code_name = "empty_completion"
 
     def __init__(self, response: CompletionResponse) -> None:
         self.finish_reason = response.finish_reason
         self.input_tokens = response.input_tokens
         self.output_tokens = response.output_tokens
         self.usage_estimated = response.usage_estimated
-        super().__init__(response.provider, code="empty_completion")
+        super().__init__(response.provider, code=self.code_name)
+
+    @property
+    def truncated(self) -> bool:
+        """The model stopped at its output limit, so a larger budget may succeed."""
+        return self.finish_reason in LENGTH_FINISH_REASONS
+
+
+class TruncatedCompletion(EmptyCompletion):
+    """Structured output cut off at the token limit: it cannot be valid, so it is unusable."""
+
+    code_name = "truncated_completion"
 
 
 class ModelProvider(Protocol):

@@ -1,8 +1,11 @@
 """Finding the plan for a task: a stored one, a deterministic template, or a validated LLM draft."""
 
+import asyncio
 import re
 from collections.abc import Sequence
+from dataclasses import replace
 from uuid import UUID
+from weakref import WeakValueDictionary
 
 from sqlalchemy import select
 
@@ -10,11 +13,22 @@ from aether.agents.base import AgentContext
 from aether.agents.forge.planning import build_template_plan, draft_with_llm, extract_spec
 from aether.agents.forge.schemas import ForgeConfig, ForgePlan, PlanDefect, Refusal, RefusalCode
 from aether.agents.forge.store import latest_plan, save_plan
+from aether.agents.forge.templates import match_template
 from aether.storage.models import RequirementRecord, RequirementStatus, TaskRecord
 
 _ACTIONABLE = (RequirementStatus.APPROVED.value, RequirementStatus.IN_PROGRESS.value)
 _CRITERIA_HEADER = re.compile(r"^\s*acceptance criteria:\s*$", re.IGNORECASE)
 _BULLET = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
+# The assignment handler and the task run may resolve the same task at once; one resolver per
+# task keeps them from saving two different plans (e.g. an LLM draft and the template).
+_PLAN_LOCKS: WeakValueDictionary[UUID, asyncio.Lock] = WeakValueDictionary()
+
+
+def _plan_lock(task_id: UUID) -> asyncio.Lock:
+    lock = _PLAN_LOCKS.get(task_id)
+    if lock is None:
+        lock = _PLAN_LOCKS[task_id] = asyncio.Lock()
+    return lock
 
 
 async def load_requirement(ctx: AgentContext, task: TaskRecord) -> RequirementRecord | None:
@@ -81,6 +95,16 @@ async def resolve_plan(
     stored = await latest_plan(ctx, task.id)
     if stored is not None:
         return stored, None
+    async with _plan_lock(task.id):
+        stored = await latest_plan(ctx, task.id)
+        if stored is not None:
+            return stored, None
+        return await _build_plan(ctx, task, config, criteria_hint)
+
+
+async def _build_plan(
+    ctx: AgentContext, task: TaskRecord, config: ForgeConfig, criteria_hint: Sequence[str]
+) -> tuple[ForgePlan | None, Refusal | None]:
     requirement = await load_requirement(ctx, task)
     requirement_id = requirement.id if requirement is not None else task.requirement_id
     # The structured requirement is authoritative; the assignment hint and the task text are
@@ -97,7 +121,9 @@ async def resolve_plan(
                 spec, task, requirement_id=requirement_id, criteria=criteria, config=config
             )
         else:
-            plan = await _draft(ctx, task, requirement_id, criteria, config)
+            plan = await _capability_or_draft(
+                ctx, task, requirement, requirement_id, criteria, config
+            )
     except PlanDefect as error:
         return None, Refusal(RefusalCode.PLAN_INVALID, str(error))
     if plan is None:
@@ -107,6 +133,39 @@ async def resolve_plan(
         )
     await save_plan(ctx, task, plan)
     return plan, None
+
+
+async def _capability_or_draft(
+    ctx: AgentContext,
+    task: TaskRecord,
+    requirement: RequirementRecord | None,
+    requirement_id: UUID | None,
+    criteria: tuple[str, ...],
+    config: ForgeConfig,
+) -> ForgePlan | None:
+    """A known capability uses its template; the LLM is only an optional refinement of it."""
+    known = (
+        match_template(
+            task.title,
+            task.description,
+            requirement.title if requirement else None,
+            requirement.description if requirement else None,
+        )
+        if config.capability_templates
+        else None
+    )
+    if known is None:
+        return await _draft(ctx, task, requirement_id, criteria, config)
+    name, spec = known
+    if config.llm_refine_templates:
+        drafted = await _draft(ctx, task, requirement_id, criteria, config)
+        if drafted is not None:
+            return drafted
+        ctx.logger.info("forge.template_fallback: using the %s template", name)
+    plan = build_template_plan(
+        spec, task, requirement_id=requirement_id, criteria=criteria, config=config
+    )
+    return replace(plan, source=f"template:{name}")
 
 
 async def _draft(

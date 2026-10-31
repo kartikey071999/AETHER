@@ -35,7 +35,12 @@ class ForgeConfig:
     max_duration_s: int = 7200
     evidence_chars: int = 500
     llm_drafting: bool = True
-    llm_max_tokens: int = 1500
+    # Room for a complete JSON plan; 1500 truncated real drafts and caused a re-plan runaway.
+    llm_max_tokens: int = 4096
+    # Known capabilities (forge/templates.py) are built deterministically without an LLM.
+    capability_templates: bool = True
+    # Ask the LLM first even for a known capability; the template is the fallback.
+    llm_refine_templates: bool = False
 
     def backoff(self, failures: int) -> float:
         return min(self.backoff_base_seconds * (2 ** max(failures, 0)), self.backoff_cap_seconds)
