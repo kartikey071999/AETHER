@@ -73,6 +73,8 @@ class ProviderSettings(BaseSettings):
     ollama_base_url: SecretStr = Field(
         default=SecretStr("http://localhost:11434"), validation_alias="OLLAMA_BASE_URL"
     )
+    # AETHER_PROVIDER_MOCK=1 makes the runtime use only the offline MockProvider.
+    mock: bool | None = None
     timeout_seconds: float = Field(default=30, gt=0, le=600)
     max_retries: int = Field(default=2, ge=0, le=5)
     retry_backoff_seconds: float = Field(default=0.5, ge=0, le=30)

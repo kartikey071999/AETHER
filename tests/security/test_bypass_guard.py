@@ -134,3 +134,87 @@ def test_guard_detects_direct_privileged_calls() -> None:
     assert (
         _forbidden_uses("import os\nfrom urllib.parse import urlsplit\nos.path.join('a')\n") == []
     )
+
+
+# Agents reach models only through AgentContext.models (aether.models.facade / contracts).
+AGENT_FORBIDDEN_MODEL_MODULES = (
+    "aether.models.providers",
+    "aether.models.router",
+    "aether.models.budgets",
+    "aether.models.transport",
+)
+AGENT_FORBIDDEN_MODEL_NAMES = frozenset(
+    {
+        "ModelRouter",
+        "BudgetGuard",
+        "GroqProvider",
+        "AzureOpenAIProvider",
+        "AzureAnthropicProvider",
+        "OllamaProvider",
+        "MockProvider",
+        "NoModelAvailable",
+        "BudgetExceeded",
+    }
+    | {module.rsplit(".", 1)[1] for module in AGENT_FORBIDDEN_MODEL_MODULES}
+)
+
+
+def _agent_model_violations(code: str) -> list[str]:
+    def internal(name: str) -> bool:
+        return any(
+            name == module or name.startswith(f"{module}.")
+            for module in AGENT_FORBIDDEN_MODEL_MODULES
+        )
+
+    found: list[str] = []
+    for node in ast.walk(ast.parse(code)):
+        if isinstance(node, ast.Import):
+            found += [alias.name for alias in node.names if internal(alias.name)]
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            if internal(node.module):
+                found.append(node.module)
+            elif node.module == "aether.models":
+                found += [
+                    f"aether.models.{alias.name}"
+                    for alias in node.names
+                    if alias.name in AGENT_FORBIDDEN_MODEL_NAMES
+                ]
+    return found
+
+
+def test_agents_cannot_import_model_internals() -> None:
+    files = sorted((SOURCE_ROOT / "agents").rglob("*.py"))
+    assert files, "expected agent sources to scan"
+    violations = [
+        f"{path.relative_to(SOURCE_ROOT)}: {name}"
+        for path in files
+        for name in _agent_model_violations(path.read_text(encoding="utf-8"))
+    ]
+    assert violations == []
+
+
+def test_model_guard_detects_internal_imports_and_allows_contracts() -> None:
+    code = (
+        "import aether.models.transport\n"
+        "from aether.models.providers import GroqProvider\n"
+        "from aether.models.router import ModelRouter\n"
+        "from aether.models.budgets import BudgetGuard\n"
+        "from aether.models import ModelRouter, BudgetGuard, MockProvider, router\n"
+    )
+    assert set(_agent_model_violations(code)) == {
+        "aether.models.transport",
+        "aether.models.providers",
+        "aether.models.router",
+        "aether.models.budgets",
+        "aether.models.ModelRouter",
+        "aether.models.BudgetGuard",
+        "aether.models.MockProvider",
+    }
+    assert (
+        _agent_model_violations(
+            "from aether.models.facade import AgentModels, ModelUnavailable\n"
+            "from aether.models.contracts import CompletionRequest, ModelTier\n"
+            "from aether.models import CompletionRequest\n"
+        )
+        == []
+    )

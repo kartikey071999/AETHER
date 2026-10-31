@@ -101,10 +101,12 @@ class OperationAuthorizationRequests:
         expires_at: datetime | None,
         objective_id: UUID | None = None,
         task_id: UUID | None = None,
+        input_hash: str | None = None,
     ) -> AuthorizationRequestRecord:
         """Silence never authorizes: the request stays pending until a user answers it."""
         record = AuthorizationRequestRecord(
             question=question,
+            input_hash=input_hash,
             objective_id=objective_id,
             task_id=task_id,
             security_decision_id=security_decision_id,

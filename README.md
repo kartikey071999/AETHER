@@ -54,6 +54,13 @@ same transaction. The scheduler selects from supplied ready-task candidates
 using dependencies, deadlines, CPU, RAM, disk reserve, concurrency limits, and
 wait-time aging; its decisions can be persisted as events.
 
+Inter-agent contracts live in `aether.communication.contracts`: one frozen
+Pydantic payload model per `MessageType` (`PAYLOAD_MODELS`, `validate_payload`),
+plus `ROUTES`/`SENDERS` tables and `check_route` describing which agents may
+receive and send each type. `aether.agents.factory.build_agents` builds the seven
+agents, importing `aether.agents.<lowercase id>` and its `AGENT_CLASS` when the
+package exists and falling back to an inert placeholder otherwise.
+
 Central permission enforcement lives in `aether.security`: an immutable,
 default-deny `SecurityPolicy` (configured once at startup through
 `AETHER_SECURITY_*` settings such as JSON lists `AETHER_SECURITY_ALLOWED_EXECUTABLES`

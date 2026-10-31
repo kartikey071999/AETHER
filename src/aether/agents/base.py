@@ -18,6 +18,7 @@ from aether.communication.messages import AgentId, AgentMessage, MessageType
 from aether.storage.models import TaskRecord
 
 if TYPE_CHECKING:
+    from aether.models.facade import AgentModels
     from aether.tools.facade import AgentTools
 
 
@@ -38,6 +39,7 @@ class AgentContext:
     # Agents only ever see a read-only permission view and a facade bound to their own identity.
     permission_service: PermissionService | None = None
     tools: "AgentTools | None" = None
+    models: "AgentModels | None" = None
     services: dict[str, Any] = field(default_factory=dict)
 
 
