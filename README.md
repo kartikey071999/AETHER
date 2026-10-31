@@ -131,6 +131,15 @@ timeouts, process-tree kill, and scrubbed environment; allowlisted HTTP;
 confined file I/O) refuse to act without a matching grant, and external output
 is returned as `UntrustedContent`. Every allow and block is an audit event.
 
+SCOUT and ROGUE research the web through read-only, policy-gated tools
+(`web.fetch`, `web.extract`, `web.links`, `pypi.package`, `github.repo`,
+`github.search`, `docs.search`). Each request is a separate `web_fetch` operation
+limited to the `AETHER_WEB_ALLOWED_HOSTS` allowlist and sent through the same
+DNS-pinned HTTP path. The tools honour robots.txt, rate-limit per host and cache
+responses under `data_dir/web_cache/`. Derived web research is opt-in
+(`AETHER_RESEARCH__WEB_RESEARCH=true`). See [docs/web-research.md](docs/web-research.md)
+for the library comparison, security model and configuration.
+
 A continuously running worker lifecycle, wiring the tool registry into agent
 workflows, message delivery/recovery, a complete requirement workflow,
 independent test verification, personalization storage, and dashboard
