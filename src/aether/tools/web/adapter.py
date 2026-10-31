@@ -36,6 +36,7 @@ from aether.tools.adapters.http import Resolver, SafeHttp
 from aether.tools.registry import OperationSpec
 from aether.tools.web.cache import WebCache
 from aether.tools.web.extract import ExtractedPage, Link, extract_html, normalize_url
+from aether.tools.web.github import github_auth_headers
 from aether.tools.web.politeness import GitHubRateLimit, HostRateLimiter
 from aether.tools.web.robots import (
     MAX_ROBOTS_BYTES,
@@ -826,7 +827,11 @@ class SafeWeb(SafeHttp):
             if media not in accept:
                 raise UnacceptableContent(f"content type {media or 'unknown'!r} is not allowed")
 
-        request_headers = {"User-Agent": self.settings.user_agent, **(headers or {})}
+        request_headers = {
+            "User-Agent": self.settings.user_agent,
+            **(headers or {}),
+            **github_auth_headers(url, self.settings.github_token),
+        }
         async with self._semaphore:
             await self.limiter.wait(host)
             raw = await self._exchange(
