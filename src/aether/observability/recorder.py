@@ -36,6 +36,8 @@ def _to_record(event: AetherEvent) -> EventRecord:
         correlation_id=event.correlation_id,
         objective_id=event.objective_id,
         task_id=event.task_id,
+        session_id=str(event.session_id) if event.session_id is not None else None,
+        branch=redact_string(event.branch) if event.branch is not None else None,
         payload=redact(document["payload"]),
         idempotency_key=event.idempotency_key,
         created_at=event.timestamp,

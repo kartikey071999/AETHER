@@ -33,10 +33,12 @@ class AuthorizationRequestRepository:
         security_decision_id: UUID | None = None,
         expires_at: datetime | None = None,
         correlation_id: UUID | None = None,
+        input_hash: str | None = None,
     ) -> UUID:
         async with self._sessions() as session, session.begin():
             request = AuthorizationRequestRecord(
                 question=question,
+                input_hash=input_hash,
                 objective_id=objective_id,
                 task_id=task_id,
                 security_decision_id=security_decision_id,
