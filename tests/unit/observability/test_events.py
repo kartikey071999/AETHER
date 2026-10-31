@@ -267,6 +267,7 @@ PAYLOAD_EXAMPLES = {
         "threshold": 5,
         "last_error": "NoModelAvailable",
     },
+    "provider.circuit_closed": {"agent": "FORGE", "probe": True, "consecutive_failures": 5},
     "agent.registered": {"agent_id": "LEDGER", "enabled": True},
     "agent.updated": {"agent_id": "LEDGER", "enabled": False},
     "agent.enabled": {"agent_id": "LEDGER"},

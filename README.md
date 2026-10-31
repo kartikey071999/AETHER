@@ -252,8 +252,14 @@ attempt the projected spend is checked; exhaustion raises `AgentBudgetExceeded` 
 (default 5, 0 disables) consecutive failed or unusable completions
 (`AgentModels.report_unusable`) the circuit opens for that objective and agent and
 `provider.circuit_opened` is recorded. Calls for one objective and agent are
-serialised. The ledger is in memory: a restart resets it, and the daily provider
-budgets still apply.
+serialised. Usage and breaker state are durable: `provider_usage.objective_id`
+(migration `0005`) attributes every call, and the first use of an objective and agent after
+a start seeds the ledger from it and replays the breaker from the latest
+`provider.circuit_opened` / `provider.circuit_closed` event. After
+`AETHER_PROVIDER_CIRCUIT_BREAKER_COOLDOWN_SECONDS` (default 1800) an open breaker lets one
+probe call through: success records `provider.circuit_closed`, failure re-opens it and
+restarts the cool-down. FORGE's `AETHER_FORGE_LLM_REFINE_TEMPLATES` (default false) asks the
+LLM first even for known capability templates.
 `ModelInfo.min_max_tokens` defaults to 1; Groq gpt-oss/Qwen and Azure Astra use 128.
 Smaller requests are raised to that minimum. Optional `CompletionRequest.max_tokens_cap`
 limits output tokens; provider/model per-request budgets limit input plus output.

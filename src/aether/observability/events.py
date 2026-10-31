@@ -764,7 +764,17 @@ class ProviderCircuitOpenedPayload(EventPayload):
     last_error: str | None = None
 
 
+class ProviderCircuitClosedPayload(EventPayload):
+    """A half-open probe call succeeded; LLM use resumes for this agent and objective."""
+
+    agent: str
+    probe: bool = True
+    consecutive_failures: int = Field(default=0, ge=0)
+
+
 EVENT_TYPES["provider.budget_exhausted"] = ProviderBudgetExhaustedPayload
 EVENT_TYPES["provider.circuit_opened"] = ProviderCircuitOpenedPayload
+EVENT_TYPES["provider.circuit_closed"] = ProviderCircuitClosedPayload
 EVENT_CATEGORIES["provider.budget_exhausted"] = EventCategory.PROVIDER
 EVENT_CATEGORIES["provider.circuit_opened"] = EventCategory.PROVIDER
+EVENT_CATEGORIES["provider.circuit_closed"] = EventCategory.PROVIDER

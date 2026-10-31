@@ -373,7 +373,9 @@ class CapabilityScenario:
         agents = None
         if self.forge_config is not None:
             options = runtime_agent_options(
-                data_dir=settings.data_dir, research_limits=settings.research
+                data_dir=settings.data_dir,
+                research_limits=settings.research,
+                forge_llm_refine_templates=settings.forge_llm_refine_templates,
             )
             options[AgentId.FORGE] = {"config": self.forge_config}
             agents = build_agents(options=options)

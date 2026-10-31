@@ -97,6 +97,7 @@ class ProviderUsageRepository:
         output_tokens: int,
         cost_usd: Decimal,
         occurred_at: datetime,
+        objective_id: UUID | None = None,
     ) -> UUID:
         reservation_id = uuid4()
         session.add(
@@ -106,6 +107,7 @@ class ProviderUsageRepository:
                 model=model,
                 agent=agent,
                 task_id=task_id,
+                objective_id=objective_id,
                 request_count=1,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
@@ -147,6 +149,7 @@ class ProviderUsageRepository:
         model: str,
         agent: str | None = None,
         task_id: UUID | None = None,
+        objective_id: UUID | None = None,
         request_count: int = 1,
         input_tokens: int = 0,
         output_tokens: int = 0,
@@ -164,6 +167,7 @@ class ProviderUsageRepository:
                 model=model,
                 agent=agent,
                 task_id=task_id,
+                objective_id=objective_id,
                 request_count=request_count,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
@@ -192,6 +196,20 @@ class ProviderUsageRepository:
                 task_id=task_id,
             )
             return usage.id
+
+    async def objective_agent_usage(self, objective_id: UUID, agent: str) -> tuple[int, int]:
+        """(provider calls, tokens) ever attributed to one objective and agent."""
+        statement = select(
+            func.coalesce(func.sum(ProviderUsageRecord.request_count), 0),
+            func.coalesce(
+                func.sum(ProviderUsageRecord.input_tokens + ProviderUsageRecord.output_tokens), 0
+            ),
+        ).where(
+            ProviderUsageRecord.objective_id == objective_id, ProviderUsageRecord.agent == agent
+        )
+        async with self._sessions() as session:
+            requests, tokens = (await session.execute(statement)).one()
+        return int(requests), int(tokens)
 
     async def total_cost(
         self,

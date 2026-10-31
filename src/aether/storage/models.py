@@ -837,12 +837,15 @@ class ProviderUsageRecord(Base):
             name="ck_provider_usage_counts",
         ),
         Index("ix_provider_usage_provider_occurred", "provider", "occurred_at"),
+        Index("ix_provider_usage_objective_agent", "objective_id", "agent"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     provider: Mapped[str] = mapped_column(String(64), nullable=False)
     model: Mapped[str] = mapped_column(String(200), nullable=False)
     agent: Mapped[str | None] = mapped_column(String(24))
+    # Plain column (no foreign key), like events: usage history must never block objective deletes.
+    objective_id: Mapped[UUID | None] = mapped_column(Uuid)
     task_id: Mapped[UUID | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"))
     request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

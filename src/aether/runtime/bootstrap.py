@@ -181,7 +181,9 @@ def build_runtime(
     if agents is None:
         agents = build_agents(
             options=runtime_agent_options(
-                data_dir=settings.data_dir, research_limits=settings.research
+                data_dir=settings.data_dir,
+                research_limits=settings.research,
+                forge_llm_refine_templates=settings.forge_llm_refine_templates,
             )
         )
     engine = Engine(
