@@ -455,6 +455,8 @@ class ForgeWorkflow:
             "runtime_change": plan.runtime_change,
             "deployed": False,
             "verified": False,
+            # Tells LEDGER a dedicated verification.request follows this result.
+            "verification_requested": requirement_id is not None,
         }
         await ctx.bus.publish(
             result_message(
@@ -467,7 +469,6 @@ class ForgeWorkflow:
                 outputs=outputs,
             )
         )
-        outputs["verification_requested"] = requirement_id is not None
         if requirement_id is not None:
             await ctx.bus.publish(
                 verification_message(
