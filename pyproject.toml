@@ -42,6 +42,7 @@ build-backend = "uv_build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = ["live: opt-in real provider smoke tests (AETHER_LIVE_TESTS=1)"]
 
 [tool.ruff]
 line-length = 100

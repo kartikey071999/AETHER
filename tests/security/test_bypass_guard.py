@@ -9,6 +9,7 @@ FORBIDDEN_MODULES = (
     "subprocess",
     "socket",
     "httpx",
+    "httpx2",
     "requests",
     "urllib.request",
     "aiohttp",
@@ -70,6 +71,8 @@ def test_agents_and_models_do_not_bypass_the_tool_registry() -> None:
         f"{path.relative_to(SOURCE_ROOT)}: {name}"
         for path in files
         for name in _forbidden_uses(path.read_text(encoding="utf-8"))
+        # T-021's sole HTTP boundary authorizes and redeems each actual outbound request.
+        if not (path == SOURCE_ROOT / "models" / "transport.py" and name in {"httpx", "httpx2"})
     ]
     assert violations == []
 
@@ -80,7 +83,7 @@ def test_guard_detects_direct_privileged_calls() -> None:
         "import urllib.request\n"
         "from asyncio import create_subprocess_shell\n"
         "from aether.tools.adapters import SafeSubprocess\n"
-        "import httpx\n"
+        "import httpx, httpx2\n"
         "os.system('x')\n"
         "os.spawnl(0, 'x')\n"
         "__import__('socket')\n"
@@ -91,6 +94,7 @@ def test_guard_detects_direct_privileged_calls() -> None:
         "asyncio.create_subprocess_shell",
         "aether.tools.adapters",
         "httpx",
+        "httpx2",
         "os.system",
         "os.spawnl",
         "__import__",

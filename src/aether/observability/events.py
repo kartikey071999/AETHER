@@ -326,6 +326,11 @@ class ProviderRequestCompletedPayload(EventPayload):
     latency_ms: float = Field(ge=0)
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
+    status: str = "succeeded"
+    attempt: int = Field(default=1, ge=1)
+    error_type: str | None = None
+    usage_estimated: bool = False
+    cost_estimate_unknown: bool = False
 
 
 class ProviderUsageRecordedPayload(EventPayload):

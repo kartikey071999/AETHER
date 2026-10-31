@@ -1,0 +1,140 @@
+"""Local-first routing with durable budgets and globally bounded completion concurrency."""
+
+import asyncio
+import time
+from collections.abc import Awaitable, Callable, Sequence
+from decimal import Decimal
+
+from aether.models.base import ModelProvider, ProviderError, retry_delay
+from aether.models.budgets import BudgetExceeded, BudgetGuard
+from aether.models.contracts import CompletionRequest, CompletionResponse, ModelInfo, ModelTier
+from aether.models.costs import estimate_cost
+from aether.models.settings import ProviderSettings
+from aether.security import OperationBlocked
+
+_ORDER = {"ollama": 0, "groq": 1, "mock": 1, "azure_anthropic": 2, "azure_openai": 3}
+_PREMIUM_ONLY = frozenset({"azure_anthropic", "azure_openai"})
+
+
+class NoModelAvailable(RuntimeError):
+    def __init__(self, reasons: list[str]) -> None:
+        self.reasons = reasons
+        super().__init__("no eligible model: " + "; ".join(reasons))
+
+
+class ModelRouter:
+    def __init__(
+        self,
+        providers: Sequence[ModelProvider],
+        budgets: BudgetGuard,
+        *,
+        max_concurrent_llm_requests: int = 2,
+        semaphore: asyncio.Semaphore | None = None,
+        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        if max_concurrent_llm_requests < 1:
+            raise ValueError("LLM concurrency must be positive")
+        self.providers = sorted(providers, key=lambda provider: _ORDER.get(provider.name, 1))
+        self.budgets = budgets
+        self.settings: ProviderSettings = budgets.settings
+        self.semaphore = semaphore or asyncio.Semaphore(max_concurrent_llm_requests)
+        self.sleeper = sleeper
+
+    async def complete(self, request: CompletionRequest) -> CompletionResponse:
+        if request.tier is ModelTier.NONE:
+            raise ValueError("deterministic work must not call an LLM")
+        request = request.model_copy(deep=True)
+        reasons: list[str] = []
+        async with self.semaphore:
+            for provider in self.providers:
+                if request.provider and request.provider != provider.name:
+                    continue
+                if provider.name in _PREMIUM_ONLY and request.tier is not ModelTier.PREMIUM:
+                    continue
+                if not provider.available():
+                    reasons.append(f"{provider.name}: unavailable")
+                    continue
+                try:
+                    models = await provider.list_models()
+                except (ProviderError, OperationBlocked) as error:
+                    reasons.append(f"{provider.name}: {type(error).__name__} during discovery")
+                    continue
+                eligible = [
+                    model
+                    for model in models
+                    if request.tier in model.tiers
+                    and (not request.model or request.model == model.name)
+                ]
+                eligible.sort(key=lambda model: self._cost(provider.name, model, request))
+                for model in eligible:
+                    routed = request.model_copy(
+                        update={"provider": provider.name, "model": model.name}
+                    )
+                    try:
+                        return await self._try_model(provider, routed)
+                    except (BudgetExceeded, ProviderError, OperationBlocked) as error:
+                        # Only safe classification is retained; never propagate SDK text into events.
+                        reasons.append(f"{provider.name}/{model.name}: {type(error).__name__}")
+        raise NoModelAvailable(reasons or ["no provider supports the requested tier/model"])
+
+    @staticmethod
+    def _cost(provider: str, model: ModelInfo, request: CompletionRequest) -> Decimal:
+        return estimate_cost(
+            provider, model.name, request.input_token_estimate(), request.max_tokens
+        )[0]
+
+    async def _try_model(
+        self, provider: ModelProvider, request: CompletionRequest
+    ) -> CompletionResponse:
+        for attempt in range(self.settings.max_retries + 1):
+            reservation = await self.budgets.reserve(provider.name, request)
+            response: CompletionResponse | None = None
+            error: BaseException | None = None
+            started = time.monotonic()
+            try:
+                async with asyncio.timeout(self.settings.timeout_seconds):
+                    response = await provider.complete(request)
+                if response.provider != provider.name or response.model != request.model:
+                    raise ProviderError(provider.name, code="response_identity_mismatch")
+                cost, unknown = estimate_cost(
+                    provider.name, request.model, response.input_tokens, response.output_tokens
+                )
+                response = response.model_copy(
+                    update={
+                        "cost_usd": float(cost),
+                        "cost_estimate_unknown": unknown,
+                        "latency_ms": (time.monotonic() - started) * 1000,
+                    }
+                )
+            except TimeoutError:
+                error = ProviderError(provider.name, transient=True, code="timeout")
+            except (ProviderError, OperationBlocked) as caught:
+                error = caught
+            except BaseException as caught:
+                error = caught
+                raise
+            finally:
+                await self.budgets.finish(
+                    reservation,
+                    request,
+                    response=response if error is None else None,
+                    error=error,
+                    latency_ms=(time.monotonic() - started) * 1000,
+                    attempt=attempt + 1,
+                )
+            if error is None:
+                if response is None:
+                    raise RuntimeError("provider returned no completion")
+                return response
+            if not (
+                isinstance(error, ProviderError)
+                and error.transient
+                and attempt < self.settings.max_retries
+            ):
+                raise error
+            await self.sleeper(retry_delay(self.settings, attempt))
+        raise RuntimeError("unreachable retry state")
+
+    async def aclose(self) -> None:
+        for provider in self.providers:
+            await provider.aclose()
