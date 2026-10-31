@@ -33,7 +33,7 @@ def test_required_sections_and_no_invented_numbers():
         "Authorization requests",
     ):
         assert section in rendered
-    assert '"duration": 0.5' in rendered
+    assert "- duration: 0.5" in rendered
     assert "not independently verified by MUSE" in rendered
     assert set(re.findall(r"\d+(?:\.\d+)?", rendered)) == {"12", "0.5"}
     assert "No performance measurement." in rendered
@@ -92,9 +92,114 @@ def test_identifier_guard_accepts_json_numeric_and_unicode_formatting():
         personalization_context={"decision_deadlines": {"Proceed": "2026-10-31T01:00:00Z"}},
     )
     text = render_message(request, CommunicationPreferences(), handoff_options(request))
-    assert '"error": 1e-07' in text
-    assert '"name": "caf\\u00e9"' in text
+    assert "- error: 1e-07" in text
+    assert "- name: caf\u00e9" in text
     assert "2026-10-31T01:00:00+00:00" in text
+
+
+@pytest.mark.parametrize("length", ["short", "normal", "long"])
+@pytest.mark.parametrize("count", [0, 1, 9])
+def test_task_results_are_readable_and_not_independently_verified(length, count):
+    request = CommunicationRequestPayload(
+        what_happened="Objective completed.",
+        results=[
+            {
+                "objective": "Add a text_statistics capability",
+                "tasks_completed": count,
+                "note": "Offline run",
+            }
+        ],
+        verified=["Acceptance criteria passed."],
+        uncertain=["Performance not measured."],
+    )
+    text = render_message(request, CommunicationPreferences(length=length), HandoffOptions())
+    label = "task" if count == 1 else "tasks"
+    assert f"{count} {label} completed for 'Add a text_statistics capability'" in text
+    assert "note: Offline run" in text
+    assert "tasks_completed" not in text
+    assert '{"objective"' not in text
+    reported = text.split("Reported results", 1)[1].split("Verified", 1)[0]
+    assert "not independently verified by MUSE" in reported
+    assert "Acceptance criteria passed." not in reported
+    assert "Performance not measured." in text.split("Uncertain", 1)[1]
+
+
+def test_unknown_nested_fields_preserve_values_without_raw_json():
+    request = CommunicationRequestPayload(
+        what_happened="Reported measurements.",
+        results=[
+            {
+                "metrics": {"run2": {"duration": 0.5, "enabled": True, "error": None}},
+                "artifacts": ["caf\u00e9-12.txt", {"name": "second.txt", "bytes": 42}],
+                "empty_mapping": {},
+                "empty_list": [],
+            }
+        ],
+    )
+    text = render_message(request, CommunicationPreferences(), HandoffOptions())
+    for line in (
+        "metrics: run2: duration: 0.5",
+        "metrics: run2: enabled: true",
+        "metrics: run2: error: null",
+        "artifacts: caf\u00e9-12.txt",
+        "artifacts: name: second.txt",
+        "artifacts: bytes: 42",
+        "empty_mapping: (empty mapping)",
+        "empty_list: (empty list)",
+    ):
+        assert f"- {line}" in text
+    assert '{"' not in text
+    assert '["' not in text
+    with pytest.raises(ValueError, match="unsupported number or identifier"):
+        render_message(
+            request, CommunicationPreferences(), HandoffOptions(), opening="Completed 999 tasks."
+        )
+
+
+@pytest.mark.parametrize("count", [True, -1, "9", 0.5, None])
+def test_invalid_task_counts_remain_literal_reported_fields(count):
+    request = CommunicationRequestPayload(
+        what_happened="Reported fields.",
+        results=[{"objective": "Evaluate", "tasks_completed": count}],
+    )
+    text = render_message(request, CommunicationPreferences(), HandoffOptions())
+    assert "- objective: Evaluate" in text
+    assert "- tasks_completed:" in text
+    assert "tasks completed" not in text
+
+
+def test_count_without_title_and_empty_results_do_not_invent_an_objective():
+    request = CommunicationRequestPayload(
+        what_happened="Reported fields.",
+        results=[{"tasks_completed": 9}, {}, {"objective": ""}],
+    )
+    text = render_message(request, CommunicationPreferences(), HandoffOptions())
+    assert "- 9 tasks completed" in text
+    assert "completed for" not in text
+    assert "- No result fields supplied." in text
+    assert "- objective: " in text
+
+
+def test_identifier_guard_handles_decoded_multiline_and_escaped_strings():
+    request = CommunicationRequestPayload(
+        what_happened="Reported fields.",
+        results=[
+            {
+                "objective": "First line\njob-9",
+                "tasks_completed": 9,
+                "message": "First line\nbuild-12\tcaf\u00e9-42",
+                "path": "C:\\run42",
+            }
+        ],
+    )
+    text = render_message(request, CommunicationPreferences(), HandoffOptions())
+    assert "job-9" in text
+    assert "build-12\tcaf\u00e9-42" in text
+    assert "C:\\run42" in text
+    with pytest.raises(ValueError, match="unsupported number or identifier"):
+        render_message(
+            request, CommunicationPreferences(), HandoffOptions(), context_names=["job-999"]
+        )
 
 
 def test_invalid_options_are_rejected_without_echoing_input():
