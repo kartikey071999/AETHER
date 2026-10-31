@@ -111,9 +111,20 @@ addition applies to the demo process only.
   requirement. After `requirement_wait_minutes` (default 10; the scenario harness uses 30 s via
   `ScenarioTiming.requirement_wait_seconds`) ORCHESTR escalates the objective once (kind
   `requirement`); the build stays held until a requirement is approved or a person acts.
-- LEDGER's verification task waits for the real test run. It reuses `WAITING_FOR_APPROVAL` as its
-  waiting state and waits indefinitely if FORGE never requests verification.
-- An inconclusive verdict is stored as a `CANCELLED` test run.
+- LEDGER's verification task waits for the real test run in its own `waiting_for_verification`
+  state (distinct from `waiting_for_approval`). If no run arrives, ORCHESTR escalates once per
+  wait after `verification_wait_minutes` (default 30); a task waiting for an approval escalates
+  once after `approval_wait_minutes` (default 60). Both are kind `verification_wait` /
+  `approval_wait`, never block the objective, and are deduplicated by the escalation window.
+- A ready task that the scheduler keeps deferring for resources (CPU, RAM, disk, concurrency)
+  escalates once after `resource_deferral_minutes` (default 15), with the deferral reason, as kind
+  `resource_deferral`. The demo trace lists it under "ORCHESTR decisions" and marks the pending
+  task `[escalated to the user]`. Only deferrals in ORCHESTR's release step are timed; the
+  engine's own deferral of a task that is already `ready` is not escalated. The wait start is kept
+  per task attempt, so a task released and deferred again within the same attempt reuses its
+  original start time.
+- An inconclusive verdict is stored as an `inconclusive` test run (`test_runs.status`). Rows
+  written before migration `0006` as `cancelled` are backfilled by it.
 - A ROGUE LLM budget of one or less leaves no critique call; critique then uses the curated
   alternatives.
 - Per-objective LLM budgets and breaker state are durable (seeded from `provider_usage` and
@@ -130,7 +141,8 @@ addition applies to the demo process only.
   `task.requirement_linked`. FORGE's "latest approved requirement" guess remains only for
   legacy tasks and logs `forge.legacy_requirement_fallback`. FORGE refuses a linked requirement
   that is not approved (`requirement_not_approved`), and ORCHESTR does not release it before then.
-- **LEDGER verification task:** it waits for the FORGE test run and is completed by it.
+- **LEDGER verification task:** it waits for the FORGE test run (state `waiting_for_verification`)
+  and is completed by it.
 - **Verdicts and timestamps:** `test_runs.verdict` holds the verdict, and the task repository
   sets `tasks.started_at` / `completed_at`.
 - **Escalation:** with `max_replans=0`, ORCHESTR escalates a failed report instead of creating
@@ -160,7 +172,8 @@ addition applies to the demo process only.
   `ignored_terminal_objective` decision: no escalation, replanning or user update.
 - **No notification storms:** ORCHESTR sends at most one escalation and user update per
   (objective, kind) per `escalation_window_hours` (default 1); later triggers are recorded as
-  `escalation_aggregated`. MUSE suppresses a notice that matches an earlier one by audience,
+  `escalation_aggregated`. Tasks waiting for verification, approval or resources escalate once
+  per wait episode (task attempt) on top of that window. MUSE suppresses a notice that matches an earlier one by audience,
   objective, notice kind and content hash within `AETHER_MUSE_DEDUPE_WINDOW_MINUTES`
   (default 60), independent of correlation id and task, and emits `communication.suppressed`.
   `tests/e2e/test_budget_exhausted.py` runs the scenario with every provider over budget.
