@@ -141,7 +141,7 @@ async def test_non_allowlisted_executable_is_blocked_and_reported_as_security(
     [blocker] = await env.messages(MessageType.BLOCKER)
     assert blocker.payload["kind"] == "security"
     assert blocker.payload["route_to"] == AgentId.WARDEN.value
-    assert blocker.target_agent == AgentId.ORCHESTR.value
+    assert blocker.target_agent == AgentId.WARDEN.value
 
 
 async def test_restart_mid_plan_resumes_from_the_journal(env: ForgeEnv) -> None:
