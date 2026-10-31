@@ -1,3 +1,4 @@
+import socket
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -140,7 +141,13 @@ def registry(
         return _mock_handler(request)
 
     return build_default_registry(
-        permissions, database.sessions, recorder, http_transport=httpx.MockTransport(handler)
+        permissions,
+        database.sessions,
+        recorder,
+        http_transport=httpx.MockTransport(handler),
+        http_resolver=lambda host, port: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", port))
+        ],
     )
 
 

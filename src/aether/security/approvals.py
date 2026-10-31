@@ -98,6 +98,11 @@ class ApprovalService:
         outcome = DecisionOutcome(decision)
         if not rationale.strip():
             raise InvalidSecurityDecision("a security decision requires a rationale")
+        # Unknown or malformed restrictions are rejected before anything is staged.
+        # Imported here because permissions depends on this module.
+        from aether.security.permissions import parse_restrictions
+
+        parse_restrictions(list(restrictions))
         now = self._clock()
         expires_at = self._validate_expiry(outcome, expires_at, now)
         input_hash = operation.input_hash

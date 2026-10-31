@@ -5,6 +5,7 @@ never from LLM output. Every allow and every block is written as a durable event
 """
 
 import logging
+import math
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -19,8 +20,8 @@ from aether.communication.messages import AgentId
 from aether.observability.events import AetherEvent
 from aether.observability.recorder import EventRecorder
 from aether.security._audit import log_security, stage_event
-from aether.security.errors import BlockReason, OperationBlocked
-from aether.security.operations import Operation, OperationKind
+from aether.security.errors import BlockReason, InvalidSecurityDecision, OperationBlocked
+from aether.security.operations import Operation, OperationKind, normalize_host
 from aether.security.policy import SecurityPolicy
 from aether.storage.models import AuthorizationStatus, SecurityDecisionRecord
 from aether.storage.repositories._events import as_utc
@@ -28,6 +29,57 @@ from aether.storage.repositories.security import (
     OperationAuthorizationRequests,
     SecurityDecisionRepository,
 )
+
+
+class ExecutionRestrictions(BaseModel):
+    """Validated decision limits; absent values leave immutable policy limits in place."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_runtime_seconds: float | None = None
+    no_network: bool = False
+    read_only: bool = False
+    max_output_bytes: int | None = None
+    allowed_hosts: tuple[str, ...] | None = None
+
+
+def parse_restrictions(restrictions: object) -> ExecutionRestrictions:
+    """Parse flags and ``name=value`` limits. Unknown or ambiguous restrictions fail closed."""
+    if not isinstance(restrictions, list | tuple):
+        raise InvalidSecurityDecision("restrictions must be a list of strings")
+    values: dict[str, object] = {}
+    for item in restrictions:
+        if not isinstance(item, str):
+            raise InvalidSecurityDecision("restrictions must contain strings")
+        name, separator, value = item.partition("=")
+        if name in values:
+            raise InvalidSecurityDecision(f"duplicate restriction: {name}")
+        if name in {"no_network", "read_only"} and not separator:
+            values[name] = True
+        elif name == "max_runtime_seconds" and separator:
+            try:
+                seconds = float(value)
+            except ValueError as error:
+                raise InvalidSecurityDecision("max_runtime_seconds must be numeric") from error
+            if not math.isfinite(seconds) or seconds <= 0:
+                raise InvalidSecurityDecision("max_runtime_seconds must be positive and finite")
+            values[name] = seconds
+        elif name == "max_output_bytes" and separator:
+            try:
+                size = int(value) if value.isascii() and value.isdecimal() else 0
+            except ValueError as error:
+                raise InvalidSecurityDecision("max_output_bytes is too large") from error
+            if size <= 0:
+                raise InvalidSecurityDecision("max_output_bytes must be a positive integer")
+            values[name] = size
+        elif name == "allowed_hosts" and separator:
+            hosts = tuple(normalize_host(host) for host in value.split(","))
+            if any(not host or any(char in host for char in "/\\@*?# \t\r\n=") for host in hosts):
+                raise InvalidSecurityDecision("allowed_hosts requires comma-separated exact hosts")
+            values[name] = tuple(sorted(set(hosts)))
+        else:
+            raise InvalidSecurityDecision(f"unknown or malformed restriction: {name}")
+    return ExecutionRestrictions.model_validate(values)
 
 
 class Authorization(BaseModel):
@@ -44,6 +96,10 @@ class Authorization(BaseModel):
     decision_id: UUID | None = None
     user_request_id: UUID | None = None
     restrictions: tuple[str, ...] = ()
+
+    @property
+    def limits(self) -> ExecutionRestrictions:
+        return parse_restrictions(self.restrictions)
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,14 +268,23 @@ class PermissionService:
         violation = policy.static_violation(operation)
         if violation is not None:
             return _Block(BlockReason.POLICY_VIOLATION, violation)
-        if not policy.requires_approval(operation.kind):
-            return _Allow()
         decision = await SecurityDecisionRepository.latest_for_input_hash(
             session, operation.input_hash
         )
+        if decision is None and not policy.requires_approval(operation.kind):
+            return _Allow()
         checked = _check_decision(decision, operation, now)
         if isinstance(checked, _Block):
             return checked
+        limits = parse_restrictions(checked.restrictions)
+        if limits.allowed_hosts is not None and any(
+            not policy.is_host_allowed(host) for host in limits.allowed_hosts
+        ):
+            return _Block(
+                BlockReason.POLICY_VIOLATION,
+                "allowed_hosts restriction must be a subset of the policy allowlist",
+                checked.decision_id,
+            )
         if policy.requires_user_authorization(operation.kind):
             user = await self._check_user_authorization(
                 session, operation, checked, now, correlation_id
@@ -324,6 +389,7 @@ class PermissionService:
                 "operation": operation.describe(),
                 "reason": f"{outcome.reason.value}: {outcome.detail}",
                 "decision_id": outcome.decision_id,
+                "input_hash": operation.input_hash,
             },
             objective_id=operation.objective_id,
             task_id=operation.task_id,
@@ -378,8 +444,13 @@ def _check_decision(
             "operation version does not match the approved version",
             decision.id,
         )
+    restrictions = decision.scope.get("restrictions", ())
+    try:
+        parse_restrictions(restrictions)
+    except InvalidSecurityDecision as error:
+        return _Block(BlockReason.POLICY_VIOLATION, str(error), decision.id)
     return _Allow(
         decision_id=decision.id,
         expires_at=expires_at,
-        restrictions=tuple(str(item) for item in decision.scope.get("restrictions", ())),
+        restrictions=tuple(restrictions),
     )

@@ -199,14 +199,14 @@ async def test_decision_validation(approvals: ApprovalService, clock) -> None:
 async def test_decision_is_durably_recorded_with_event(approve, database, events_of, clock) -> None:
     operation = subprocess_operation()
     decision = await approve(
-        operation, restrictions=["no network"], risks=["arbitrary code"], evidence=[{"a": 1}]
+        operation, restrictions=["no_network"], risks=["arbitrary code"], evidence=[{"a": 1}]
     )
     record = await SecurityDecisionRepository(database.sessions).get(decision.decision_id)
     assert record is not None
     assert record.input_hash == operation.input_hash
     assert record.decision == "approved"
     assert record.scope["decided_by"] == "WARDEN"
-    assert record.scope["restrictions"] == ["no network"]
+    assert record.scope["restrictions"] == ["no_network"]
     assert "not proof of absolute safety" in record.scope["clearance_note"]
     assert record.evidence == [{"a": 1}]
     events = await events_of("security.decision_recorded")
