@@ -54,6 +54,32 @@ same transaction. The scheduler selects from supplied ready-task candidates
 using dependencies, deadlines, CPU, RAM, disk reserve, concurrency limits, and
 wait-time aging; its decisions can be persisted as events.
 
+Host CPU, available RAM, and free disk are persisted once at runtime startup and
+every `AETHER_RESOURCE_SAMPLE_SECONDS` (default 30, minimum 1), independently of
+scheduler traffic. `ResourceMeasurementRepository` supports `record`, `latest`,
+newest-first bounded `range` queries, and `purge`. Range starts are inclusive and
+ends exclusive; timestamps must include a timezone. `resource.measured` audit
+events are sampled at `AETHER_RESOURCE_EVENT_SECONDS` (default 300, minimum 60),
+with admission serialized in the database across repository instances/restarts.
+Retention keeps `AETHER_RESOURCE_RETENTION_DAYS` (default 30), purging at startup
+and daily, while preserving all samples linked to nonterminal tasks.
+
+Worker outcomes retain attempt duration in `task.result["resource_usage"]` without
+overwriting agent results. Safe subprocess executions retain duration and sampled
+process-tree `peak_rss_bytes` in `execution_runs.resource_usage`, including failed,
+timed-out, and cancelled runs. RSS is sampled at most every 0.1 seconds; it is not
+an exact OS high-water mark, and remains `null` when unavailable or too short-lived
+to observe. ORCHESTR contexts expose `resource_measurements` and `execution_runs`;
+`ExecutionRunRepository.history(task_id=..., agent=..., operation=..., limit=...)`
+provides finished runs for future estimates without changing estimates automatically.
+
+`aether.api.create_app(database.sessions)` creates a read-only FastAPI application
+with `GET /resources`, returning measurement rows as a JSON array. Optional
+`since`, `until`, and `task_id` filters and `limit` (default 100, maximum 1000) /
+`offset` pagination bound responses. The caller owns database/server lifecycle;
+the factory opens no listener and does not start a second sampler. Other API
+surfaces and dashboard integration remain future work.
+
 Inter-agent contracts live in `aether.communication.contracts`: one frozen
 Pydantic payload model per `MessageType` (`PAYLOAD_MODELS`, `validate_payload`),
 plus `ROUTES`/`SENDERS` tables and `check_route` describing which agents may

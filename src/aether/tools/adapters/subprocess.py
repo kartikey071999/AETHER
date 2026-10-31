@@ -34,6 +34,7 @@ SECRET_ENV_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "DATABASE_URL", "CRE
 _CHUNK = 64 * 1024
 _READER_GRACE_SECONDS = 5.0
 _KILL_WAIT_SECONDS = 5.0
+_RSS_SAMPLE_SECONDS = 0.1
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -97,6 +98,7 @@ class SubprocessResult:
     stderr: UntrustedContent
     stdout_truncated: bool
     stderr_truncated: bool
+    peak_rss_bytes: int | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -119,9 +121,45 @@ async def _pump(stream: asyncio.StreamReader | None, path: Path, cap: int) -> tu
     return written, truncated
 
 
-async def _wait_for_exit(process: asyncio.subprocess.Process) -> int:
+@dataclass(slots=True)
+class _ProcessUsage:
+    peak_rss_bytes: int | None = None
+    unavailable: bool = False
+    next_sample: float = 0.0
+
+    def sample(self, pid: int) -> None:
+        now = time.monotonic()
+        if self.unavailable or now < self.next_sample:
+            return
+        self.next_sample = now + _RSS_SAMPLE_SECONDS
+        try:
+            parent = psutil.Process(pid)
+            processes = [parent, *parent.children(recursive=True)]
+            rss = 0
+            measured = False
+            for child in processes:
+                try:
+                    rss += child.memory_info().rss
+                    measured = True
+                except psutil.NoSuchProcess:
+                    continue
+            if measured:
+                self.peak_rss_bytes = max(self.peak_rss_bytes or 0, rss)
+        except psutil.NoSuchProcess:
+            pass  # Short-lived processes can exit between enumeration and measurement.
+        except psutil.AccessDenied:
+            self.unavailable = True
+            self.peak_rss_bytes = None
+            _LOGGER.warning("process-tree RSS measurement unavailable for execution PID %s", pid)
+
+
+async def _wait_for_exit(
+    process: asyncio.subprocess.Process, usage: _ProcessUsage | None = None
+) -> int:
     # Process.wait() can wait for pipes inherited by surviving descendants, even after exit.
     while process.returncode is None:
+        if usage is not None:
+            usage.sample(process.pid)
         await asyncio.sleep(0.01)
     return process.returncode
 
@@ -239,6 +277,7 @@ class SafeSubprocess:
         readers: list[asyncio.Task[tuple[int, bool]]] = []
         launch: asyncio.Task[asyncio.subprocess.Process] | None = None
         timed_out = False
+        process_usage = _ProcessUsage()
         try:
             containment = ProcessContainment()
             launch = asyncio.create_task(
@@ -261,7 +300,7 @@ class SafeSubprocess:
                 asyncio.create_task(_pump(process.stderr, stderr_path, cap)),
             ]
             try:
-                exit_code = await asyncio.wait_for(_wait_for_exit(process), timeout)
+                exit_code = await asyncio.wait_for(_wait_for_exit(process, process_usage), timeout)
             except TimeoutError:
                 timed_out = True
             await _terminate(containment, process)
@@ -297,7 +336,12 @@ class SafeSubprocess:
                         RunStatus.CANCELLED if cancelled else RunStatus.FAILED,
                         None,
                         time.monotonic() - started,
-                        {"cancelled": cancelled, "error": type(error).__name__},
+                        {
+                            "cancelled": cancelled,
+                            "error": type(error).__name__,
+                            "peak_rss_bytes": process_usage.peak_rss_bytes,
+                            "rss_sample_seconds": _RSS_SAMPLE_SECONDS,
+                        },
                         correlation_id,
                     )
                 )
@@ -313,6 +357,8 @@ class SafeSubprocess:
             "stderr_bytes": stderr_info[0],
             "stdout_truncated": stdout_info[1],
             "stderr_truncated": stderr_info[1],
+            "peak_rss_bytes": process_usage.peak_rss_bytes,
+            "rss_sample_seconds": _RSS_SAMPLE_SECONDS,
         }
         status = RunStatus.SUCCEEDED if exit_code == 0 and not timed_out else RunStatus.FAILED
         await self._record_finish(
@@ -330,6 +376,7 @@ class SafeSubprocess:
             stderr=_read_capped(stderr_path, f"{source}:stderr"),
             stdout_truncated=stdout_info[1],
             stderr_truncated=stderr_info[1],
+            peak_rss_bytes=process_usage.peak_rss_bytes,
         )
 
     async def _record_start(
@@ -377,6 +424,7 @@ class SafeSubprocess:
         usage: dict[str, Any],
         correlation_id: UUID | None,
     ) -> None:
+        usage = {**usage, "duration_seconds": round(max(duration, 0.0), 3)}
         async with self._sessions() as session, session.begin():
             await ExecutionRunRepository.stage_finished(
                 session,

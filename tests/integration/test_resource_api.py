@@ -1,0 +1,114 @@
+import asyncio
+from datetime import UTC, datetime, timedelta
+from itertools import pairwise
+
+import httpx
+import pytest
+from sqlalchemy import select
+
+from aether.api import create_app
+from aether.runtime.engine import Engine, EngineLimits
+from aether.runtime.resource_monitor import HostResources
+from aether.runtime.scheduler import Scheduler, SchedulerPolicy
+from aether.storage.database import Database
+from aether.storage.models import Base, ResourceMeasurementRecord
+from aether.storage.repositories import ResourceMeasurementRepository
+
+NOW = datetime(2030, 1, 1, tzinfo=UTC)
+
+
+@pytest.fixture
+async def database(tmp_path):
+    database = Database(f"sqlite+aiosqlite:///{(tmp_path / 'api.db').as_posix()}")
+    async with database.engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        yield database
+    finally:
+        await database.close()
+
+
+class FakeMonitor:
+    def snapshot(self, disk_path):
+        return HostResources(cpu_percent=10, available_ram_bytes=1234, free_disk_bytes=5678)
+
+
+async def test_runtime_persists_periodic_samples_and_api_returns_rows(database):
+    engine = Engine(
+        database.sessions,
+        [],
+        Scheduler(SchedulerPolicy()),
+        FakeMonitor(),
+        EngineLimits(resource_sample_seconds=1, shutdown_timeout_seconds=1),
+    )
+    await engine.start()
+    try:
+        # No tasks or scheduler resource reads: the independent sampler must still run.
+        deadline = asyncio.get_running_loop().time() + 5
+        while True:
+            async with database.sessions() as session:
+                count = len(list(await session.scalars(select(ResourceMeasurementRecord))))
+            if count >= 2:
+                break
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.05)
+        transport = httpx.ASGITransport(app=create_app(database.sessions))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/resources")
+        assert response.status_code == 200
+        rows = response.json()
+        assert len(rows) >= 2
+        assert set(rows[0]) == {
+            "id",
+            "task_id",
+            "cpu_percent",
+            "available_ram_bytes",
+            "free_disk_bytes",
+            "observed_at",
+        }
+        assert rows[0]["cpu_percent"] == 10
+        times = [datetime.fromisoformat(row["observed_at"]) for row in rows]
+        assert all((earlier - later).total_seconds() >= 1 for earlier, later in pairwise(times))
+        assert all(time.utcoffset() == timedelta(0) for time in times)
+    finally:
+        await engine.stop()
+
+
+async def test_api_filters_and_rejects_invalid_queries(database):
+    repository = ResourceMeasurementRepository(database.sessions)
+    for seconds in (0, 30, 60):
+        await repository.record(
+            cpu_percent=seconds,
+            available_ram_bytes=1,
+            free_disk_bytes=2,
+            observed_at=NOW + timedelta(seconds=seconds),
+        )
+    transport = httpx.ASGITransport(app=create_app(database.sessions))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/resources",
+            params={
+                "since": NOW.isoformat(),
+                "until": (NOW + timedelta(seconds=60)).isoformat(),
+                "limit": 1,
+            },
+        )
+        assert response.status_code == 200 and response.json()[0]["cpu_percent"] == 30
+        response = await client.get("/resources", params={"limit": 1, "offset": 1})
+        assert response.json()[0]["cpu_percent"] == 30
+        for params in (
+            {"limit": 1001},
+            {"limit": 0},
+            {"offset": -1},
+            {"task_id": "invalid"},
+            {"since": NOW.isoformat(), "until": NOW.isoformat()},
+            {"since": "2030-01-01T00:00:00"},
+        ):
+            assert (await client.get("/resources", params=params)).status_code == 422
+
+
+async def test_empty_resources_returns_empty_array(database):
+    transport = httpx.ASGITransport(app=create_app(database.sessions))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/resources")
+    assert response.status_code == 200 and response.json() == []
