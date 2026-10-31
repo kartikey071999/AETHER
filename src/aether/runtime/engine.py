@@ -44,8 +44,12 @@ from aether.runtime.scheduler import (
 from aether.runtime.security import WARDEN_ONLY_SERVICES, SecurityServices
 from aether.runtime.shutdown import ShutdownSignalHandler
 from aether.runtime.worker import WorkerPool
-from aether.storage.models import TaskRecord, TaskStatus
+from aether.skills.registry import AgentSkills
+from aether.storage.models import TaskRecord, TaskStatus, WorkflowStatus
 from aether.storage.repositories import ExecutionRunRepository, ResourceMeasurementRepository
+from aether.workflows.builtin import builtin_workflows
+from aether.workflows.engine import WorkflowEngine
+from aether.workflows.facade import AgentWorkflows
 
 _MIB = 1024 * 1024
 _MAX_ERROR_CHARS = 2000
@@ -135,6 +139,7 @@ class Engine:
         permission_service: PermissionService | None = None,
         security: SecurityServices | None = None,
         models: ModelServices | None = None,
+        workflows: WorkflowEngine | None = None,
         agent_services: Mapping[AgentId, Mapping[str, Any]] | None = None,
         task_control: TaskControl | None = None,
     ) -> None:
@@ -186,6 +191,17 @@ class Engine:
             )
             for agent_id in self._agents
         }
+        # Skills and workflows: code does the multi-step work; agents choose and parameterise it.
+        self._workflows = workflows
+        if workflows is not None:
+            self._contexts = {
+                agent_id: replace(
+                    context,
+                    skills=AgentSkills(agent_id, workflows.skills, workflows.recorder),
+                    workflows=AgentWorkflows(agent_id, workflows),
+                )
+                for agent_id, context in self._contexts.items()
+            }
         self._task_control = task_control or TaskControl(database_sessions, clock=clock)
         self._resources = ResourceMeasurementRepository(
             database_sessions, event_interval_seconds=self._limits.resource_event_seconds
@@ -337,6 +353,15 @@ class Engine:
                 await self._emit(
                     "runtime.models_initialized", await self._models.initialized_payload()
                 )
+            if self._workflows is not None:
+                # Built-in workflows ship verified; re-registering identical content is a no-op.
+                for definition in builtin_workflows():
+                    await self._workflows.register(
+                        definition,
+                        status=WorkflowStatus.VERIFIED,
+                        built_in=True,
+                        created_by=RUNTIME_ACTOR,
+                    )
             for agent in self._agents.values():
                 self._spawn(self._agent_loop(agent), f"agent-loop-{agent.agent_id.value}")
             for agent_id in self._tick_hooks:

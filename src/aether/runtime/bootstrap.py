@@ -22,8 +22,10 @@ from aether.runtime.resource_monitor import ResourceMonitor
 from aether.runtime.scheduler import Scheduler, SchedulerPolicy
 from aether.runtime.security import SecurityServices, build_security_services
 from aether.security.policy import SecuritySettings
+from aether.skills import SkillRegistry, builtin_skills
 from aether.storage.database import Database
 from aether.storage.repositories.provider_usage import ProviderUsageRepository
+from aether.workflows.engine import WorkflowEngine
 
 _LOGGER = logging.getLogger("aether.error.runtime")
 
@@ -76,6 +78,7 @@ class Runtime:
     engine: Engine
     security: SecurityServices
     models: ModelServices | None = None
+    workflows: WorkflowEngine | None = None
     spool_replay: ReplayResult | None = None
     retention: RetentionResult | None = None
     started: bool = field(default=False)
@@ -193,6 +196,7 @@ def build_runtime(
                 forge_llm_refine_templates=settings.forge_llm_refine_templates,
             )
         )
+    workflows = WorkflowEngine(database.sessions, SkillRegistry(builtin_skills()), recorder)
     engine = Engine(
         database.sessions,
         agents,
@@ -201,6 +205,7 @@ def build_runtime(
         limits,
         security=security,
         models=models,
+        workflows=workflows,
         agent_services=agent_services(
             settings, scheduler_policy, monitor, [a.agent_id for a in agents]
         ),
@@ -212,4 +217,5 @@ def build_runtime(
         engine=engine,
         security=security,
         models=models,
+        workflows=workflows,
     )

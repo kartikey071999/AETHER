@@ -21,7 +21,9 @@ from aether.storage.models import TaskRecord
 if TYPE_CHECKING:
     from aether.agents.work_queue import AgentWorkQueue
     from aether.models.facade import AgentModels
+    from aether.skills.registry import AgentSkills
     from aether.tools.facade import AgentTools
+    from aether.workflows.facade import AgentWorkflows
 
 
 class PermissionService(Protocol):
@@ -44,6 +46,9 @@ class AgentContext:
     models: "AgentModels | None" = None
     # The agent's own deterministic task list (aether.agents.work_queue); bound to its identity.
     work: "AgentWorkQueue | None" = None
+    # The agent's own skills and workflows (aether.skills / aether.workflows), bound to it.
+    skills: "AgentSkills | None" = None
+    workflows: "AgentWorkflows | None" = None
     services: dict[str, Any] = field(default_factory=dict)
 
 

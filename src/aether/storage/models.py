@@ -863,3 +863,88 @@ class ProviderUsageRecord(Base):
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )
+
+
+class WorkflowStatus(StrEnum):
+    PROPOSED = "proposed"
+    APPROVED = "approved"
+    VERIFIED = "verified"
+    REJECTED = "rejected"
+    DISABLED = "disabled"
+
+
+class WorkflowDefinitionRecord(Base):
+    """A versioned, declarative workflow (a DAG of skill steps); built-in or agent-authored."""
+
+    __tablename__ = "workflow_definitions"
+    __table_args__ = (
+        UniqueConstraint("name", "version", name="uq_workflow_definitions_name_version"),
+        Index("ix_workflow_definitions_owner_status", "owner_agent", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    owner_agent: Mapped[str] = mapped_column(String(24), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default=WorkflowStatus.PROPOSED)
+    built_in: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    definition: Mapped[dict[str, Any]] = mapped_column(JSON_DOCUMENT, nullable=False)
+    definition_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(24), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+
+
+class WorkflowRunRecord(Base):
+    """One execution of a workflow; step state lives in ``workflow_step_runs``."""
+
+    __tablename__ = "workflow_runs"
+    __table_args__ = (
+        Index("ix_workflow_runs_status", "status"),
+        Index("ix_workflow_runs_task_id", "task_id"),
+        UniqueConstraint("idempotency_key", name="uq_workflow_runs_idempotency_key"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    workflow_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    workflow_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    agent: Mapped[str] = mapped_column(String(24), nullable=False)
+    objective_id: Mapped[UUID | None] = mapped_column(Uuid)
+    task_id: Mapped[UUID | None] = mapped_column(Uuid)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default=RunStatus.PENDING)
+    inputs: Mapped[dict[str, Any]] = mapped_column(JSON_DOCUMENT, nullable=False, default=dict)
+    outputs: Mapped[dict[str, Any] | None] = mapped_column(JSON_DOCUMENT)
+    error: Mapped[str | None] = mapped_column(Text)
+    dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(200))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WorkflowStepRunRecord(Base):
+    """Persisted state of one step, so an interrupted run resumes after its last finished step."""
+
+    __tablename__ = "workflow_step_runs"
+    __table_args__ = (
+        UniqueConstraint("run_id", "step_id", name="uq_workflow_step_runs_run_step"),
+        CheckConstraint("attempts >= 0", name="ck_workflow_step_runs_attempts"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    step_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    skill: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default=RunStatus.PENDING)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output: Mapped[dict[str, Any] | None] = mapped_column(JSON_DOCUMENT)
+    error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

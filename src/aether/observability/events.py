@@ -40,6 +40,7 @@ class EventCategory(StrEnum):
     PERSONALIZATION = "personalization"
     KNOWLEDGE = "knowledge"
     PROVIDER = "provider"
+    WORKFLOW = "workflow"
 
 
 class EventPayload(BaseModel):
@@ -845,3 +846,65 @@ class TaskAccessDeniedPayload(EventPayload):
 
 EVENT_TYPES["task.access_denied"] = TaskAccessDeniedPayload
 EVENT_CATEGORIES["task.access_denied"] = EventCategory.TASK
+
+
+# --- skills and workflows (T-067) ---
+
+
+class SkillCompletedPayload(EventPayload):
+    """An agent ran one skill directly (outside a workflow); content is never stored here."""
+
+    skill: str = Field(min_length=1, max_length=120)
+    agent: str = Field(min_length=1, max_length=24)
+    status: Literal["succeeded", "failed"]
+    duration_ms: float = Field(ge=0)
+    error: str | None = Field(default=None, max_length=500)
+
+
+class WorkflowDefinitionRegisteredPayload(EventPayload):
+    name: str = Field(min_length=1, max_length=120)
+    version: int = Field(ge=1)
+    owner_agent: str = Field(min_length=1, max_length=24)
+    status: str = Field(min_length=1, max_length=24)
+    built_in: bool
+    steps: int = Field(ge=1)
+    definition_hash: str = Field(min_length=64, max_length=64)
+
+
+class WorkflowRunStartedPayload(EventPayload):
+    workflow: str = Field(min_length=1, max_length=120)
+    version: int = Field(ge=1)
+    agent: str = Field(min_length=1, max_length=24)
+    steps: int = Field(ge=1)
+    dry_run: bool = False
+    resumed: bool = False
+
+
+class WorkflowStepFinishedPayload(EventPayload):
+    workflow: str = Field(min_length=1, max_length=120)
+    step: str = Field(min_length=1, max_length=64)
+    skill: str = Field(min_length=1, max_length=120)
+    status: Literal["succeeded", "failed", "skipped"]
+    attempts: int = Field(ge=0)
+    duration_ms: float = Field(ge=0)
+    error: str | None = Field(default=None, max_length=500)
+
+
+class WorkflowRunFinishedPayload(EventPayload):
+    workflow: str = Field(min_length=1, max_length=120)
+    version: int = Field(ge=1)
+    status: Literal["succeeded", "failed", "cancelled"]
+    steps_succeeded: int = Field(ge=0)
+    steps_skipped: int = Field(ge=0)
+    error: str | None = Field(default=None, max_length=500)
+
+
+for _type, _model in (
+    ("skill.completed", SkillCompletedPayload),
+    ("workflow.definition_registered", WorkflowDefinitionRegisteredPayload),
+    ("workflow.run_started", WorkflowRunStartedPayload),
+    ("workflow.step_finished", WorkflowStepFinishedPayload),
+    ("workflow.run_finished", WorkflowRunFinishedPayload),
+):
+    EVENT_TYPES[_type] = _model
+    EVENT_CATEGORIES[_type] = EventCategory.WORKFLOW

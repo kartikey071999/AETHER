@@ -33,6 +33,7 @@ _ROUTES = {
     EventCategory.PERSONALIZATION: "agent",
     EventCategory.KNOWLEDGE: "agent",
     EventCategory.PROVIDER: "resource",
+    EventCategory.WORKFLOW: "agent",
 }
 _STANDARD_FIELDS = frozenset(logging.makeLogRecord({}).__dict__) | {
     "message",

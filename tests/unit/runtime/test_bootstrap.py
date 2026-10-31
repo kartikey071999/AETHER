@@ -197,7 +197,8 @@ def test_cli_events_tail_prints_recent_events_in_order(
     assert "resource.measured" in lines[0]
     assert "runtime.security_initialized" in lines[1]
     assert "runtime.models_initialized" in lines[2]
-    assert "runtime.started" in lines[3]
+    assert "workflow.definition_registered" in lines[3]
+    assert "runtime.started" in lines[4]
     assert "runtime.stopped" in lines[-1]
 
 
