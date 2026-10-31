@@ -332,6 +332,14 @@ PAYLOAD_EXAMPLES = {
         "steps": 3,
         "definition_hash": "0" * 64,
     },
+    "workflow.definition_status_changed": {
+        "name": "scout.compare",
+        "version": 1,
+        "from_status": "proposed",
+        "to_status": "approved",
+        "actor": "WARDEN",
+        "rationale": "only allowlisted reads",
+    },
     "workflow.run_started": {
         "workflow": "research.basic",
         "version": 1,
