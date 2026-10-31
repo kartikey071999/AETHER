@@ -306,6 +306,7 @@ async def test_user_authorization_silence_never_authorizes(
     assert request is not None
     assert request.status == AuthorizationStatus.PENDING
     assert request.security_decision_id == decision.decision_id
+    assert request.input_hash == operation.input_hash
     assert operation.input_hash[:16] in request.question
     assert len(await events_of("security.user_authorization_requested")) == 1
 

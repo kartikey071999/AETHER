@@ -23,6 +23,36 @@ def test_migration_history_has_a_single_head():
     assert revision.down_revision == "0001_runtime_foundation"
 
 
+def test_session_and_input_hash_migration_round_trips(tmp_path, monkeypatch):
+    database_path = tmp_path / "session_columns.db"
+    config = _alembic_config(monkeypatch, database_path)
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        command.upgrade(config, "head")
+        inspector = inspect(engine)
+        event_columns = {column["name"] for column in inspector.get_columns("events")}
+        assert {"session_id", "branch"} <= event_columns
+        assert "ix_events_session_id" in {i["name"] for i in inspector.get_indexes("events")}
+        auth_indexes = {i["name"] for i in inspector.get_indexes("authorization_requests")}
+        assert "ix_authorization_requests_input_hash" in auth_indexes
+
+        command.downgrade(config, "0002_storage_schema_expansion")
+        inspector = inspect(engine)
+        event_columns = {column["name"] for column in inspector.get_columns("events")}
+        assert not {"session_id", "branch"} & event_columns
+        auth_columns = {c["name"] for c in inspector.get_columns("authorization_requests")}
+        assert "input_hash" not in auth_columns
+        assert "ix_events_session_id" not in {i["name"] for i in inspector.get_indexes("events")}
+
+        command.upgrade(config, "head")
+        inspector = inspect(engine)
+        assert "session_id" in {c["name"] for c in inspector.get_columns("events")}
+        auth_columns = {c["name"] for c in inspector.get_columns("authorization_requests")}
+        assert "input_hash" in auth_columns
+    finally:
+        engine.dispose()
+
+
 def test_migrations_upgrade_to_models_and_downgrade_cleanly(tmp_path, monkeypatch):
     database_path = tmp_path / "migrations.db"
     config = _alembic_config(monkeypatch, database_path)
