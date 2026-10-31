@@ -38,6 +38,15 @@ class MessageType(StrEnum):
     CAPABILITY_REGISTER = "capability.register"
     PROGRESS_UPDATE = "progress.update"
     HEALTH_EVENT = "health.event"
+    RESEARCH_REQUEST = "research.request"
+    RESEARCH_CONSOLIDATED = "research.consolidated"
+    REQUIREMENT_EVALUATED = "requirement.evaluated"
+    TASK_RESULT = "task.result"
+    VERIFICATION_REQUEST = "verification.request"
+    COMMUNICATION_REQUEST = "communication.request"
+    COMMUNICATION_DELIVERED = "communication.delivered"
+    USER_RESPONSE = "user.response"
+    OBJECTIVE_COMPLETED = "objective.completed"
 
 
 class MessageStatus(StrEnum):
