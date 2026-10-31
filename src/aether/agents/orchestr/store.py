@@ -43,6 +43,7 @@ ACTIVE_TASK_STATES = frozenset(
         TaskStatus.SCHEDULED,
         TaskStatus.RUNNING,
         TaskStatus.WAITING_FOR_APPROVAL,
+        TaskStatus.WAITING_FOR_VERIFICATION,
         TaskStatus.BLOCKED,
         TaskStatus.PAUSED,
         TaskStatus.RETRYING,

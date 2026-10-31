@@ -167,6 +167,7 @@ class TaskOutcome(StrEnum):
     FAILED = "failed"
     BLOCKED = "blocked"
     WAITING_FOR_APPROVAL = "waiting_for_approval"
+    WAITING_FOR_VERIFICATION = "waiting_for_verification"
 
 
 class VerificationVerdict(StrEnum):

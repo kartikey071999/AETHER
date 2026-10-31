@@ -49,6 +49,8 @@ class TaskResultStatus(StrEnum):
     FAILED = "failed"
     BLOCKED = "blocked"
     WAITING_FOR_APPROVAL = "waiting_for_approval"
+    # The task waits for an independent verification run (LEDGER), not for a person or WARDEN.
+    WAITING_FOR_VERIFICATION = "waiting_for_verification"
 
 
 class TaskResult(BaseModel):

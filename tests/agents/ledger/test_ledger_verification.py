@@ -200,7 +200,7 @@ async def test_criterion_without_a_test_is_never_verified(
 
     run = await run_verification(agent, ctx, publish, approve_pending, work)
 
-    assert run.status == RunStatus.CANCELLED  # inconclusive
+    assert run.status == RunStatus.INCONCLUSIVE
     assert run.verdict == TestVerdict.INCONCLUSIVE
     capability = await load(database, CapabilityRecord, work.capability_id)
     assert capability.lifecycle_status == CapabilityStatus.INSTALLED
@@ -232,7 +232,7 @@ async def test_installed_capability_claimed_by_forge_is_not_verified(
 
     assert await sent(MessageType.SECURITY_EVALUATE) == []
     run = await TestRunStore(ctx.sessions).get(message.message_id)
-    assert run.status == RunStatus.CANCELLED
+    assert run.status == RunStatus.INCONCLUSIVE
     capability = await load(database, CapabilityRecord, work.capability_id)
     assert capability.lifecycle_status == CapabilityStatus.INSTALLED
     assert capability.verification_status == "unverified"
@@ -401,7 +401,7 @@ async def test_rejected_review_is_inconclusive(
         await agent.handle_message(decision, ctx)
 
     run = await TestRunStore(ctx.sessions).get(message.message_id)
-    assert run.status == RunStatus.CANCELLED
+    assert run.status == RunStatus.INCONCLUSIVE
     capability = await load(database, CapabilityRecord, work.capability_id)
     assert capability.lifecycle_status == CapabilityStatus.INSTALLED
     (report,) = await sent(MessageType.TEST_REPORT)
@@ -422,7 +422,7 @@ async def test_unsafe_suite_is_never_executed(agent, ctx, publish, make_work, da
 
     assert await sent(MessageType.SECURITY_EVALUATE) == []
     run = await TestRunStore(ctx.sessions).get(message.message_id)
-    assert run.status == RunStatus.CANCELLED
+    assert run.status == RunStatus.INCONCLUSIVE
     (report,) = await sent(MessageType.TEST_REPORT)
     assert "unsafe acceptance suite" in report_of(report).summary
 

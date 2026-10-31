@@ -30,7 +30,12 @@ from aether.storage.repositories import InvalidAuthorizationResponse, InvalidTas
 
 # States ORCHESTR may move to BLOCKED itself. Running work is left to the worker pool, which
 # records BLOCKED when the agent returns; moving it here would race that transition.
-_BLOCKABLE_NOW = (TaskStatus.PENDING, TaskStatus.READY, TaskStatus.WAITING_FOR_APPROVAL)
+_BLOCKABLE_NOW = (
+    TaskStatus.PENDING,
+    TaskStatus.READY,
+    TaskStatus.WAITING_FOR_APPROVAL,
+    TaskStatus.WAITING_FOR_VERIFICATION,
+)
 _CANCELLABLE = (
     TaskStatus.PENDING,
     TaskStatus.READY,
@@ -38,6 +43,7 @@ _CANCELLABLE = (
     TaskStatus.BLOCKED,
     TaskStatus.PAUSED,
     TaskStatus.WAITING_FOR_APPROVAL,
+    TaskStatus.WAITING_FOR_VERIFICATION,
     TaskStatus.RETRYING,
     TaskStatus.FAILED,
 )
