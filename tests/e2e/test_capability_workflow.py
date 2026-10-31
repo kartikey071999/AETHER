@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from reliability_support import QuietMonitor
 
 from aether.communication.messages import AgentId, MessageType
 from aether.runtime.scenario import (
@@ -27,6 +28,11 @@ from aether.runtime.scenario import (
     verification_failed,
 )
 from aether.storage.models import TaskRecord
+
+# Host CPU load must not defer or pause the workflow (the scheduler reads the resource monitor).
+QUIET = QuietMonitor()
+
+pytestmark = pytest.mark.slow
 
 # Each path takes ~10-20s locally; the bound keeps a hung run from stalling the suite.
 PATH_TIMEOUT = 50.0
@@ -65,7 +71,7 @@ def _aware(value: datetime) -> datetime:
 async def test_happy_path_verifies_the_capability_and_reports_it(tmp_path: Path) -> None:
     settings = scenario_settings(tmp_path)
     async with CapabilityScenario(
-        settings, model_providers=[ScriptedCapabilityProvider()]
+        settings, model_providers=[ScriptedCapabilityProvider()], resource_monitor=QUIET
     ) as scenario:
         trace = await _run(scenario, capability_finished, tag="happy")
     report = _report(trace)
@@ -198,6 +204,7 @@ async def test_buggy_module_fails_verification_and_is_never_verified(tmp_path: P
         scenario_settings(tmp_path),
         model_providers=[ScriptedCapabilityProvider(buggy=True)],
         max_replans=0,
+        resource_monitor=QUIET,
     )
     async with scenario:
         trace = await _run(scenario, verification_failed, tag="buggy")
@@ -222,7 +229,9 @@ async def test_buggy_module_fails_verification_and_is_never_verified(tmp_path: P
 
 async def test_restart_mid_workflow_resumes_without_duplicates(tmp_path: Path) -> None:
     settings = scenario_settings(tmp_path)
-    first = CapabilityScenario(settings, model_providers=[ScriptedCapabilityProvider()])
+    first = CapabilityScenario(
+        settings, model_providers=[ScriptedCapabilityProvider()], resource_monitor=QUIET
+    )
     async with first:
         objective_id = await first.submit_objective(tag="restart")
         try:
@@ -235,7 +244,10 @@ async def test_restart_mid_workflow_resumes_without_duplicates(tmp_path: Path) -
     assert not before.test_runs, "the restart should interrupt the workflow before verification"
 
     second = CapabilityScenario(
-        settings, model_providers=[ScriptedCapabilityProvider()], create_schema=False
+        settings,
+        model_providers=[ScriptedCapabilityProvider()],
+        create_schema=False,
+        resource_monitor=QUIET,
     )
     async with second:
         try:
@@ -261,7 +273,9 @@ async def test_resubmitting_the_same_tag_tracks_the_new_objective(tmp_path: Path
     # Regression: the demo reused one tag, so the trace followed an older completed objective
     # and reported success for a run that never executed.
     async with CapabilityScenario(
-        scenario_settings(tmp_path), model_providers=[ScriptedCapabilityProvider()]
+        scenario_settings(tmp_path),
+        model_providers=[ScriptedCapabilityProvider()],
+        resource_monitor=QUIET,
     ) as scenario:
         first = await scenario.submit_objective(tag="same")
         second = await scenario.submit_objective(tag="same")

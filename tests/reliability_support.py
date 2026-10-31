@@ -126,7 +126,9 @@ def build_engine(
 # -- polling and record helpers --------------------------------------------------------------
 
 
-async def wait_until(predicate: Callable[[], Awaitable[bool]], timeout: float = 5.0) -> None:
+async def wait_until(predicate: Callable[[], Awaitable[bool]], timeout: float = 30.0) -> None:
+    # Generous by design: passing tests return as soon as the predicate holds, while a loaded
+    # machine (parallel suites, CPU-heavy neighbours) must not turn a slow step into a failure.
     deadline = asyncio.get_running_loop().time() + timeout
     while not await predicate():
         if asyncio.get_running_loop().time() > deadline:

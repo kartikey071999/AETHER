@@ -201,6 +201,7 @@ def test_cli_events_tail_prints_recent_events_in_order(
     assert "runtime.stopped" in lines[-1]
 
 
+@pytest.mark.slow  # connecting to a closed port takes seconds on Windows
 def test_cli_run_never_prints_credentials(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -245,3 +246,36 @@ async def test_build_runtime_accepts_explicit_engine_limits(tmp_path: Path) -> N
         assert default.engine._limits.message_poll_seconds != 0.05
     finally:
         await default.close()
+
+
+async def test_build_runtime_wires_an_injected_resource_monitor(tmp_path: Path) -> None:
+    # Regression: scenarios always read the real host CPU, so a loaded machine deferred the
+    # capability workflow's tasks (and paused running ones) until the end-to-end tests timed out.
+    from reliability_support import QuietMonitor
+
+    from aether.communication.messages import AgentId
+    from aether.runtime.resource_monitor import ResourceMonitor
+    from aether.runtime.scenario import CapabilityScenario, scenario_settings
+
+    monitor = QuietMonitor()
+    runtime = build_runtime(_settings(tmp_path), resource_monitor=monitor)
+    try:
+        assert runtime.engine._monitor is monitor
+        services = runtime.engine._contexts[AgentId.ORCHESTR].services
+        assert services["resource_monitor"] is monitor
+    finally:
+        await runtime.close()
+
+    default = build_runtime(_settings(tmp_path))
+    try:
+        assert isinstance(default.engine._monitor, ResourceMonitor)
+    finally:
+        await default.close()
+
+    scenario_monitor = QuietMonitor()
+    scenario = CapabilityScenario(
+        scenario_settings(tmp_path / "scenario"), resource_monitor=scenario_monitor
+    )
+    async with scenario:
+        assert scenario.runtime is not None
+        assert scenario.runtime.engine._monitor is scenario_monitor

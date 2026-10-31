@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from reliability_support import QuietMonitor
 from sqlite_schema import copy_migrated
 
 from aether import main as cli
@@ -20,11 +21,14 @@ def _configure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, url: str) -> Non
     monkeypatch.setenv("AETHER_ARTIFACT_DIR", str(tmp_path / "artifacts"))
 
 
+@pytest.mark.slow
 def test_demo_capability_prints_the_persisted_trace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _configure(monkeypatch, tmp_path, f"sqlite+aiosqlite:///{(tmp_path / 'demo.db').as_posix()}")
     copy_migrated(tmp_path / "demo.db")
+    # The demo reads the real host; pin it so a loaded machine cannot defer the workflow.
+    monkeypatch.setattr("aether.runtime.bootstrap.ResourceMonitor", QuietMonitor)
 
     cli.main(["demo", "capability", "--timeout", "60"])
 
@@ -38,6 +42,7 @@ def test_demo_capability_prints_the_persisted_trace(
     assert Path(outbox[0].removeprefix("Outbox: ")).is_file()
 
 
+@pytest.mark.slow  # connecting to a closed port takes seconds on Windows
 def test_demo_capability_failure_never_prints_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
