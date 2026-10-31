@@ -96,6 +96,8 @@ class AetherSettings(BaseSettings):
     task_interrupt_grace_seconds: float = Field(default=10.0, ge=0)
     orchestr: OrchestrLimits = Field(default_factory=OrchestrLimits)
     research: ResearchLimits = Field(default_factory=ResearchLimits)
+    # FORGE asks the LLM first even for known capability templates (the template is the fallback).
+    forge_llm_refine_templates: bool = False
 
     @field_validator("agent_tick_overrides")
     @classmethod
