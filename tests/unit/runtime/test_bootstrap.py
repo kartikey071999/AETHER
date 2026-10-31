@@ -224,3 +224,20 @@ def test_cli_run_rejects_invalid_duration(argument: str) -> None:
     with pytest.raises(SystemExit) as exit_info:
         cli.main(["run", "--duration", argument])
     assert exit_info.value.code == 2
+
+
+async def test_build_runtime_accepts_explicit_engine_limits(tmp_path: Path) -> None:
+    from aether.runtime.engine import EngineLimits
+
+    limits = EngineLimits(message_poll_seconds=0.05, scheduler_interval_seconds=0.1)
+    runtime = build_runtime(_settings(tmp_path), engine_limits=limits)
+    try:
+        assert runtime.engine._limits is limits
+    finally:
+        await runtime.close()
+
+    default = build_runtime(_settings(tmp_path))
+    try:
+        assert default.engine._limits.message_poll_seconds != 0.05
+    finally:
+        await default.close()
