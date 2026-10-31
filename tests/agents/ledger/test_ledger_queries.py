@@ -46,7 +46,7 @@ async def test_submitted_requirement_is_recorded_once(agent, ctx, publish, datab
 
     await agent.handle_message(message, ctx)
     await agent.handle_message(message, ctx)
-    duplicate = await publish(AgentId.ROGUE, payload, objective_id=objective_id)
+    duplicate = await publish(AgentId.ORCHESTR, payload, objective_id=objective_id)
     await agent.handle_message(duplicate, ctx)
 
     (requirement,) = await requirement_rows(database)
