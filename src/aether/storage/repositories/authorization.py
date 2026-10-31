@@ -1,6 +1,6 @@
 """User authorization requests. Silence is never treated as authorization."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -34,7 +34,12 @@ class AuthorizationRequestRepository:
         expires_at: datetime | None = None,
         correlation_id: UUID | None = None,
         input_hash: str | None = None,
+        now: datetime | None = None,
     ) -> UUID:
+        current_time = now or utcnow()
+        if current_time.utcoffset() is None:
+            raise ValueError("Authorization timestamps must include a timezone")
+        current_time = current_time.astimezone(UTC)
         async with self._sessions() as session, session.begin():
             request = AuthorizationRequestRecord(
                 question=question,
@@ -44,6 +49,7 @@ class AuthorizationRequestRepository:
                 security_decision_id=security_decision_id,
                 status=AuthorizationStatus.PENDING,
                 expires_at=expires_at,
+                requested_at=current_time,
             )
             session.add(request)
             await session.flush()

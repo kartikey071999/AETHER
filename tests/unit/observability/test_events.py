@@ -75,6 +75,17 @@ def test_timestamp_rejects_naive_and_normalizes_offsets(event: AetherEvent) -> N
 PAYLOAD_EXAMPLES = {
     "objective.created": {"title": "Observe"},
     "objective.updated": {"changes": {"priority": 80}, "rationale": "Important"},
+    "objective.base_priority_changed": {
+        "from_priority": 50,
+        "to_priority": 80,
+        "reason": "new baseline",
+    },
+    "task.priority_changed": {"from_priority": 50, "to_priority": 80, "reason": "urgent"},
+    "task.estimates_changed": {"duration_s": 10, "ram_mb": 256, "disk_mb": 512, "cpu_percent": 20},
+    "test.run_created": {"suite": "unit"},
+    "test.results_added": {
+        "results": [{"result_id": str(uuid4()), "name": "offline", "outcome": "passed"}]
+    },
     "task.created": {"title": "Record"},
     "task.transitioned": {"from_status": "pending", "to_status": "ready", "reason": "Ready"},
     "task.assigned": {"assigned_agent": "LEDGER", "reason": "Record keeping"},

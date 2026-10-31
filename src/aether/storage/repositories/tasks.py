@@ -134,11 +134,7 @@ class TaskRepository:
     ) -> None:
         new_status = TaskStatus(new_status)
         async with self._sessions() as session, session.begin():
-            task = await session.scalar(
-                select(TaskRecord).where(TaskRecord.id == task_id).with_for_update()
-            )
-            if task is None:
-                raise LookupError(f"Task {task_id} does not exist")
+            task = await _lock_task(session, task_id)
             old_status = TaskStatus(task.state)
             if new_status not in ALLOWED_TASK_TRANSITIONS[old_status]:
                 raise InvalidTaskTransition(
@@ -175,3 +171,83 @@ class TaskRepository:
                 objective_id=task.objective_id,
                 task_id=task.id,
             )
+
+    async def set_priority(
+        self,
+        task_id: UUID,
+        value: int,
+        *,
+        actor: str,
+        reason: str,
+        correlation_id: UUID | None = None,
+    ) -> None:
+        if not 0 <= value <= 100:
+            raise ValueError("Task priority must be between 0 and 100")
+        async with self._sessions() as session, session.begin():
+            task = await _lock_task(session, task_id)
+            previous = task.priority
+            task.priority = value
+            task.updated_at = utcnow()
+            add_event(
+                session,
+                event_type="task.priority_changed",
+                aggregate_type="task",
+                aggregate_id=task.id,
+                actor=actor,
+                payload={"from_priority": previous, "to_priority": value, "reason": reason},
+                category=EventCategory.TASK,
+                correlation_id=correlation_id,
+                objective_id=task.objective_id,
+                task_id=task.id,
+            )
+
+    async def set_estimates(
+        self,
+        task_id: UUID,
+        *,
+        duration_s: int | None,
+        ram_mb: int,
+        disk_mb: int,
+        cpu_percent: float | None,
+        actor: str,
+        correlation_id: UUID | None = None,
+    ) -> None:
+        if duration_s is not None and duration_s < 0:
+            raise ValueError("Task duration must be nonnegative")
+        if ram_mb < 0 or disk_mb < 0:
+            raise ValueError("Task RAM and disk estimates must be nonnegative")
+        if cpu_percent is not None and not 0 <= cpu_percent <= 100:
+            raise ValueError("Task CPU estimate must be between 0 and 100")
+        async with self._sessions() as session, session.begin():
+            task = await _lock_task(session, task_id)
+            task.estimated_duration_seconds = duration_s
+            task.estimated_ram_mb = ram_mb
+            task.estimated_disk_mb = disk_mb
+            task.estimated_cpu_percent = cpu_percent
+            task.updated_at = utcnow()
+            add_event(
+                session,
+                event_type="task.estimates_changed",
+                aggregate_type="task",
+                aggregate_id=task.id,
+                actor=actor,
+                payload={
+                    "duration_s": duration_s,
+                    "ram_mb": ram_mb,
+                    "disk_mb": disk_mb,
+                    "cpu_percent": cpu_percent,
+                },
+                category=EventCategory.TASK,
+                correlation_id=correlation_id,
+                objective_id=task.objective_id,
+                task_id=task.id,
+            )
+
+
+async def _lock_task(session: AsyncSession, task_id: UUID) -> TaskRecord:
+    task = await session.scalar(
+        select(TaskRecord).where(TaskRecord.id == task_id).with_for_update()
+    )
+    if task is None:
+        raise LookupError(f"Task {task_id} does not exist")
+    return task

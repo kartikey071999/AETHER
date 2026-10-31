@@ -25,7 +25,12 @@ from aether.storage.repositories.knowledge_graph import KnowledgeGraphRepository
 from aether.storage.repositories.objectives import ObjectiveRepository, get_objective
 from aether.storage.repositories.personalization import PersonRepository
 from aether.storage.repositories.provider_usage import ProviderUsageRepository
-from aether.storage.repositories.requirements import RequirementRepository
+from aether.storage.repositories.requirements import (
+    ALLOWED_REQUIREMENT_TRANSITIONS,
+    InvalidRequirementTransition,
+    RequirementConflictError,
+    RequirementRepository,
+)
 from aether.storage.repositories.research import (
     EvidenceInput,
     InvalidFindingTransition,
@@ -41,8 +46,14 @@ from aether.storage.repositories.tasks import (
     InvalidTaskTransition,
     TaskRepository,
 )
+from aether.storage.repositories.test_runs import (
+    InvalidTestRunTransition,
+    TestResultInput,
+    TestRunRepository,
+)
 
 __all__ = [
+    "ALLOWED_REQUIREMENT_TRANSITIONS",
     "ALLOWED_TASK_TRANSITIONS",
     "AgentHeartbeatRepository",
     "AgentRepository",
@@ -55,17 +66,22 @@ __all__ = [
     "InvalidAuthorizationResponse",
     "InvalidCapabilityTransition",
     "InvalidFindingTransition",
+    "InvalidRequirementTransition",
     "InvalidTaskTransition",
+    "InvalidTestRunTransition",
     "KnowledgeGraphRepository",
     "ObjectiveRepository",
     "OperationAuthorizationRequests",
     "PersonRepository",
     "ProviderUsageRepository",
+    "RequirementConflictError",
     "RequirementRepository",
     "ResearchFindingRepository",
     "SecurityDecisionRepository",
     "TaskDependencyRepository",
     "TaskRepository",
+    "TestResultInput",
+    "TestRunRepository",
     "add_event",
     "agent_aggregate_id",
     "allowed_capability_transitions",

@@ -61,6 +61,36 @@ receive and send each type. `aether.agents.factory.build_agents` builds the seve
 agents, importing `aether.agents.<lowercase id>` and its `AGENT_CLASS` when the
 package exists and falling back to an inert placeholder otherwise.
 
+`resource.response` is ORCHESTR's reply to a resource request: `request_message_id`,
+`requested_by`, `decision` (`granted`, `deferred`, `denied`), `reason`, and optional
+`retry_after` in seconds (deferred replies only). The recipient must be the requester.
+`objective.rejected` similarly identifies the original request and `generating_agent`,
+with a `reason` of `rate_limit`, `active_limit`, `missing_cost`, or `invalid`, plus
+an explanatory `detail`. Security blockers may go directly to WARDEN or escalate
+through ORCHESTR. `promotion.request` carries FORGE's task, `workspace_path`,
+`artifacts`, and `verification_evidence` to ORCHESTR or LEDGER for review;
+it never authorizes deployment or executes the workspace.
+
+Objective repositories support replacing editable details (including clearing dates)
+and changing the base priority without overwriting the scheduled priority. Task
+repositories support audited priority and resource-estimate updates. Requirements
+accept caller-chosen UUIDs: identical creation content returns the existing ID without
+another event, while conflicting content raises `RequirementConflictError`.
+The lifecycle adds `proposed -> evaluating -> approved|rejected|needs_evidence`,
+`needs_evidence -> evaluating`, and `approved -> implemented -> verified|failed`.
+Existing direct approval and `in_progress`/`satisfied` paths remain supported.
+Rejected requirements can only be explicitly reopened by SCOUT with a nonblank reason.
+
+`TestRunRepository` creates running suites, adds individual or batched
+`TestResultInput` results, and finishes with a `TestVerdict`. Each write emits one
+typed event in the same transaction. Verified verdicts require passing acceptance
+criteria and no failing/error results. Inconclusive verdicts use a failed run status
+to avoid presenting unverified work as successful; the verdict retains the distinction.
+Runs can be queried by capability, task, or execution run, and finished runs are
+immutable through the repository. Migration `0004_test_run_verdict` adds the nullable
+verdict column, leaving historical verdicts unknown. Authorization request creation
+accepts a timezone-aware `now` to set `requested_at` deterministically.
+
 Central permission enforcement lives in `aether.security`: an immutable,
 default-deny `SecurityPolicy` (configured once at startup through
 `AETHER_SECURITY_*` settings such as JSON lists `AETHER_SECURITY_ALLOWED_EXECUTABLES`

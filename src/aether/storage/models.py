@@ -62,7 +62,12 @@ class TaskStatus(StrEnum):
 
 class RequirementStatus(StrEnum):
     PROPOSED = "proposed"
+    EVALUATING = "evaluating"
+    NEEDS_EVIDENCE = "needs_evidence"
     APPROVED = "approved"
+    IMPLEMENTED = "implemented"
+    VERIFIED = "verified"
+    FAILED = "failed"
     IN_PROGRESS = "in_progress"
     SATISFIED = "satisfied"
     REJECTED = "rejected"
@@ -82,6 +87,7 @@ class EventCategory(StrEnum):
     PERSONALIZATION = "personalization"
     KNOWLEDGE = "knowledge"
     PROVIDER = "provider"
+    TEST = "test"
 
 
 class AgentHealthStatus(StrEnum):
@@ -151,6 +157,14 @@ class ResultOutcome(StrEnum):
     FAILED = "failed"
     ERROR = "error"
     SKIPPED = "skipped"
+
+
+class TestVerdict(StrEnum):
+    __test__ = False
+
+    VERIFIED = "verified"
+    FAILED = "failed"
+    INCONCLUSIVE = "inconclusive"
 
 
 class ObjectiveRecord(Base):
@@ -616,6 +630,7 @@ class TestRunRecord(Base):
         JSON_DOCUMENT, nullable=False, default=list
     )
     report_path: Mapped[str | None] = mapped_column(String(1024))
+    verdict: Mapped[str | None] = mapped_column(String(24))
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )
