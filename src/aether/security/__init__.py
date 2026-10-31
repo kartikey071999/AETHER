@@ -16,6 +16,7 @@ from aether.security.policy import (
     load_security_policy,
     permitted_kinds,
 )
+from aether.security.summary import describe_policy, policy_fingerprint
 from aether.security.untrusted import UntrustedContent
 
 __all__ = [
@@ -34,6 +35,8 @@ __all__ = [
     "SecuritySettings",
     "UnauthorizedDecisionMaker",
     "UntrustedContent",
+    "describe_policy",
     "load_security_policy",
     "permitted_kinds",
+    "policy_fingerprint",
 ]

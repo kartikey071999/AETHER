@@ -191,7 +191,8 @@ def test_cli_events_tail_prints_recent_events_in_order(
 
     cli.main(["events", "tail"])
     lines = capsys.readouterr().out.strip().splitlines()
-    assert "runtime.started" in lines[0]
+    assert "runtime.security_initialized" in lines[0]
+    assert "runtime.started" in lines[1]
     assert "runtime.stopped" in lines[-1]
 
 

@@ -2,7 +2,7 @@
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -18,7 +18,7 @@ from aether.communication.messages import AgentId, AgentMessage, MessageType
 from aether.storage.models import TaskRecord
 
 if TYPE_CHECKING:
-    from aether.tools.registry import ToolRegistry
+    from aether.tools.facade import AgentTools
 
 
 class PermissionService(Protocol):
@@ -35,9 +35,9 @@ class AgentContext:
     bus: MessageBus
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("aether.agent"))
+    # Agents only ever see a read-only permission view and a facade bound to their own identity.
     permission_service: PermissionService | None = None
-    # Privileged actions (shell, HTTP, files) are only reachable through this registry.
-    tools: "ToolRegistry | None" = None
+    tools: "AgentTools | None" = None
     services: dict[str, Any] = field(default_factory=dict)
 
 
@@ -57,6 +57,18 @@ class TaskResult(BaseModel):
     evidence: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
     retryable: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ToolInvocation:
+    """Outcome of `BaseAgent.invoke_tool`: the tool's value, or the result to return instead."""
+
+    value: Any = None
+    result: TaskResult | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.result is None
 
 
 class HealthStatus(StrEnum):
@@ -129,6 +141,65 @@ class BaseAgent(ABC):
 
     @abstractmethod
     async def execute_task(self, task: TaskRecord, ctx: AgentContext) -> TaskResult: ...
+
+    async def invoke_tool(
+        self,
+        tool: str,
+        args: Mapping[str, Any],
+        ctx: AgentContext,
+        *,
+        task: TaskRecord | None = None,
+        correlation_id: UUID | None = None,
+    ) -> ToolInvocation:
+        """The only way an agent performs a privileged action; always acts as ``self.agent_id``.
+
+        Blocked or failed calls come back as a structured ``TaskResult`` in ``.result`` for the
+        caller to return from ``execute_task``; operations that need WARDEN review are routed to
+        WARDEN and reported as ``waiting_for_approval``.
+        """
+        # Imported lazily: the security and tool packages import the agent registry.
+        from aether.agents.security_review import blocked_result
+        from aether.security.errors import OperationBlocked
+        from aether.tools import ExecutionFailed, ToolCallContext, ToolInputError, UnknownTool
+
+        if ctx.tools is None:
+            return ToolInvocation(
+                result=TaskResult(
+                    status=TaskResultStatus.FAILED,
+                    summary="no tool registry is available to this agent",
+                    error="tool registry is not configured",
+                    retryable=False,
+                )
+            )
+        call = ToolCallContext(
+            task_id=task.id if task else None,
+            objective_id=task.objective_id if task else None,
+            requirement_id=task.requirement_id if task else None,
+            correlation_id=correlation_id,
+        )
+        try:
+            value = await ctx.tools.invoke(tool, args, call)
+        except OperationBlocked as blocked:
+            operation = ctx.tools.build_operation(tool, args, call)
+            return ToolInvocation(result=await blocked_result(blocked, operation, ctx))
+        except (ToolInputError, UnknownTool) as error:
+            return ToolInvocation(
+                result=TaskResult(
+                    status=TaskResultStatus.FAILED,
+                    summary=f"tool {tool!r} request was rejected",
+                    error=str(error),
+                    retryable=False,
+                )
+            )
+        except ExecutionFailed as error:
+            return ToolInvocation(
+                result=TaskResult(
+                    status=TaskResultStatus.FAILED,
+                    summary=f"tool {tool!r} failed",
+                    error=str(error),
+                )
+            )
+        return ToolInvocation(value=value)
 
     async def cancel(self, task_id: UUID) -> None:
         """Request cancellation; long-running work should poll `is_cancelled`."""
