@@ -11,8 +11,9 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from reliability_support import FailingCommits, create_schema
+from reliability_support import FailingCommits
 from sqlalchemy import func, select
+from sqlite_schema import copy_schema_to
 
 from aether.config import AetherSettings
 from aether.observability.events import AetherEvent, build_event
@@ -72,9 +73,9 @@ async def test_events_written_while_the_database_is_down_are_replayed_once_on_re
     tmp_path: Path, isolated_logging: None
 ) -> None:
     settings = _settings(tmp_path)
+    copy_schema_to(settings.database_url.get_secret_value())
     database = Database(settings.database_url.get_secret_value())
     try:
-        await create_schema(database)
         flaky = FailingCommits(database.engine)
         recorder = EventRecorder(EventSpool(spool_path(settings)))
         lost, kept = _error_event("lost commit"), _error_event("written normally")

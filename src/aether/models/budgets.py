@@ -157,6 +157,7 @@ class BudgetGuard:
                 model=request.model,
                 agent=request.agent.value,
                 task_id=request.task_id,
+                objective_id=request.objective_id,
                 input_tokens=input_tokens,
                 output_tokens=request.max_tokens,
                 cost_usd=cost,

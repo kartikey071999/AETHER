@@ -116,8 +116,10 @@ addition applies to the demo process only.
 - An inconclusive verdict is stored as a `CANCELLED` test run.
 - A ROGUE LLM budget of one or less leaves no critique call; critique then uses the curated
   alternatives.
-- Per-objective LLM budgets and the circuit breaker are kept in memory. A restart resets them,
-  and only the durable daily provider budgets still apply. The circuit never half-opens.
+- Per-objective LLM budgets and breaker state are durable (seeded from `provider_usage` and
+  replayed from `provider.circuit_*` events on first use after a start). Usage recorded before
+  migration `0005` has no objective and is not counted. Failure counts below the breaker
+  threshold are not persisted. An open breaker half-opens after the cool-down (one probe).
 - A task with neither a capability template nor a `forge-spec`, whose single LLM draft fails,
   still blocks. ORCHESTR then bounds and escalates it; there is no generic deterministic plan.
 

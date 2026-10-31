@@ -204,6 +204,22 @@ async def test_wait_for_messages_wakes_on_publish_and_times_out(sessions) -> Non
     assert await asyncio.wait_for(waiter, 1.0) is True
 
 
+async def test_wait_for_messages_returns_early_once_stop_is_set(sessions) -> None:
+    bus = MessageBus(sessions, poll_interval=5.0)
+    stop = asyncio.Event()
+
+    waiter = asyncio.create_task(bus.wait_for_messages(AgentId.FORGE, 30.0, stop=stop))
+    await asyncio.sleep(0.05)
+    assert not waiter.done()
+    stop.set()
+    bus.wake(AgentId.FORGE)
+
+    assert await asyncio.wait_for(waiter, 1.0) is False
+    # A stop that is already set never waits, even with no wake-up.
+    already_stopped = bus.wait_for_messages(AgentId.FORGE, 30.0, stop=stop)
+    assert await asyncio.wait_for(already_stopped, 1.0) is False
+
+
 async def test_wait_for_messages_polls_database_for_other_processes(sessions) -> None:
     consumer_bus = MessageBus(sessions, poll_interval=0.02)
     producer_bus = MessageBus(sessions)

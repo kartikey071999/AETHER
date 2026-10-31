@@ -103,11 +103,14 @@ def runtime_agent_options(
     *,
     data_dir: Path,
     research_limits: "ResearchLimits | None" = None,
+    forge_llm_refine_templates: bool = False,
 ) -> dict[AgentId, dict[str, Any]]:
     """Constructor options derived from runtime settings for the agents that take any.
 
-    MUSE gets its data directory (outbox location); SCOUT and ROGUE get the research limits.
+    MUSE gets its data directory (outbox location); SCOUT and ROGUE get the research limits;
+    FORGE gets whether known capability templates are LLM-refined first.
     """
+    from aether.agents.forge.schemas import ForgeConfig
     from aether.agents.muse import MuseSettings
     from aether.agents.scout.schemas import ResearchLimits
 
@@ -116,4 +119,5 @@ def runtime_agent_options(
         AgentId.MUSE: {"settings": MuseSettings(data_dir=Path(data_dir))},
         AgentId.SCOUT: {"limits": limits},
         AgentId.ROGUE: {"limits": limits},
+        AgentId.FORGE: {"config": ForgeConfig(llm_refine_templates=forge_llm_refine_templates)},
     }

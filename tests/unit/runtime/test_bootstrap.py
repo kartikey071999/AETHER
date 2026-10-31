@@ -7,18 +7,16 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import select
+from sqlite_schema import copy_migrated, copy_schema_to
 
 from aether import main as cli
 from aether.config import AetherSettings
 from aether.observability.events import build_event
 from aether.observability.spool import EventSpool
 from aether.runtime.bootstrap import build_runtime, spool_path
-from aether.storage.models import Base, EventRecord
+from aether.storage.models import EventRecord
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SECRET = "pw-should-never-appear"
 
 
@@ -68,9 +66,8 @@ async def test_start_replays_spool_before_runtime_started_and_is_idempotent(
 ) -> None:
     settings = _settings(tmp_path)
     runtime = build_runtime(settings)
+    copy_schema_to(settings.database_url.get_secret_value())
     try:
-        async with runtime.database.engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
         assert runtime.recorder.spool is not None
         assert runtime.recorder.spool.path == spool_path(settings).resolve()
         spooled = _spooled_event()
@@ -118,9 +115,8 @@ async def test_start_configures_logging_and_applies_retention(
     monkeypatch.setattr(bootstrap, "apply_retention", fake_retention)
     settings = _settings(tmp_path)
     runtime = build_runtime(settings)
+    copy_schema_to(settings.database_url.get_secret_value())
     try:
-        async with runtime.database.engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
         await runtime.run(once=True)
     finally:
         await runtime.close()
@@ -137,8 +133,7 @@ def _migrate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("AETHER_DATABASE_URL", f"sqlite+aiosqlite:///{database_path.as_posix()}")
     monkeypatch.setenv("AETHER_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("AETHER_LOG_DIR", str(tmp_path / "logs"))
-    command.upgrade(Config(str(PROJECT_ROOT / "alembic.ini")), "head")
-    return database_path
+    return copy_migrated(database_path)
 
 
 def test_cli_run_once_starts_records_events_and_exits_cleanly(
@@ -206,6 +201,7 @@ def test_cli_events_tail_prints_recent_events_in_order(
     assert "runtime.stopped" in lines[-1]
 
 
+@pytest.mark.slow  # connecting to a closed port takes seconds on Windows
 def test_cli_run_never_prints_credentials(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -250,3 +246,36 @@ async def test_build_runtime_accepts_explicit_engine_limits(tmp_path: Path) -> N
         assert default.engine._limits.message_poll_seconds != 0.05
     finally:
         await default.close()
+
+
+async def test_build_runtime_wires_an_injected_resource_monitor(tmp_path: Path) -> None:
+    # Regression: scenarios always read the real host CPU, so a loaded machine deferred the
+    # capability workflow's tasks (and paused running ones) until the end-to-end tests timed out.
+    from reliability_support import QuietMonitor
+
+    from aether.communication.messages import AgentId
+    from aether.runtime.resource_monitor import ResourceMonitor
+    from aether.runtime.scenario import CapabilityScenario, scenario_settings
+
+    monitor = QuietMonitor()
+    runtime = build_runtime(_settings(tmp_path), resource_monitor=monitor)
+    try:
+        assert runtime.engine._monitor is monitor
+        services = runtime.engine._contexts[AgentId.ORCHESTR].services
+        assert services["resource_monitor"] is monitor
+    finally:
+        await runtime.close()
+
+    default = build_runtime(_settings(tmp_path))
+    try:
+        assert isinstance(default.engine._monitor, ResourceMonitor)
+    finally:
+        await default.close()
+
+    scenario_monitor = QuietMonitor()
+    scenario = CapabilityScenario(
+        scenario_settings(tmp_path / "scenario"), resource_monitor=scenario_monitor
+    )
+    async with scenario:
+        assert scenario.runtime is not None
+        assert scenario.runtime.engine._monitor is scenario_monitor

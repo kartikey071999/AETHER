@@ -13,6 +13,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlite_schema import copy_schema_to, schema_database
 
 from aether.agents import AGENT_DEFINITIONS
 from aether.agents.base import AgentContext, BaseAgent, TaskResult, TaskResultStatus
@@ -36,7 +37,7 @@ from aether.runtime.scheduler import Scheduler, SchedulerPolicy
 from aether.security import ApprovalService, OperationKind, SecuritySettings
 from aether.security.policy import SecurityPolicy
 from aether.storage.database import Database
-from aether.storage.models import Base, EventRecord, TaskRecord, TaskStatus
+from aether.storage.models import EventRecord, TaskRecord, TaskStatus
 from aether.storage.repositories import (
     ExecutionRunRepository,
     ObjectiveRepository,
@@ -153,9 +154,7 @@ class SweepingWarden(BaseAgent):
 
 @pytest_asyncio.fixture
 async def database(tmp_path: Path) -> AsyncIterator[Database]:
-    db = Database(f"sqlite+aiosqlite:///{(tmp_path / 'hooks.db').as_posix()}")
-    async with db.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    db = schema_database(tmp_path / "hooks.db")
     yield db
     await db.close()
 
@@ -305,8 +304,7 @@ def settings(tmp_path: Path) -> AetherSettings:
 @pytest_asyncio.fixture
 async def runtime(settings: AetherSettings) -> AsyncIterator[Runtime]:
     runtime = build_runtime(settings, security_settings=SecuritySettings(_env_file=None))
-    async with runtime.database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    copy_schema_to(settings.database_url.get_secret_value())
     yield runtime
     await runtime.close()
 
@@ -674,6 +672,114 @@ async def test_legacy_decision_recorded_requests_are_still_honoured(sessions, ob
             task_id=task_id,
         )
     assert await control.pending(task_id) == []
+
+
+# --- fail-closed control reads ------------------------------------------------------------
+
+
+def _fail_pending(monkeypatch, control: TaskControl, *, times: int | None = None) -> list[int]:
+    """Make `control.pending` raise (`times` calls, or forever); returns the call counter."""
+    original = control.pending
+    calls: list[int] = []
+
+    async def pending(task_id: UUID):
+        calls.append(1)
+        if times is None or len(calls) <= times:
+            raise OSError("database is locked")
+        return await original(task_id)
+
+    monkeypatch.setattr(control, "pending", pending)
+    return calls
+
+
+async def test_unreadable_control_state_hands_the_lease_back_before_the_agent_runs(
+    sessions, objective_id, monkeypatch
+) -> None:
+    agent = WorkAgent()
+    engine = build_engine(sessions, [agent])
+    engine.pool._control_read_backoff = 0.0
+    task_id = await make_task(sessions, objective_id, state=TaskStatus.WAITING_FOR_APPROVAL)
+    await engine.task_control.request_pause(task_id)  # stays pending until scheduled
+    async with sessions() as session, session.begin():
+        task = await session.get(TaskRecord, task_id)
+        assert task is not None
+        task.state = TaskStatus.READY.value
+    _fail_pending(monkeypatch, engine.task_control)
+
+    assert await engine.pool.submit(task_id, agent)
+    await engine.pool.join()
+
+    assert agent.executed == []
+    task = await get_task(sessions, task_id)
+    # The hand-back settles the pending pause through its own read, so the task is paused.
+    assert (task.state, task.attempt, task.lease_owner) == ("paused", 0, None)
+    interrupted = await events(sessions, "task.interrupted", task_id)
+    assert next(e.payload["reason"] for e in interrupted) == "control_unavailable"
+
+
+@pytest.mark.parametrize(("requested", "final"), [(False, "blocked"), (True, "cancelled")])
+async def test_completion_is_not_recorded_when_control_state_stays_unreadable(
+    sessions, objective_id, monkeypatch, requested: bool, final: str
+) -> None:
+    finish = asyncio.Event()
+
+    async def finish_later(_agent: BaseAgent, _task: TaskRecord) -> TaskResult:
+        await finish.wait()
+        return TaskResult(status=TaskResultStatus.COMPLETED, summary="done")
+
+    agent = WorkAgent(finish_later)
+    engine = build_engine(
+        sessions, [agent], task_interrupt_grace_seconds=30.0, task_control_poll_seconds=30.0
+    )
+    engine.pool._control_read_backoff = 0.0
+    task_id = await make_task(sessions, objective_id)
+    assert await engine.pool.submit(task_id, agent)
+    await agent.started.wait()
+    if requested:
+        await engine.task_control.request_cancel(task_id)
+        await wait_until(lambda: _true(agent.is_cancelled(task_id)))
+    calls = _fail_pending(monkeypatch, engine.task_control)
+
+    finish.set()
+    await engine.pool.join()
+
+    task = await get_task(sessions, task_id)
+    assert task.state == final  # never COMPLETED, even though a cancel may be pending
+    assert len(calls) == engine.pool._control_read_attempts
+    blocked = await events(sessions, "task.blocked", task_id)
+    assert [e.payload["reason"] for e in blocked] == ["control_unavailable"]
+    assert await events(sessions, "task.completed", task_id) == []
+
+
+async def test_a_transient_control_read_failure_is_retried_before_completing(
+    sessions, objective_id, monkeypatch
+) -> None:
+    finish = asyncio.Event()
+
+    async def finish_later(_agent: BaseAgent, _task: TaskRecord) -> TaskResult:
+        await finish.wait()
+        return TaskResult(status=TaskResultStatus.COMPLETED, summary="done")
+
+    agent = WorkAgent(finish_later)
+    engine = build_engine(
+        sessions, [agent], task_interrupt_grace_seconds=30.0, task_control_poll_seconds=30.0
+    )
+    engine.pool._control_read_backoff = 0.0
+    task_id = await make_task(sessions, objective_id)
+    assert await engine.pool.submit(task_id, agent)
+    await agent.started.wait()
+    await engine.task_control.request_cancel(task_id)
+    await wait_until(lambda: _true(agent.is_cancelled(task_id)))
+    calls = _fail_pending(monkeypatch, engine.task_control, times=2)
+
+    finish.set()
+    await engine.pool.join()
+
+    assert len(calls) == 3
+
+    assert (await get_task(sessions, task_id)).state == TaskStatus.COMPLETED.value
+    resolved = await events(sessions, CONTROL_RESOLVED, task_id)
+    assert [e.payload["outcome"] for e in resolved] == ["superseded: task completed"]
 
 
 async def _true(value: bool) -> bool:

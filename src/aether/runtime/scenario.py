@@ -45,7 +45,7 @@ from aether.models import MockProvider, ModelProvider, ProviderSettings
 from aether.models.contracts import CompletionRequest, CompletionResponse
 from aether.observability.recorder import split_legacy_payload
 from aether.runtime.bootstrap import Runtime, build_runtime
-from aether.runtime.engine import EngineLimits
+from aether.runtime.engine import EngineLimits, ResourceSnapshotter
 from aether.security.policy import SecuritySettings
 from aether.storage.models import (
     Base,
@@ -368,6 +368,8 @@ class CapabilityScenario:
     # FORGE configuration; ``None`` keeps the runtime default (templates, no LLM refinement).
     forge_config: ForgeConfig | None = None
     create_schema: bool = True
+    # None reads the real host; tests pin resources so machine load cannot defer or pause work.
+    resource_monitor: ResourceSnapshotter | None = None
     runtime: Runtime | None = None
 
     async def start(self) -> Runtime:
@@ -378,7 +380,9 @@ class CapabilityScenario:
         agents = None
         if self.forge_config is not None:
             options = runtime_agent_options(
-                data_dir=settings.data_dir, research_limits=settings.research
+                data_dir=settings.data_dir,
+                research_limits=settings.research,
+                forge_llm_refine_templates=settings.forge_llm_refine_templates,
             )
             options[AgentId.FORGE] = {"config": self.forge_config}
             agents = build_agents(options=options)
@@ -390,6 +394,7 @@ class CapabilityScenario:
             or ProviderSettings(_env_file=None, mock=True, max_retries=0),
             model_providers=self.model_providers,
             engine_limits=scenario_engine_limits(settings, self.timing),
+            resource_monitor=self.resource_monitor,
         )
         self.runtime = runtime
         try:
@@ -527,6 +532,7 @@ class ScenarioTrace:
     interactions: list[InteractionRecord]
     messages: list[MessageRecord]
     outbox_paths: list[Path]
+    scheduler_deferrals: list[EventRecord] = field(default_factory=list)
 
     @property
     def task_ids(self) -> set[UUID]:
@@ -674,6 +680,21 @@ async def collect_trace(runtime: Runtime, objective_id: UUID) -> ScenarioTrace:
                 )
             ).all()
         )
+        scheduler_deferrals = list(
+            reversed(
+                (
+                    await session.scalars(
+                        select(EventRecord)
+                        .where(
+                            EventRecord.event_type == "scheduler.decision",
+                            EventRecord.created_at >= objective.created_at,
+                        )
+                        .order_by(EventRecord.created_at.desc())
+                        .limit(_DEFERRAL_EVENT_LIMIT)
+                    )
+                ).all()
+            )
+        )
         orchestr_decisions = list(
             (
                 await session.scalars(
@@ -792,7 +813,51 @@ async def collect_trace(runtime: Runtime, objective_id: UUID) -> ScenarioTrace:
         interactions=interactions,
         messages=messages,
         outbox_paths=outbox_paths,
+        scheduler_deferrals=scheduler_deferrals,
     )
+
+
+_DEFERRAL_EVENT_LIMIT = 200
+_REQUIREMENT_APPROVED = frozenset(
+    {"approved", "in_progress", "implemented", "verified", "satisfied"}
+)
+
+
+def pending_reasons(trace: ScenarioTrace) -> dict[UUID, str]:
+    """Why each still-pending task has not been released, from persisted state only."""
+    latest: dict[UUID, str] = {}
+    for event in trace.scheduler_deferrals:  # oldest first, so later decisions win
+        deferred = _data(event).get("deferred")
+        if isinstance(deferred, dict):
+            for raw_id, reason in deferred.items():
+                try:
+                    latest[UUID(str(raw_id))] = str(reason)
+                except ValueError:
+                    continue
+    requirements = {requirement.id: requirement for requirement in trace.requirements}
+    states = {task.id: task.state for task in trace.tasks}
+    dependencies: dict[UUID, list[UUID]] = {}
+    for dependency in trace.dependencies:
+        dependencies.setdefault(dependency.task_id, []).append(dependency.depends_on_task_id)
+    reasons: dict[UUID, str] = {}
+    for task in trace.tasks:
+        if task.state != "pending":
+            continue
+        unfinished = [
+            dep for dep in dependencies.get(task.id, []) if states.get(dep) != "completed"
+        ]
+        requirement = requirements.get(task.requirement_id) if task.requirement_id else None
+        if unfinished:
+            reasons[task.id] = f"waiting: {len(unfinished)} dependency task(s) not completed"
+        elif task.assigned_agent == AgentId.FORGE.value and (
+            requirement is None or str(requirement.status) not in _REQUIREMENT_APPROVED
+        ):
+            reasons[task.id] = "held: no approved requirement"
+        elif task.id in latest:
+            reasons[task.id] = latest[task.id]
+        else:
+            reasons[task.id] = "no scheduler decision recorded yet"
+    return reasons
 
 
 def _when(value: datetime | None) -> str:
@@ -850,6 +915,14 @@ def format_trace(trace: ScenarioTrace) -> list[str]:
     for event in trace.scheduler_decisions[:20]:
         task_id = event.task_id
         lines.append(f"  {_when(event.created_at)} selected {names.get(task_id, _short(task_id))}")
+    pending = pending_reasons(trace)
+    if pending:
+        lines.append(f"Pending tasks ({len(pending)}):")
+        for task in trace.tasks:
+            if task.id in pending:
+                lines.append(
+                    f"  {_short(task.id)} {task.assigned_agent or '-':8} {pending[task.id]}"
+                )
     lines.append(f"ORCHESTR decisions ({len(trace.orchestr_decisions)}):")
     for event in trace.orchestr_decisions:
         data = _data(event)

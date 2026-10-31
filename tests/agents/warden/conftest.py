@@ -8,6 +8,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import select
+from sqlite_schema import schema_database
 
 from aether.agents.base import AgentContext
 from aether.agents.warden import WardenAgent
@@ -27,7 +28,6 @@ from aether.security import (
 from aether.security.policy import default_agent_permissions
 from aether.storage.database import Database
 from aether.storage.models import (
-    Base,
     MessageRecord,
     RequirementStatus,
     SecurityDecisionRecord,
@@ -50,9 +50,7 @@ class FakeClock:
 
 @pytest.fixture
 async def database(tmp_path: Path) -> AsyncIterator[Database]:
-    database = Database(f"sqlite+aiosqlite:///{(tmp_path / 'warden.db').as_posix()}")
-    async with database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    database = schema_database(tmp_path / "warden.db")
     yield database
     await database.close()
 

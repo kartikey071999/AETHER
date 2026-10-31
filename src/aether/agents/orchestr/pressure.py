@@ -26,7 +26,7 @@ _MIB = 1024 * 1024
 def pressure_reason(env: Env, host: HostResources) -> str | None:
     policy = env.scheduler.policy
     problems: list[str] = []
-    if host.cpu_percent > policy.max_cpu_percent:
+    if policy.cpu_ceiling_exceeded(host):
         problems.append(f"cpu {host.cpu_percent:.0f}% above limit {policy.max_cpu_percent:.0f}%")
     if host.free_disk_bytes < policy.min_free_disk_bytes:
         problems.append(

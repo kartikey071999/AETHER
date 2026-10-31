@@ -1,6 +1,7 @@
 """Bounded LLM spend: fallback cap, one length retry, per-objective budgets, circuit breaker."""
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -26,7 +27,7 @@ from aether.models import (
 from aether.models.facade import AgentBudgetExceeded, AgentModels, ModelCallContext
 from aether.models.governor import ModelGovernor
 from aether.observability.recorder import EventRecorder
-from aether.storage.models import EventRecord
+from aether.storage.models import EventRecord, ProviderUsageRecord
 
 STANDARD = frozenset({ModelTier.STANDARD})
 
@@ -162,10 +163,18 @@ async def test_route_spend_refuses_calls_beyond_its_limits(usage):
 
 
 def governed(
-    database, usage, provider, settings: ProviderSettings, agent: AgentId = AgentId.FORGE
+    database,
+    usage,
+    provider,
+    settings: ProviderSettings,
+    agent: AgentId = AgentId.FORGE,
+    clock=None,
 ) -> tuple[AgentModels, ModelGovernor]:
     router = ModelRouter([provider], BudgetGuard(usage, settings))
-    governor = ModelGovernor(settings, sessions=database.sessions, recorder=EventRecorder())
+    extra = {"clock": clock} if clock is not None else {}
+    governor = ModelGovernor(
+        settings, sessions=database.sessions, recorder=EventRecorder(), **extra
+    )
 
     async def complete(req: CompletionRequest) -> CompletionResponse:
         return await governor.complete(req, lambda r, s: router.complete(r, spend=s))
@@ -301,3 +310,228 @@ def test_agent_budgets_merge_with_defaults():
 
 def test_budget_policy_is_unchanged_by_agent_budgets():
     assert BudgetPolicy().max_tokens_per_request == 32_768
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = datetime(2026, 1, 1, tzinfo=UTC)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += timedelta(seconds=seconds)
+
+
+def one_model_provider(script) -> MockProvider:
+    return MockProvider(script, name="mock", models=[ModelInfo(name="m0", tiers=STANDARD)])
+
+
+async def test_usage_is_attributed_to_the_objective(database, usage):
+    provider = one_model_provider(["ok"])
+    models, _ = governed(database, usage, provider, settings_with())
+    call = ModelCallContext(objective_id=uuid4())
+    await models.complete(request(), call)
+    async with database.sessions() as session:
+        rows = list(await session.scalars(select(ProviderUsageRecord)))
+    assert [(row.objective_id, row.agent) for row in rows] == [(call.objective_id, "FORGE")]
+
+
+async def test_request_allowance_survives_a_restart(database, usage):
+    settings = settings_with(agent_budgets={"FORGE": {"max_requests_per_objective": 3}})
+    provider = one_model_provider(["ok"] * 10)
+    models, _ = governed(database, usage, provider, settings)
+    call = ModelCallContext(objective_id=uuid4())
+    await models.complete(request(), call)
+    await models.complete(request(), call)
+
+    restarted, governor = governed(database, usage, provider, settings)  # empty in-memory state
+    await restarted.complete(request(), call)
+    assert governor.usage(call.objective_id, AgentId.FORGE)[0] == 3
+    with pytest.raises(AgentBudgetExceeded, match="request budget"):
+        await restarted.complete(request(), call)
+    assert len(provider.requests) == 3
+
+
+async def test_token_allowance_survives_a_restart_and_is_per_agent(database, usage):
+    settings = settings_with(agent_budgets={"FORGE": {"max_tokens_per_objective": 1000}})
+    provider = one_model_provider(["ok"] * 10)
+    call = ModelCallContext(objective_id=uuid4())
+
+    # Spend is only seeded from rows of the same objective and agent.
+    await usage.record(
+        provider="mock", model="m0", agent="FORGE", objective_id=uuid4(), input_tokens=5000
+    )
+    await usage.record(
+        provider="mock",
+        model="m0",
+        agent="SCOUT",
+        objective_id=call.objective_id,
+        input_tokens=5000,
+    )
+    await usage.record(
+        provider="mock", model="m0", agent="FORGE", objective_id=call.objective_id, input_tokens=300
+    )
+    restarted, governor = governed(database, usage, provider, settings)
+    await restarted.complete(request(), call)
+    requests, tokens, _ = governor.usage(call.objective_id, AgentId.FORGE)
+    assert requests == 2 and 300 < tokens < 1000
+
+    await usage.record(
+        provider="mock", model="m0", agent="FORGE", objective_id=call.objective_id, input_tokens=900
+    )
+    again, _ = governed(database, usage, provider, settings)
+    with pytest.raises(AgentBudgetExceeded, match="token budget"):
+        await again.complete(request(), call)
+    assert len(provider.requests) == 1
+
+
+async def test_open_breaker_survives_a_restart(database, usage):
+    settings = settings_with(circuit_breaker_failures=2)
+    provider = one_model_provider([ProviderError("mock")] * 10)
+    models, _ = governed(database, usage, provider, settings)
+    call = ModelCallContext(objective_id=uuid4())
+    for _ in range(2):
+        with pytest.raises(NoModelAvailable):
+            await models.complete(request(), call)
+
+    restarted, _ = governed(database, usage, provider, settings)
+    with pytest.raises(AgentBudgetExceeded, match="circuit breaker"):
+        await restarted.complete(request(), call)
+    assert len(provider.requests) == 2
+    other, _ = governed(database, usage, provider, settings)
+    with pytest.raises(NoModelAvailable):  # another objective is unaffected
+        await other.complete(request(), ModelCallContext(objective_id=uuid4()))
+
+
+async def test_half_open_probe_failure_reopens_and_restarts_the_cooldown(database, usage):
+    clock = FakeClock()
+    settings = settings_with(circuit_breaker_failures=2, circuit_breaker_cooldown_seconds=60)
+    provider = one_model_provider([ProviderError("mock")] * 10)
+    models, _ = governed(database, usage, provider, settings, clock=clock)
+    call = ModelCallContext(objective_id=uuid4())
+    for _ in range(2):
+        with pytest.raises(NoModelAvailable):
+            await models.complete(request(), call)
+    clock.advance(59)
+    with pytest.raises(AgentBudgetExceeded, match="circuit breaker"):
+        await models.complete(request(), call)
+
+    clock.advance(1)
+    with pytest.raises(NoModelAvailable):  # the one probe
+        await models.complete(request(), call)
+    assert len(provider.requests) == 3
+    with pytest.raises(AgentBudgetExceeded, match="circuit breaker"):
+        await models.complete(request(), call)
+    assert len(provider.requests) == 3
+    assert len(await events_of(database, "provider.circuit_opened")) == 2
+
+    clock.advance(60)  # the cool-down restarted at the failed probe
+    with pytest.raises(NoModelAvailable):
+        await models.complete(request(), call)
+    assert len(provider.requests) == 4
+
+
+async def test_half_open_probe_success_closes_the_breaker(database, usage):
+    clock = FakeClock()
+    settings = settings_with(circuit_breaker_failures=2, circuit_breaker_cooldown_seconds=60)
+    provider = one_model_provider([ProviderError("mock")] * 2 + ["ok"] * 10)
+    models, governor = governed(database, usage, provider, settings, clock=clock)
+    call = ModelCallContext(objective_id=uuid4())
+    for _ in range(2):
+        with pytest.raises(NoModelAvailable):
+            await models.complete(request(), call)
+    clock.advance(60)
+    await models.complete(request(), call)
+    await models.complete(request(), call)
+    assert len(provider.requests) == 4
+    assert governor.usage(call.objective_id, AgentId.FORGE)[2] == 0
+    [closed] = await events_of(database, "provider.circuit_closed")
+    assert closed.payload["agent"] == "FORGE"
+
+    # A restart now sees a closed breaker even though an "opened" event exists.
+    restarted, _ = governed(database, usage, provider, settings, clock=clock)
+    await restarted.complete(request(), call)
+    assert len(provider.requests) == 5
+
+
+async def test_unusable_probe_output_reopens_the_breaker(database, usage):
+    clock = FakeClock()
+    settings = settings_with(circuit_breaker_failures=2, circuit_breaker_cooldown_seconds=60)
+    provider = one_model_provider([ProviderError("mock")] * 2 + ["not json"] * 10)
+    models, _ = governed(database, usage, provider, settings, clock=clock)
+    call = ModelCallContext(objective_id=uuid4())
+    for _ in range(2):
+        with pytest.raises(NoModelAvailable):
+            await models.complete(request(), call)
+    clock.advance(60)
+    await models.complete(request(), call)
+    await models.report_unusable(call)
+    with pytest.raises(AgentBudgetExceeded, match="circuit breaker"):
+        await models.complete(request(), call)
+    assert len(provider.requests) == 3
+
+
+async def test_cooldown_is_measured_from_the_persisted_event_after_a_restart(database, usage):
+    clock = FakeClock()
+    settings = settings_with(circuit_breaker_failures=2, circuit_breaker_cooldown_seconds=60)
+    provider = one_model_provider([ProviderError("mock")] * 2 + ["ok"] * 10)
+    models, _ = governed(database, usage, provider, settings, clock=clock)
+    call = ModelCallContext(objective_id=uuid4())
+    for _ in range(2):
+        with pytest.raises(NoModelAvailable):
+            await models.complete(request(), call)
+
+    clock.advance(30)
+    restarted, _ = governed(database, usage, provider, settings, clock=clock)
+    with pytest.raises(AgentBudgetExceeded, match="circuit breaker"):
+        await restarted.complete(request(), call)
+    clock.advance(30)
+    await restarted.complete(request(), call)  # probe succeeds
+    assert len(provider.requests) == 3
+
+
+async def test_only_one_probe_runs_when_calls_race_after_the_cooldown(database, usage):
+    class SlowFailingProvider(MockProvider):
+        async def complete(self, request: CompletionRequest) -> CompletionResponse:
+            await asyncio.sleep(0.05)
+            return await super().complete(request)
+
+    clock = FakeClock()
+    settings = settings_with(circuit_breaker_failures=1, circuit_breaker_cooldown_seconds=60)
+    provider = SlowFailingProvider(
+        [ProviderError("mock")] * 10,
+        name="mock",
+        models=[ModelInfo(name="m0", tiers=STANDARD)],
+    )
+    models, _ = governed(database, usage, provider, settings, clock=clock)
+    call = ModelCallContext(objective_id=uuid4())
+    with pytest.raises(NoModelAvailable):
+        await models.complete(request(), call)
+    clock.advance(60)
+    outcomes = await asyncio.gather(
+        *(models.complete(request(), call) for _ in range(3)), return_exceptions=True
+    )
+    assert len(provider.requests) == 2  # the opening failure plus exactly one probe
+    assert sum(isinstance(item, AgentBudgetExceeded) for item in outcomes) == 2
+
+
+async def test_unreadable_durable_state_fails_closed(database, usage):
+    class BrokenSessions:
+        def __call__(self):
+            raise RuntimeError("database down")
+
+    provider = one_model_provider(["ok"])
+    governor = ModelGovernor(settings_with(), sessions=BrokenSessions())
+    with pytest.raises(AgentBudgetExceeded, match="usage unavailable"):
+        await governor.complete(
+            request(agent=AgentId.FORGE, objective_id=uuid4()),
+            lambda r, s: ModelRouter([provider], BudgetGuard(usage, settings_with())).complete(
+                r, spend=s
+            ),
+        )
+    assert provider.requests == []
+
+
+def test_breaker_cooldown_defaults_to_thirty_minutes():
+    assert ProviderSettings(_env_file=None).circuit_breaker_cooldown_seconds == 1800

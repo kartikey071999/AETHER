@@ -6,12 +6,13 @@ the task without running the agent again.
 """
 
 import asyncio
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
 import pytest
 from reliability_support import (
+    QuietMonitor,
     RecordingAgent,
     build_engine,
     event_counts,
@@ -103,15 +104,17 @@ async def test_cancel_requested_for_a_crashed_worker_is_honoured_after_recovery(
     sessions, objective_id
 ) -> None:
     task_id = await make_task(sessions, objective_id)
-    dead = await LeaseManager(sessions).acquire(
-        task_id, "engine-dead/worker", timedelta(seconds=0.2)
+    # The dead worker leased the task a minute ago; its lease has already expired but nothing has
+    # recovered it yet, so the task still reads RUNNING (no sleep waiting for the expiry).
+    leased_at = datetime.now(UTC) - timedelta(minutes=1)
+    dead = await LeaseManager(sessions, clock=lambda: leased_at).acquire(
+        task_id, "engine-dead/worker", timedelta(seconds=30)
     )
     assert dead is not None
 
     # The request lands while the (already dead) worker still holds the lease.
     result = await TaskControl(sessions).request_cancel(task_id, reason="operator stop")
     assert (result.outcome, result.state) == ("pending", TaskStatus.RUNNING)
-    await asyncio.sleep(0.25)  # the dead lease expires
 
     agent = RecordingAgent()
     engine = build_engine(sessions, [agent])
@@ -173,11 +176,12 @@ async def _objective_tasks(database: Database, objective_id: UUID) -> dict[UUID,
         return dict(rows.all())
 
 
+@pytest.mark.slow
 async def test_objective_cancel_cascades_to_its_tasks_and_survives_restart(
     tmp_path: Path,
 ) -> None:
     settings = scenario_settings(tmp_path)
-    async with CapabilityScenario(settings, timing=FAST) as first:
+    async with CapabilityScenario(settings, timing=FAST, resource_monitor=QuietMonitor()) as first:
         runtime = first.runtime
         assert runtime is not None
         objective_id = await first.submit_objective(tag="cancelled")
@@ -206,7 +210,9 @@ async def test_objective_cancel_cascades_to_its_tasks_and_survives_restart(
 
     assert TaskStatus.CANCELLED.value in before.values()
 
-    async with CapabilityScenario(settings, timing=FAST, create_schema=False) as second:
+    async with CapabilityScenario(
+        settings, timing=FAST, create_schema=False, resource_monitor=QuietMonitor()
+    ) as second:
         runtime = second.runtime
         assert runtime is not None
         await asyncio.sleep(1.5)  # several scheduler, tick and recovery cycles

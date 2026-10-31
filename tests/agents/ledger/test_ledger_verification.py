@@ -3,6 +3,7 @@
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import pytest
 from sqlalchemy import select
 
 from aether.agents.base import AgentContext
@@ -292,6 +293,7 @@ async def test_capability_that_was_never_installed_is_not_promoted(
     assert requirement.status == RequirementStatus.APPROVED
 
 
+@pytest.mark.slow
 async def test_regression_is_recorded_and_retest_links_runs(
     agent, ctx, publish, approve_pending, make_work, workspace, database, sent
 ):
