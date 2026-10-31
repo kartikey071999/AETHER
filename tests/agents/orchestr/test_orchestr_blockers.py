@@ -109,9 +109,10 @@ async def test_repeated_blockers_escalate_to_the_user_once(harness: Harness) -> 
     assert (await harness.get_objective(objective_id)).status == "blocked"
     assert await harness.state(task.id) is TaskStatus.BLOCKED
     messages = harness.bus.of_type(MessageType.COMMUNICATION_REQUEST, target=AgentId.MUSE)
-    assert len(messages) == 2  # distinct blockers are distinct escalations, redelivery is not
+    assert len(messages) == 1  # same objective + blocker kind within the window: one escalation
     keyed = await harness.store.keyed_decisions("orchestr:escalated:")
-    assert len(keyed) == 2
+    assert len(keyed) == 1
+    assert len(await harness.store.keyed_decisions("orchestr:aggregated:")) == 1
 
 
 async def test_same_blocker_redelivered_escalates_once(harness: Harness) -> None:

@@ -147,10 +147,14 @@ async def plan_objective(env: Env, objective: ObjectiveRecord) -> dict[str, UUID
         return await materialize(env, objective, plan.tasks)
     except PlanError as error:
         # Imported here: blockers -> assignment -> planning would otherwise be a cycle.
-        from aether.agents.orchestr.blockers import escalate_objective
+        from aether.agents.orchestr.blockers import PLAN, escalate_objective
 
         await escalate_objective(
-            env, objective, key=f"plan-limit:{objective.id}", reason=f"plan not created: {error}"
+            env,
+            objective,
+            key=f"plan-limit:{objective.id}",
+            reason=f"plan not created: {error}",
+            kind=PLAN,
         )
         return {}
 

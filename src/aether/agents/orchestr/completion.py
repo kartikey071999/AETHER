@@ -3,7 +3,7 @@
 import hashlib
 from uuid import UUID
 
-from aether.agents.orchestr.blockers import escalate_objective
+from aether.agents.orchestr.blockers import VERIFICATION, escalate_objective
 from aether.agents.orchestr.communication import UpdateEvent, UpdateKind
 from aether.agents.orchestr.env import Env
 from aether.agents.orchestr.planning import add_rework
@@ -105,6 +105,7 @@ async def _rework(env: Env, objective: ObjectiveRecord, payload: TestReportPaylo
             objective,
             key=f"replans:{objective.id}",
             reason="independent verification failed repeatedly; automatic rework limit reached",
+            kind=VERIFICATION,
         )
         return
     if not await add_rework(env, objective, payload.test_run_id.hex[:8]):
@@ -113,6 +114,7 @@ async def _rework(env: Env, objective: ObjectiveRecord, payload: TestReportPaylo
             objective,
             key=f"replan-failed:{payload.test_run_id}",
             reason="verification failed and the plan could not be extended with rework",
+            kind=VERIFICATION,
         )
         return
     await env.store.record_decision(
