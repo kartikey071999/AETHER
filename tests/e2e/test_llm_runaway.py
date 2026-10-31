@@ -10,6 +10,7 @@ workflow must stay within the per-objective FORGE budget and a bounded number of
 from pathlib import Path
 
 import pytest
+from reliability_support import QuietMonitor
 from sqlalchemy import select
 
 from aether.agents.forge.schemas import ForgeConfig
@@ -101,6 +102,8 @@ async def test_truncated_forge_drafts_fall_back_to_the_template_and_finish(
     scenario = CapabilityScenario(
         scenario_settings(tmp_path),
         model_providers=[provider],
+        # Host-load independent: these tests are about LLM bounds, not resource admission.
+        resource_monitor=QuietMonitor(),
         # As in the incident: FORGE asks the LLM before using anything deterministic.
         forge_config=ForgeConfig(llm_refine_templates=True),
     )
@@ -121,6 +124,8 @@ async def test_truncated_forge_drafts_without_a_template_escalate_with_bounded_t
     scenario = CapabilityScenario(
         scenario_settings(tmp_path),
         model_providers=[provider],
+        # Host-load independent: these tests are about LLM bounds, not resource admission.
+        resource_monitor=QuietMonitor(),
         forge_config=ForgeConfig(capability_templates=False),
     )
     async with scenario:
