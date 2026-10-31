@@ -1,5 +1,7 @@
 """Inert stand-ins that keep the seven agents registered until their behaviour exists (S3)."""
 
+from functools import cache
+
 from aether.agents.base import AgentContext, BaseAgent, TaskResult, TaskResultStatus
 from aether.agents.registry import AGENT_DEFINITIONS
 from aether.communication.messages import AgentId, AgentMessage
@@ -21,10 +23,12 @@ class PlaceholderAgent(BaseAgent):
         )
 
 
-def _placeholder_class(agent_id: AgentId) -> type[PlaceholderAgent]:
+@cache
+def placeholder_class(agent_id: AgentId) -> type[PlaceholderAgent]:
+    """The (cached) placeholder class standing in for `agent_id`."""
     return type(f"Placeholder{agent_id.value.title()}", (PlaceholderAgent,), {"agent_id": agent_id})
 
 
 def build_placeholder_agents() -> list[BaseAgent]:
     """One placeholder per canonical agent definition."""
-    return [_placeholder_class(definition.agent_id)() for definition in AGENT_DEFINITIONS]
+    return [placeholder_class(definition.agent_id)() for definition in AGENT_DEFINITIONS]
