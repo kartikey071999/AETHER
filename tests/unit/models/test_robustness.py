@@ -236,11 +236,11 @@ async def test_model_minimum_raises_request_without_lowering_larger_values(usage
     assert req.max_tokens == requested
 
 
-@pytest.mark.parametrize("cap_source", ["request", "provider", "model"])
+@pytest.mark.parametrize("cap_source", ["provider", "model"])
 async def test_minimum_conflict_is_clear_and_does_not_call(usage, database, cap_source):
     model = ModelInfo(name="reasoning", tiers={ModelTier.STANDARD}, min_max_tokens=128)
     provider = MockProvider(models=[model])
-    req = request(max_tokens_cap=127 if cap_source == "request" else None)
+    req = request()
     budget = BudgetPolicy(max_tokens_per_request=req.input_token_estimate() + 127)
     settings = ProviderSettings(
         _env_file=None,
@@ -251,6 +251,30 @@ async def test_minimum_conflict_is_clear_and_does_not_call(usage, database, cap_
         await ModelRouter([provider], BudgetGuard(usage, settings)).complete(req)
     assert not provider.requests
     assert await records(database) == ([], [])
+
+
+@pytest.mark.parametrize("cap", [1, 127, 128])
+async def test_request_cap_below_model_minimum_is_raised_for_that_model(usage, cap):
+    provider = MockProvider(
+        models=[ModelInfo(name="reasoning", tiers={ModelTier.STANDARD}, min_max_tokens=128)]
+    )
+    req = request(max_tokens_cap=cap)
+    await ModelRouter([provider], BudgetGuard(usage, ProviderSettings(_env_file=None))).complete(
+        req
+    )
+    sent = provider.requests[0]
+    assert sent.max_tokens == 128 and sent.max_tokens_cap == 128
+    assert req.max_tokens_cap == cap
+
+
+async def test_request_cap_above_model_minimum_is_unchanged(usage):
+    provider = MockProvider(
+        models=[ModelInfo(name="reasoning", tiers={ModelTier.STANDARD}, min_max_tokens=128)]
+    )
+    await ModelRouter([provider], BudgetGuard(usage, ProviderSettings(_env_file=None))).complete(
+        request(max_tokens_cap=1024)
+    )
+    assert provider.requests[0].max_tokens_cap == 1024
 
 
 async def test_minimum_at_exact_output_and_total_cap_is_allowed(usage):
@@ -528,11 +552,11 @@ async def test_direct_provider_honors_price_override_and_explicit_token_cap(perm
     assert result.cost_usd == pytest.approx(0.000011)
     assert not result.cost_estimate_unknown
     create.reset_mock()
-    with pytest.raises(ProviderError, match=r"minimum=128.*cap=127"):
-        await provider.complete(
-            request(model="openai/gpt-oss-20b", tier=ModelTier.LIGHT, max_tokens_cap=127)
-        )
-    create.assert_not_awaited()
+    # A request-level cap below the model minimum is raised for that model, not failed.
+    await provider.complete(
+        request(model="openai/gpt-oss-20b", tier=ModelTier.LIGHT, max_tokens_cap=127)
+    )
+    assert create.await_args.kwargs["max_tokens"] == 128
 
 
 async def test_reconciliation_preserves_finalized_rows_and_rolls_back_failed_event(

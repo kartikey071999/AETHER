@@ -59,9 +59,9 @@ def test_azure_defaults_allow_real_use_bounded_by_request_and_token_caps():
     budgets = ProviderSettings(_env_file=None).budgets
     astra, opus = budgets["azure_openai"], budgets["azure_anthropic"]
     assert (astra.max_requests_per_day, astra.max_tokens_per_day) == (1000, 3_000_000)
-    assert (astra.max_concurrent_requests, astra.max_tokens_per_request) == (4, 8192)
+    assert (astra.max_concurrent_requests, astra.max_tokens_per_request) == (4, 32_768)
     assert (opus.max_requests_per_day, opus.max_tokens_per_day) == (300, 1_500_000)
-    assert (opus.max_concurrent_requests, opus.max_tokens_per_request) == (2, 16_384)
+    assert (opus.max_concurrent_requests, opus.max_tokens_per_request) == (2, 32_768)
     assert astra.allow_unpriced and opus.allow_unpriced
     assert not budgets["groq"].allow_unpriced
     assert budgets["groq"].max_requests_per_day == 2000

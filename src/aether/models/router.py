@@ -275,13 +275,13 @@ class ModelRouter:
                 if response.provider != provider.name or response.model != request.model:
                     raise ProviderError(provider.name, code="response_identity_mismatch")
                 if not response.text.strip():
-                    raise EmptyCompletion(response)
+                    raise EmptyCompletion(response, max_tokens=request.max_tokens)
                 if (
                     request.response_format != "text"
                     and response.finish_reason in LENGTH_FINISH_REASONS
                 ):
                     # Structured output cut off at the limit cannot be valid JSON.
-                    raise TruncatedCompletion(response)
+                    raise TruncatedCompletion(response, max_tokens=request.max_tokens)
                 cost, unknown = estimate_cost(
                     provider.name,
                     request.model,

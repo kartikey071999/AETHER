@@ -31,6 +31,13 @@ _GENERAL = frozenset({ModelTier.LIGHT, ModelTier.STANDARD, ModelTier.REASONING, 
 _REASONING = frozenset({ModelTier.STANDARD, ModelTier.REASONING, ModelTier.PREMIUM})
 _LIGHT = frozenset({ModelTier.LIGHT, ModelTier.STANDARD})
 
+# Output budgets that fit real answers: the reasoning deployment spends part of it on hidden
+# reasoning, and the structured research JSON is longer than a 1k budget allows.
+ASTRA_MODEL = "gpt-6-astra"
+ASTRA_MIN_MAX_TOKENS = 4096
+OPUS_MODEL = "claude-opus-4-8"
+OPUS_MIN_MAX_TOKENS = 2048
+
 
 def _response_format(
     request: CompletionRequest, *, flavour: Flavour | None = None
@@ -210,35 +217,60 @@ class AzureOpenAIProvider(RemoteProvider):
         return (
             [
                 # Every tier: which agents and tiers use it is decided by the model assignment.
-                ModelInfo(name="gpt-6-astra", tiers=_GENERAL, min_max_tokens=128)
+                # A reasoning deployment: its hidden reasoning shares the output budget.
+                ModelInfo(name=ASTRA_MODEL, tiers=_GENERAL, min_max_tokens=ASTRA_MIN_MAX_TOKENS)
             ]
             if self.available()
             else []
         )
 
-    async def _complete(self, request: CompletionRequest) -> CompletionResponse:
+    async def _create(
+        self, request: CompletionRequest, messages: list[dict[str, str]], **kwargs: Any
+    ) -> Any:
+        """One chat call; low reasoning effort is dropped if the deployment rejects it."""
         if self.client is None:
             raise ProviderError(self.name, code="unavailable")
-        options = {"temperature": request.temperature} if request.temperature is not None else {}
-        messages = [message.model_dump() for message in request.messages]
+        options: dict[str, Any] = (
+            {"temperature": request.temperature} if request.temperature is not None else {}
+        )
+        if request.model == ASTRA_MODEL:
+            options["reasoning_effort"] = "low"
         try:
-            result = await self.client.chat.completions.create(
+            return await self.client.chat.completions.create(
                 model=request.model,
                 messages=messages,
                 max_completion_tokens=request.max_tokens,
-                response_format=_response_format(request, flavour="openai"),
                 **options,
+                **kwargs,
+            )
+        except openai.BadRequestError as error:
+            if "reasoning_effort" not in options or "reasoning_effort" not in str(error):
+                raise
+            del options["reasoning_effort"]
+            return await self.client.chat.completions.create(
+                model=request.model,
+                messages=messages,
+                max_completion_tokens=request.max_tokens,
+                **options,
+                **kwargs,
+            )
+
+    async def _complete(self, request: CompletionRequest) -> CompletionResponse:
+        if self.client is None:
+            raise ProviderError(self.name, code="unavailable")
+        messages = [message.model_dump() for message in request.messages]
+        try:
+            result = await self._create(
+                request, messages, response_format=_response_format(request, flavour="openai")
             )
         except openai.BadRequestError:
             if request.json_schema is None:
                 raise
             # The schema was rejected: one retry in plain JSON mode; the caller validates locally.
-            result = await self.client.chat.completions.create(
-                model=request.model,
-                messages=[{"role": "system", "content": _schema_instruction(request)}, *messages],
-                max_completion_tokens=request.max_tokens,
+            result = await self._create(
+                request,
+                [{"role": "system", "content": _schema_instruction(request)}, *messages],
                 response_format={"type": "json_object"},
-                **options,
             )
             response = _chat_response(request, self.name, result.model_dump())
             if not response.text.strip():
@@ -308,7 +340,11 @@ class AzureAnthropicProvider(RemoteProvider):
         )
 
     async def list_models(self) -> list[ModelInfo]:
-        return [ModelInfo(name="claude-opus-4-8", tiers=_GENERAL)] if self.available() else []
+        return (
+            [ModelInfo(name=OPUS_MODEL, tiers=_GENERAL, min_max_tokens=OPUS_MIN_MAX_TOKENS)]
+            if self.available()
+            else []
+        )
 
     async def _complete(self, request: CompletionRequest) -> CompletionResponse:
         if self.client is None:
@@ -532,7 +568,7 @@ class MockProvider:
                 latency_ms=0,
             )
         if not response.text.strip():
-            raise EmptyCompletion(response)
+            raise EmptyCompletion(response, max_tokens=request.max_tokens)
         return response
 
     async def health(self) -> ProviderHealth:

@@ -47,10 +47,15 @@ class CompletionRequest(BaseModel):
         self, model: "ModelInfo", *, max_tokens_per_request: int | None = None
     ) -> "CompletionRequest":
         output_tokens = max(self.max_tokens, model.min_max_tokens)
+        # A request-level cap below the model's minimum would fail on every call; the model
+        # minimum wins there. Provider and per-request budget caps below it still fail.
+        request_cap = (
+            None if self.max_tokens_cap is None else max(self.max_tokens_cap, model.min_max_tokens)
+        )
         caps = [
             cap
             for cap in (
-                self.max_tokens_cap,
+                request_cap,
                 (
                     max_tokens_per_request - self.input_token_estimate()
                     if max_tokens_per_request is not None
@@ -64,7 +69,13 @@ class CompletionRequest(BaseModel):
                 f"required max_tokens={output_tokens} (model minimum={model.min_max_tokens}) "
                 f"exceeds tokens per request output cap={min(caps)}"
             )
-        return self.model_copy(update={"model": model.name, "max_tokens": output_tokens})
+        return self.model_copy(
+            update={
+                "model": model.name,
+                "max_tokens": output_tokens,
+                "max_tokens_cap": request_cap,
+            }
+        )
 
     def input_token_estimate(self) -> int:
         """Conservative byte-based reservation, including message/schema framing."""
