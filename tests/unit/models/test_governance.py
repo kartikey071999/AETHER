@@ -538,3 +538,71 @@ async def test_unreadable_durable_state_fails_closed(database, usage):
 
 def test_breaker_cooldown_defaults_to_thirty_minutes():
     assert ProviderSettings(_env_file=None).circuit_breaker_cooldown_seconds == 1800
+
+
+class AzureMock(MockProvider):
+    """A scripted provider named like Azure that always answers with a large completion."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="azure_openai", models=[ModelInfo(name="astra", tiers=STANDARD, min_max_tokens=1)]
+        )
+
+    async def complete(self, request: CompletionRequest) -> CompletionResponse:
+        self.requests.append(request)
+        return CompletionResponse(
+            text="ok",
+            provider=self.name,
+            model=request.model or "",
+            input_tokens=5000,
+            output_tokens=5000,
+            latency_ms=0,
+            finish_reason="stop",
+        )
+
+
+async def test_azure_tokens_do_not_count_towards_the_objective_token_allowance(database, usage):
+    provider = AzureMock()
+    settings = settings_with(agent_budgets={"FORGE": {"max_tokens_per_objective": 1000}})
+    models, governor = governed(database, usage, provider, settings)
+    call = ModelCallContext(objective_id=uuid4())
+    for _ in range(5):
+        await models.complete(request(), call)
+    requests, tokens, failures = governor.usage(call.objective_id, AgentId.FORGE)
+    assert (requests, tokens, failures) == (5, 0, 0)
+    assert await events_of(database, "provider.budget_exhausted") == []
+
+
+async def test_azure_calls_still_count_towards_the_request_allowance(database, usage):
+    provider = AzureMock()
+    settings = settings_with(agent_budgets={"FORGE": {"max_requests_per_objective": 2}})
+    models, _ = governed(database, usage, provider, settings)
+    call = ModelCallContext(objective_id=uuid4())
+    await models.complete(request(), call)
+    await models.complete(request(), call)
+    with pytest.raises(AgentBudgetExceeded):
+        await models.complete(request(), call)
+    assert len(provider.requests) == 2
+
+
+async def test_restart_reseeds_the_allowance_without_azure_tokens(database, usage):
+    provider = AzureMock()
+    settings = settings_with(agent_budgets={"FORGE": {"max_tokens_per_objective": 1000}})
+    models, _ = governed(database, usage, provider, settings)
+    call = ModelCallContext(objective_id=uuid4())
+    await models.complete(request(), call)
+    fresh_models, fresh = governed(database, usage, provider, settings)
+    await fresh_models.complete(request(), call)
+    assert fresh.usage(call.objective_id, AgentId.FORGE) == (2, 0, 0)
+
+
+async def test_non_exempt_providers_still_spend_the_token_allowance(database, usage):
+    provider = TruncatingProvider(["m0"])
+    settings = settings_with(
+        agent_budgets={"FORGE": {"max_tokens_per_objective": 1000}}, circuit_breaker_failures=0
+    )
+    models, governor = governed(database, usage, provider, settings)
+    call = ModelCallContext(objective_id=uuid4())
+    with pytest.raises(Exception):  # noqa: B017
+        await models.complete(request(response_format="json_object"), call)
+    assert governor.usage(call.objective_id, AgentId.FORGE)[1] > 0

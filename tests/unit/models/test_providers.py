@@ -46,10 +46,6 @@ def configured(**kwargs):
         ANTHROPIC_API_KEY="test-opus-credential",
         API_VERSION="2023-06-01",
         max_retries=0,
-        budgets={
-            "azure_openai": {"allow_unpriced": True},
-            "azure_anthropic": {"allow_unpriced": True},
-        },
         **kwargs,
     )
 
@@ -132,8 +128,13 @@ async def test_real_sdk_payloads_and_results_with_mock_transport(
     assert payload["model"] == model
     assert payload["messages"] == [{"role": "user", "content": "Hello"}]
     key = "max_completion_tokens" if provider_type is AzureOpenAIProvider else "max_tokens"
-    assert payload[key] == (5 if provider_type is AzureAnthropicProvider else 128)
-    if provider_type is GroqProvider:
+    expected_tokens = {
+        GroqProvider: 128,
+        AzureOpenAIProvider: integrations.ASTRA_MIN_MAX_TOKENS,
+        AzureAnthropicProvider: integrations.OPUS_MIN_MAX_TOKENS,
+    }
+    assert payload[key] == expected_tokens[provider_type]
+    if provider_type in {GroqProvider, AzureOpenAIProvider}:
         assert payload["reasoning_effort"] == "low"
     if provider_type is AzureAnthropicProvider:
         assert sent[0].headers["anthropic-version"] == "2023-06-01"

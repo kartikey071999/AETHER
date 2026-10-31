@@ -429,8 +429,8 @@ class ScoutAgent(BaseAgent):
                     tier=ModelTier.LIGHT,
                     response_format="json_schema",
                     json_schema=schema.model_json_schema(),
-                    max_tokens=1024,
-                    max_tokens_cap=1024,
+                    max_tokens=2048,
+                    max_tokens_cap=8192,
                     messages=(
                         CompletionMessage(role="system", content=instructions),
                         CompletionMessage(role="user", content=data),

@@ -659,8 +659,7 @@ class WardenAgent(BaseAgent):
             ),
             tier=ModelTier.REASONING,
             response_format="json_object",
-            max_tokens=600,
-            temperature=0,
+            max_tokens=2048,
         )
         try:
             response = await ctx.models.complete(

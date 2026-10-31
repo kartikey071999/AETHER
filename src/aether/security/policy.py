@@ -39,8 +39,12 @@ ACTION_OPERATION_KINDS: Mapping[str, frozenset[OperationKind]] = MappingProxyTyp
         ),
         "verification.run": frozenset({_K.SUBPROCESS, _K.FILE_READ}),
         "records.read": frozenset({_K.FILE_READ}),
+        # LEDGER's light-tier record summaries; verification verdicts stay deterministic.
+        "records.summarize": frozenset({_K.LLM_CALL}),
         "research.create": frozenset({_K.HTTP_REQUEST, _K.WEB_FETCH, _K.FILE_READ, _K.LLM_CALL}),
         "security.evaluate": frozenset({_K.HTTP_REQUEST, _K.FILE_READ}),
+        # WARDEN's advisory LLM risk summary only; the decision rule stays deterministic code.
+        "security.advise": frozenset({_K.LLM_CALL}),
         "implementation.propose": frozenset({_K.FILE_READ, _K.LLM_CALL}),
         "communication.prepare": frozenset({_K.LLM_CALL}),
         # Only the narrow outbox delivery tool: see ``outbox_violation``.

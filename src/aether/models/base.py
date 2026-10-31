@@ -74,12 +74,19 @@ class EmptyCompletion(ProviderError):
 
     code_name = "empty_completion"
 
-    def __init__(self, response: CompletionResponse) -> None:
+    def __init__(self, response: CompletionResponse, *, max_tokens: int | None = None) -> None:
         self.finish_reason = response.finish_reason
         self.input_tokens = response.input_tokens
         self.output_tokens = response.output_tokens
         self.usage_estimated = response.usage_estimated
-        super().__init__(response.provider, code=self.code_name)
+        # Metadata only, never the (possibly sensitive) completion text.
+        detail = (
+            f"finish_reason={response.finish_reason or 'unknown'}, "
+            f"output_tokens={response.output_tokens}"
+        )
+        if max_tokens is not None:
+            detail += f", max_tokens={max_tokens}"
+        super().__init__(response.provider, code=self.code_name, detail=detail)
 
     @property
     def truncated(self) -> bool:
@@ -202,7 +209,7 @@ class RemoteProvider:
         started = time.monotonic()
         response = await self._run(lambda: self._complete(request), request)
         if not response.text.strip():
-            raise EmptyCompletion(response)
+            raise EmptyCompletion(response, max_tokens=request.max_tokens)
         cost, unknown = estimate_cost(
             self.name,
             model.name,

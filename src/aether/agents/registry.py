@@ -36,12 +36,12 @@ AGENT_DEFINITIONS: tuple[AgentDefinition, ...] = (
     AgentDefinition(
         AgentId.LEDGER,
         "Maintains operational records, tracks requirements, and independently verifies outcomes.",
-        ("records.read", "verification.run", "verification.report"),
+        ("records.read", "records.summarize", "verification.run", "verification.report"),
     ),
     AgentDefinition(
         AgentId.WARDEN,
         "Evaluates security risks and records scoped authorization decisions.",
-        ("security.evaluate", "authorization.decide"),
+        ("security.evaluate", "security.advise", "authorization.decide"),
     ),
     AgentDefinition(
         AgentId.MUSE,
