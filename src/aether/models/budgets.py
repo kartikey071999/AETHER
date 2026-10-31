@@ -6,12 +6,17 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
 from uuid import UUID
 
-from aether.models.contracts import CompletionRequest, CompletionResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from aether.models.base import EmptyCompletion
+from aether.models.contracts import CompletionRequest, CompletionResponse, ModelInfo
 from aether.models.costs import estimate_cost
 from aether.models.settings import BudgetPolicy, ProviderSettings
 from aether.observability.events import build_event
 from aether.observability.recorder import EventRecorder
 from aether.security import OperationBlocked
+from aether.storage.models import ProviderUsageRecord
 from aether.storage.repositories.provider_usage import ProviderUsageRepository, UsageTotals
 
 
@@ -44,6 +49,24 @@ class BudgetGuard:
         self.recorder = recorder or EventRecorder()
         self.clock = clock
 
+    def prepare_request(
+        self, provider: str, model: ModelInfo, request: CompletionRequest
+    ) -> CompletionRequest:
+        policy = self.settings.budgets.get(provider)
+        if policy is None:
+            raise BudgetExceeded(f"{provider}: no budget policy configured")
+        model_policy = self.settings.model_budgets.get(f"{provider}/{model.name}")
+        cap = min(
+            policy.max_tokens_per_request,
+            model_policy.max_tokens_per_request if model_policy else policy.max_tokens_per_request,
+        )
+        try:
+            return request.with_model_limits(model, max_tokens_per_request=cap).model_copy(
+                update={"provider": provider}
+            )
+        except ValueError as error:
+            raise BudgetExceeded(f"{provider}: {error}") from None
+
     async def reserve(self, provider: str, request: CompletionRequest) -> Reservation:
         if request.model is None:
             raise ValueError("budget admission requires a selected model")
@@ -52,7 +75,25 @@ class BudgetGuard:
             raise BudgetExceeded(f"{provider}: no budget policy configured")
         input_tokens = request.input_token_estimate()
         tokens = input_tokens + request.max_tokens
-        cost, unknown = estimate_cost(provider, request.model, input_tokens, request.max_tokens)
+        if request.max_tokens_cap is not None and request.max_tokens > request.max_tokens_cap:
+            raise BudgetExceeded(f"{provider}: exceeded request output token cap")
+        cost, unknown = estimate_cost(
+            provider,
+            request.model,
+            input_tokens,
+            request.max_tokens,
+            prices=self.settings.prices,
+        )
+        model_policy = self.settings.model_budgets.get(f"{provider}/{request.model}")
+        if (
+            unknown
+            and not policy.allow_unpriced
+            and (
+                policy.max_cost_usd_per_day is not None
+                or (model_policy is not None and model_policy.max_cost_usd_per_day is not None)
+            )
+        ):
+            raise BudgetExceeded(f"{provider}: price unknown while a USD ceiling is configured")
         cost = cost.quantize(Decimal("0.000001"), rounding=ROUND_CEILING)
         async with self.usage.locked(provider) as session:
             now = self.clock()
@@ -64,7 +105,6 @@ class BudgetGuard:
                 session, provider=provider, since=day, until=day + timedelta(days=1)
             )
             self._check(provider, policy, totals, tokens, cost)
-            model_policy = self.settings.model_budgets.get(f"{provider}/{request.model}")
             if model_policy is not None:
                 model_totals = await self.usage.totals_in(
                     session,
@@ -135,15 +175,28 @@ class BudgetGuard:
     ) -> None:
         """Finalize usage and both events atomically; write errors propagate, never fall back."""
         blocked = isinstance(error, OperationBlocked)
-        estimated = response is None or response.usage_estimated
+        measured = (
+            response
+            if response is not None
+            else (error if isinstance(error, EmptyCompletion) else None)
+        )
+        estimated = measured is None or measured.usage_estimated
         input_tokens = (
-            response.input_tokens if response else (0 if blocked else reservation.input_tokens)
+            measured.input_tokens
+            if measured is not None
+            else (0 if blocked else reservation.input_tokens)
         )
         output_tokens = (
-            response.output_tokens if response else (0 if blocked else reservation.output_tokens)
+            measured.output_tokens
+            if measured is not None
+            else (0 if blocked else reservation.output_tokens)
         )
         cost, unknown = estimate_cost(
-            reservation.provider, reservation.model, input_tokens, output_tokens
+            reservation.provider,
+            reservation.model,
+            input_tokens,
+            output_tokens,
+            prices=self.settings.prices,
         )
         # Storage is Numeric(12, 6); round upward rather than undercount small calls.
         cost = cost.quantize(Decimal("0.000001"), rounding=ROUND_CEILING)
@@ -210,3 +263,73 @@ class BudgetGuard:
                         payload=payload,
                     ),
                 )
+
+
+@dataclass(frozen=True)
+class ReconciliationSummary:
+    abandoned: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: Decimal = Decimal(0)
+
+
+async def reconcile_stale_reservations(
+    sessions: async_sessionmaker[AsyncSession], *, older_than: timedelta, now: datetime
+) -> ReconciliationSummary:
+    """Release expired slots; older_than must include the call timeout and safety margin."""
+    if older_than <= timedelta(0):
+        raise ValueError("reservation age must be positive and include a timeout safety margin")
+    if now.utcoffset() is None:
+        raise ValueError("reconciliation time must include a timezone")
+    now = now.astimezone(UTC)
+    cutoff = now - older_than
+    filters = (
+        ProviderUsageRecord.status == "reserved",
+        ProviderUsageRecord.occurred_at < cutoff,
+    )
+    async with sessions() as session:
+        providers = list(
+            await session.scalars(select(ProviderUsageRecord.provider).where(*filters).distinct())
+        )
+    usage = ProviderUsageRepository(sessions)
+    recorder = EventRecorder()
+    abandoned = input_tokens = output_tokens = 0
+    cost = Decimal(0)
+    for provider in sorted(providers):
+        async with usage.locked(provider) as session:
+            rows = await session.scalars(
+                select(ProviderUsageRecord)
+                .where(*filters, ProviderUsageRecord.provider == provider)
+                .with_for_update()
+            )
+            for row in rows:
+                row.status = "abandoned"
+                # Charge old interrupted calls to the recovery day, rather than freeing quota.
+                row.occurred_at = now
+                recorder.add(
+                    session,
+                    build_event(
+                        "provider.usage_recorded",
+                        timestamp=now,
+                        source="aether.models",
+                        actor=row.agent or "SYSTEM",
+                        aggregate_type="provider_usage",
+                        aggregate_id=row.id,
+                        correlation_id=row.id,
+                        task_id=row.task_id,
+                        idempotency_key=f"provider.reservation_abandoned/{row.id}",
+                        payload={
+                            "provider": row.provider,
+                            "model": row.model,
+                            "input_tokens": row.input_tokens,
+                            "output_tokens": row.output_tokens,
+                            "cost_usd": row.cost_usd,
+                            "status": "abandoned",
+                        },
+                    ),
+                )
+                abandoned += 1
+                input_tokens += row.input_tokens
+                output_tokens += row.output_tokens
+                cost += row.cost_usd
+    return ReconciliationSummary(abandoned, input_tokens, output_tokens, cost)

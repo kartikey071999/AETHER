@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from aether.models.contracts import ModelTier
+from aether.models.costs import ModelPrice
 
 
 class BudgetPolicy(BaseModel):
@@ -16,6 +17,7 @@ class BudgetPolicy(BaseModel):
     max_cost_usd_per_day: float | None = Field(default=10, ge=0)
     max_tokens_per_request: int = Field(default=32_768, ge=1)
     max_concurrent_requests: int = Field(default=2, ge=1)
+    allow_unpriced: bool = False
 
 
 def default_budgets() -> dict[str, BudgetPolicy]:
@@ -78,8 +80,26 @@ class ProviderSettings(BaseSettings):
     budgets: dict[str, BudgetPolicy] = Field(default_factory=default_budgets)
     # Keys are "provider/model"; these caps apply in addition to provider-wide caps.
     model_budgets: dict[str, BudgetPolicy] = Field(default_factory=dict)
+    prices: dict[str, ModelPrice] = Field(default_factory=dict)
     # Explicit suitability declaration; do not infer reasoning ability from a model's name.
     ollama_models: dict[str, list[ModelTier]] = Field(default_factory=dict)
+
+    @field_validator("prices", "model_budgets")
+    @classmethod
+    def _validate_model_keys(cls, value: dict) -> dict:
+        for key in value:
+            provider, separator, model = key.partition("/")
+            if (
+                not separator
+                or not provider.strip()
+                or not model.strip()
+                or provider != provider.strip()
+                or model != model.strip()
+                or len(provider) > 64
+                or len(model) > 200
+            ):
+                raise ValueError("model settings keys must be provider/model")
+        return value
 
     @field_validator("*", mode="before")
     @classmethod

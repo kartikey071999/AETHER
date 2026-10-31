@@ -5,7 +5,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from decimal import Decimal
 
-from aether.models.base import ModelProvider, ProviderError, retry_delay
+from aether.models.base import EmptyCompletion, ModelProvider, ProviderError, retry_delay
 from aether.models.budgets import BudgetExceeded, BudgetGuard
 from aether.models.contracts import CompletionRequest, CompletionResponse, ModelInfo, ModelTier
 from aether.models.costs import estimate_cost
@@ -67,20 +67,26 @@ class ModelRouter:
                 ]
                 eligible.sort(key=lambda model: self._cost(provider.name, model, request))
                 for model in eligible:
-                    routed = request.model_copy(
-                        update={"provider": provider.name, "model": model.name}
-                    )
                     try:
+                        routed = self.budgets.prepare_request(provider.name, model, request)
                         return await self._try_model(provider, routed)
                     except (BudgetExceeded, ProviderError, OperationBlocked) as error:
                         # Only safe classification is retained; never propagate SDK text into events.
-                        reasons.append(f"{provider.name}/{model.name}: {type(error).__name__}")
+                        detail = (
+                            str(error)
+                            if isinstance(error, BudgetExceeded)
+                            else type(error).__name__
+                        )
+                        reasons.append(f"{provider.name}/{model.name}: {detail}")
         raise NoModelAvailable(reasons or ["no provider supports the requested tier/model"])
 
-    @staticmethod
-    def _cost(provider: str, model: ModelInfo, request: CompletionRequest) -> Decimal:
+    def _cost(self, provider: str, model: ModelInfo, request: CompletionRequest) -> Decimal:
         return estimate_cost(
-            provider, model.name, request.input_token_estimate(), request.max_tokens
+            provider,
+            model.name,
+            request.input_token_estimate(),
+            max(request.max_tokens, model.min_max_tokens),
+            prices=self.settings.prices,
         )[0]
 
     async def _try_model(
@@ -96,8 +102,14 @@ class ModelRouter:
                     response = await provider.complete(request)
                 if response.provider != provider.name or response.model != request.model:
                     raise ProviderError(provider.name, code="response_identity_mismatch")
+                if not response.text.strip():
+                    raise EmptyCompletion(response)
                 cost, unknown = estimate_cost(
-                    provider.name, request.model, response.input_tokens, response.output_tokens
+                    provider.name,
+                    request.model,
+                    response.input_tokens,
+                    response.output_tokens,
+                    prices=self.settings.prices,
                 )
                 response = response.model_copy(
                     update={

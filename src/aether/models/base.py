@@ -44,6 +44,17 @@ class ProviderError(RuntimeError):
         super().__init__(f"{provider}: {code}")
 
 
+class EmptyCompletion(ProviderError):
+    """An unusable completion whose measured (or estimated) usage still counts."""
+
+    def __init__(self, response: CompletionResponse) -> None:
+        self.finish_reason = response.finish_reason
+        self.input_tokens = response.input_tokens
+        self.output_tokens = response.output_tokens
+        self.usage_estimated = response.usage_estimated
+        super().__init__(response.provider, code="empty_completion")
+
+
 class ModelProvider(Protocol):
     name: str
 
@@ -135,12 +146,30 @@ class RemoteProvider:
         if request.model is None:
             raise ValueError("a routed model is required")
         models = await self.list_models()
-        if not any(model.name == request.model and request.tier in model.tiers for model in models):
+        model = next(
+            (
+                model
+                for model in models
+                if model.name == request.model and request.tier in model.tiers
+            ),
+            None,
+        )
+        if model is None:
             raise ProviderError(self.name, code="unsupported_model_or_tier")
+        try:
+            request = request.with_model_limits(model)
+        except ValueError as error:
+            raise ProviderError(self.name, code=str(error)) from None
         started = time.monotonic()
         response = await self._run(lambda: self._complete(request), request)
+        if not response.text.strip():
+            raise EmptyCompletion(response)
         cost, unknown = estimate_cost(
-            self.name, request.model, response.input_tokens, response.output_tokens
+            self.name,
+            model.name,
+            response.input_tokens,
+            response.output_tokens,
+            prices=self.settings.prices,
         )
         return response.model_copy(
             update={

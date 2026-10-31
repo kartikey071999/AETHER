@@ -32,6 +32,7 @@ class CompletionRequest(BaseModel):
 
     messages: tuple[CompletionMessage, ...] = Field(min_length=1, repr=False)
     max_tokens: int = Field(default=1024, ge=1)
+    max_tokens_cap: int | None = Field(default=None, ge=1)
     temperature: float | None = Field(default=None, ge=0, le=2)
     response_format: Literal["text", "json_object", "json_schema"] = "text"
     json_schema: dict[str, JsonValue] | None = Field(default=None, repr=False)
@@ -41,6 +42,29 @@ class CompletionRequest(BaseModel):
     objective_id: UUID | None = None
     provider: str | None = Field(default=None, min_length=1, max_length=64)
     model: str | None = Field(default=None, min_length=1, max_length=200)
+
+    def with_model_limits(
+        self, model: "ModelInfo", *, max_tokens_per_request: int | None = None
+    ) -> "CompletionRequest":
+        output_tokens = max(self.max_tokens, model.min_max_tokens)
+        caps = [
+            cap
+            for cap in (
+                self.max_tokens_cap,
+                (
+                    max_tokens_per_request - self.input_token_estimate()
+                    if max_tokens_per_request is not None
+                    else None
+                ),
+            )
+            if cap is not None
+        ]
+        if caps and output_tokens > min(caps):
+            raise ValueError(
+                f"required max_tokens={output_tokens} (model minimum={model.min_max_tokens}) "
+                f"exceeds tokens per request output cap={min(caps)}"
+            )
+        return self.model_copy(update={"model": model.name, "max_tokens": output_tokens})
 
     def input_token_estimate(self) -> int:
         """Conservative byte-based reservation, including message/schema framing."""
@@ -72,6 +96,7 @@ class ModelInfo(BaseModel):
 
     name: str = Field(min_length=1, max_length=200)
     tiers: frozenset[ModelTier]
+    min_max_tokens: int = Field(default=1, ge=1)
 
 
 class ProviderHealth(BaseModel):

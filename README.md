@@ -108,6 +108,16 @@ Temperature is optional and omitted by default. Anthropic's installed SDK does
 not expose temperature; explicit temperature requests skip that provider with
 an error instead of silently discarding the requested sampling control.
 
+Whitespace-only or missing completion text raises `EmptyCompletion(ProviderError)`,
+including finish reason, input/output counts, and whether usage is estimated.
+The router records the failed attempt's usage and falls back, without retrying
+that model. Nonempty text with a length finish reason is returned with that reason.
+`ModelInfo.min_max_tokens` defaults to 1; Groq gpt-oss/Qwen and Azure Astra use 128.
+Smaller requests are raised to that minimum. Optional `CompletionRequest.max_tokens_cap`
+limits output tokens; provider/model per-request budgets limit input plus output.
+If either cap cannot accommodate the minimum, admission fails with a clear reason,
+without calling the model. Groq gpt-oss requests use `reasoning_effort="low"`.
+
 Every completion attempt reserves a persisted `provider_usage` row before the
 call, including retries. A UTC daily quota checks request count, conservative
 input/output token estimates, estimated USD cost, per-request tokens, and active
@@ -130,13 +140,29 @@ when billable consumption is unknown. Security-blocked calls consume no tokens.
 Costs in the ledger round upward to its micro-dollar precision. Final usage,
 `provider.usage_recorded`, and `provider.request_completed` commit atomically.
 Database failures propagate instead of routing around failed accounting.
-Interrupted reservations remain fail-closed and require explicit reconciliation
-before reusing their concurrency slots; automatic recovery is not implemented.
+Interrupted reservations remain fail-closed until explicit reconciliation:
+`await reconcile_stale_reservations(database.sessions,
+older_than=timedelta(seconds=settings.timeout_seconds + 30), now=datetime.now(UTC))`.
+Choose a safety margin appropriate to the deployment (30 seconds in this example).
+Only reservations strictly older than the timeout plus margin become `abandoned`;
+counts and costs are retained, their accounting timestamp moves to the recovery
+day so even pre-midnight calls count against today's budgets, and each row gets
+a `provider.usage_recorded` event with status `abandoned`. This operation is
+idempotent, serialized with admission, and returns `ReconciliationSummary`
+(`abandoned`, `input_tokens`, `output_tokens`, `cost_usd`). No runtime/CLI recovery
+hook is wired yet. Never reconcile while calls older than the chosen margin
+could still be in flight.
 
 Groq prices are approximate constants from its model API. Unknown remote model
 prices return zero **with `cost_estimate_unknown=True`**, not an assertion of free
-inference. In particular, Azure cost ceilings cannot account for actual dollars
-until prices are supplied; its low request/token caps still apply. Byte-based
+inference. Override any model using `AETHER_PROVIDER_PRICES` JSON, for example
+`{"groq/openai/gpt-oss-20b":{"input_per_mtok":0.075,"output_per_mtok":0.30}}`.
+Both rates must be finite and nonnegative, in USD per million tokens; overrides
+apply to routing, reservations, responses, and final accounting. Azure prices
+are unknown by default, not guessed. A provider or model USD ceiling refuses
+unknown-price models unless the provider's budget explicitly sets `allow_unpriced=true`,
+for example `AETHER_PROVIDER_BUDGETS={"azure_openai":{"allow_unpriced":true}}`.
+That opt-in cannot enforce actual dollar usage; request/token caps still apply. Byte-based
 input reservations are conservative estimates, not model-specific tokenizers.
 Timeouts/unknown failure consumption remain estimates, not billing reports.
 
@@ -154,7 +180,7 @@ never prompt/response/error bodies. Anthropic's installed SDK uses its existing
 
 All default tests are offline with mock SDKs/transports. The optional live smoke
 test is skipped unless `AETHER_LIVE_TESTS=1`; it makes at most one Groq completion
-attempt with `max_tokens=5`. It uses an isolated test ledger, not the runtime's
+attempt with `max_tokens=200`. It uses an isolated test ledger, not the runtime's
 daily budget database. Do not run it routinely or treat it as production usage
 accounting.
 
