@@ -54,9 +54,22 @@ async def test_one_tiny_structured_azure_completion(tmp_path, provider_type):
             CompletionRequest(
                 messages=[
                     {
+                        "role": "system",
+                        "content": (
+                            "You critique candidate approaches. Rank every candidate: "
+                            "ranked_indices must list the zero-based indices of ALL candidates, "
+                            "best first, with no repeats and never empty. rationale must be a "
+                            "non-empty sentence."
+                        ),
+                    },
+                    {
                         "role": "user",
-                        "content": "Rank candidates 0 and 1 (best first) and give a one-line rationale.",
-                    }
+                        "content": (
+                            "Candidates:\n0. Cache results in memory.\n"
+                            "1. Recompute on every request.\n"
+                            "Which is better for a read-heavy service?"
+                        ),
+                    },
                 ],
                 tier=ModelTier.PREMIUM,
                 max_tokens=400,

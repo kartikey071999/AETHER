@@ -103,6 +103,57 @@ def test_anthropic_keeps_required_and_generic_keeps_constraints():
     assert generic["properties"]["candidates"]["maxItems"] == 8
 
 
+def test_dropped_constraints_are_restated_in_descriptions():
+    schema = strict_json_schema(CritiqueDraft.model_json_schema(), flavour="openai")
+    ranked = schema["properties"]["ranked_indices"]
+    assert ranked["description"] == "Must contain at least 1 item. At most 8 items."
+    assert "minItems" not in ranked and "maxItems" not in ranked
+    assert schema["properties"]["rationale"]["description"] == "At least 1 character."
+
+    finding = strict_json_schema(FindingDraft.model_json_schema(), flavour="openai")
+    assert finding["properties"]["confidence"]["description"] == "Between 0 and 1."
+    assert finding["properties"]["candidates"]["description"] == (
+        "Must contain at least 1 item. At most 8 items."
+    )
+    resources = finding["properties"]["candidates"]["items"]["properties"]["resource_needs"]
+    cpu = resources["anyOf"][0]["properties"]["cpu_percent"]["anyOf"][0]
+    assert cpu["description"] == "Between 0.0 and 100.0."
+
+
+def test_descriptions_keep_existing_text_and_anthropic_keeps_one_item_minimum():
+    source = {
+        "type": "object",
+        "properties": {
+            "tags": {
+                "type": "array",
+                "items": {"type": "string", "maxLength": 20},
+                "description": "Topic tags.",
+                "minItems": 1,
+                "maxItems": 3,
+                "uniqueItems": True,
+            },
+            "mood": {"type": "string", "format": "emoji"},
+            "score": {"type": "integer", "exclusiveMinimum": 0, "multipleOf": 5},
+        },
+        "required": ["tags", "mood", "score"],
+    }
+    openai_schema = strict_json_schema(source, flavour="openai")["properties"]
+    assert openai_schema["tags"]["description"] == (
+        "Topic tags. Must contain at least 1 item. At most 3 items. Items must be unique."
+    )
+    assert openai_schema["tags"]["items"]["description"] == "At most 20 characters."
+    assert (
+        openai_schema["mood"]["description"] == "Format: emoji."
+        and "format" not in openai_schema["mood"]
+    )
+    assert openai_schema["score"]["description"] == "Greater than 0. Must be a multiple of 5."
+    anthropic_tags = strict_json_schema(source, flavour="anthropic")["properties"]["tags"]
+    assert anthropic_tags["minItems"] == 1
+    assert anthropic_tags["description"] == "Topic tags. At most 3 items. Items must be unique."
+    generic_tags = strict_json_schema(source, flavour="generic")["properties"]["tags"]
+    assert generic_tags["description"] == "Topic tags." and generic_tags["maxItems"] == 3
+
+
 def test_recursive_refs_are_kept_and_normalised():
     schema = {
         "$defs": {

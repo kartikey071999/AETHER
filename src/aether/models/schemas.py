@@ -47,6 +47,9 @@ def strict_json_schema(schema: dict[str, Any], *, flavour: Flavour) -> dict[str,
     * ``openai``: as anthropic, plus every property is required and originally optional
       properties become nullable (``anyOf`` with ``null``).
 
+    Dropped constraints are restated in the property's ``description`` so the model still sees
+    them; callers keep validating the output with the original Pydantic model.
+
     Recursive refs cannot be inlined; their definitions are kept (and normalised) in ``$defs``.
     """
     return _Normaliser(schema, flavour).run()
@@ -111,12 +114,18 @@ class _Normaliser:
         strict = self.flavour != "generic"
         result = dict(node)
         if strict:
+            rules = _rules(result, self.flavour)
             for key in _LENGTH_AND_RANGE & result.keys():
                 if key == "minItems" and result[key] in (0, 1) and self.flavour == "anthropic":
                     continue
                 del result[key]
             if "format" in result and result["format"] not in _FORMATS:
-                del result["format"]
+                rules.append(f"Format: {result.pop('format')}.")
+            if rules:
+                # The provider cannot enforce these, so state them where the model reads them.
+                result["description"] = " ".join(
+                    part for part in (str(result.get("description", "")).strip(), *rules) if part
+                )
             if "oneOf" in result:
                 result["anyOf"] = [*result.get("anyOf", []), *result.pop("oneOf")]
         for key in _SCHEMA_VALUES:
@@ -152,6 +161,40 @@ class _Normaliser:
         if required or _nullable(converted):
             return converted
         return {"anyOf": [converted, dict(_NULL)]}
+
+
+def _plural(count: Any, noun: str) -> str:
+    return f"{count} {noun}" + ("" if count == 1 else "s")
+
+
+def _rules(node: dict[str, Any], flavour: Flavour) -> list[str]:
+    """Human-readable statements of the constraints that normalisation is about to drop."""
+    rules: list[str] = []
+    min_items, max_items = node.get("minItems"), node.get("maxItems")
+    if min_items is not None and not (flavour == "anthropic" and min_items in (0, 1)):
+        rules.append(f"Must contain at least {_plural(min_items, 'item')}.")
+    if max_items is not None:
+        rules.append(f"At most {_plural(max_items, 'item')}.")
+    if node.get("uniqueItems") is True:
+        rules.append("Items must be unique.")
+    if "minLength" in node:
+        rules.append(f"At least {_plural(node['minLength'], 'character')}.")
+    if "maxLength" in node:
+        rules.append(f"At most {_plural(node['maxLength'], 'character')}.")
+    low, high = node.get("minimum"), node.get("maximum")
+    if low is not None and high is not None:
+        rules.append(f"Between {low} and {high}.")
+    elif low is not None:
+        rules.append(f"At least {low}.")
+    elif high is not None:
+        rules.append(f"At most {high}.")
+    if "exclusiveMinimum" in node:
+        rules.append(f"Greater than {node['exclusiveMinimum']}.")
+    if "exclusiveMaximum" in node:
+        rules.append(f"Less than {node['exclusiveMaximum']}.")
+    if "multipleOf" in node:
+        rules.append(f"Must be a multiple of {node['multipleOf']}.")
+    return rules
 
 
 def _nullable(node: dict[str, Any]) -> bool:
