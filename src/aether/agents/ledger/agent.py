@@ -36,6 +36,7 @@ from aether.agents.ledger.workflow import (
     safe_workspace,
     verdict_for_status,
 )
+from aether.agents.work_queue import task_ref_in
 from aether.communication.contracts import (
     AcceptanceResult,
     BlockerKind,
@@ -275,8 +276,8 @@ class LedgerAgent(BaseAgent):
         self, message: AgentMessage, payload: ExecutionResultPayload, ctx: AgentContext
     ) -> VerificationSpec | None:
         outputs = payload.outputs
+        task = await self.work_queue(ctx).task_detail(payload.task_id)
         async with ctx.sessions() as session:
-            task = await session.get(TaskRecord, payload.task_id)
             requirement_id = (
                 payload.requirement_id
                 or message.requirement_id
@@ -830,15 +831,15 @@ class LedgerAgent(BaseAgent):
             "task_id": ids.get("task_id", spec.task_id),
             "requirement_id": ids.get("requirement_id", spec.requirement_id),
         }
-        models = {
-            "objective_id": ObjectiveRecord,
-            "task_id": TaskRecord,
-            "requirement_id": RequirementRecord,
-        }
+        models = {"objective_id": ObjectiveRecord, "requirement_id": RequirementRecord}
         envelope: dict[str, Any] = {}
         async with ctx.sessions() as session:
             for name, value in wanted.items():
-                if await existing_id(session, models[name], value) is not None:
+                if name == "task_id":
+                    exists = value is not None and await task_ref_in(session, value) is not None
+                else:
+                    exists = await existing_id(session, models[name], value) is not None
+                if exists:
                     envelope[name] = value
         if spec.correlation_id is not None:
             envelope["correlation_id"] = spec.correlation_id
@@ -966,9 +967,8 @@ class LedgerAgent(BaseAgent):
     ) -> None:
         if spec.task_id is None:
             return
-        async with ctx.sessions() as session:
-            if await session.get(TaskRecord, spec.task_id) is None:
-                return
+        if await self.work_queue(ctx).task_ref(spec.task_id) is None:
+            return
         failing = [item["criterion"] for item in run.acceptance_results if not item.get("passed")]
         evidence = [{"test_run_id": str(run.id), "failing_criteria": failing[:20]}]
         attempts = await self._consecutive_failures(run, ctx)
@@ -1075,10 +1075,11 @@ class LedgerAgent(BaseAgent):
     ) -> None:
         # RequirementRepository.create cannot take a caller id; the ledger needs the submitted
         # (or a message-derived) id so redelivery and cross-agent references stay stable.
+        linked_task = await task_ref_in(session, task_id) if task_id is not None else None
         record = RequirementRecord(
             id=requirement_id,
             objective_id=objective_id,
-            task_id=await existing_id(session, TaskRecord, task_id),
+            task_id=linked_task.id if linked_task else None,
             title=title,
             description=description,
             requirement_type=requirement_type,

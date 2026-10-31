@@ -81,8 +81,7 @@ class ScoutAgent(BaseAgent):
         elif isinstance(payload, ResearchFindingPayload) and self.agent_id is AgentId.SCOUT:
             await workflow.consolidate(message, payload, self.limits, ctx)
         elif isinstance(payload, TaskAssignPayload):
-            async with ctx.sessions() as session:
-                task = await session.get(TaskRecord, payload.task_id)
+            task = await self.work_queue(ctx).task_detail(payload.task_id, message=message)
             if task is None or task.assigned_agent != self.agent_id.value:
                 raise LookupError("assigned research task must be persisted for this agent")
             if task.objective_id != payload.objective_id:
@@ -93,11 +92,10 @@ class ScoutAgent(BaseAgent):
                 raise ValueError("blocker is routed to a different agent")
             objective_id = payload.objective_id
             if objective_id is None:
-                async with ctx.sessions() as session:
-                    task = await session.get(TaskRecord, payload.task_id)
-                    if task is None:
-                        raise LookupError("blocked task does not exist")
-                    objective_id = task.objective_id
+                task = await self.work_queue(ctx).task_detail(payload.task_id, message=message)
+                if task is None:
+                    raise LookupError("blocked task does not exist")
+                objective_id = task.objective_id
             await workflow.enqueue(
                 self.agent_id,
                 message,
@@ -141,10 +139,9 @@ class ScoutAgent(BaseAgent):
                     correlation_id=message.correlation_id,
                 )
                 return
-            async with ctx.sessions() as session:
-                task = await session.get(TaskRecord, payload.task_id)
-                if task is None:
-                    raise LookupError("verification task does not exist")
+            task = await self.work_queue(ctx).task_detail(payload.task_id, message=message)
+            if task is None:
+                raise LookupError("verification task does not exist")
             await workflow.enqueue(
                 self.agent_id,
                 message,
@@ -194,7 +191,7 @@ class ScoutAgent(BaseAgent):
                     raise ValueError("security decision does not match persisted WARDEN review")
                 if decision.expires_at and workflow.as_utc(decision.expires_at) <= ctx.clock():
                     raise ValueError("security decision has expired")
-                task = await session.get(TaskRecord, decision.task_id)
+                task = await self.work_queue(transaction).task_ref(decision.task_id)
                 latest = await SecurityDecisionRepository.latest_for_input_hash(
                     session, payload.input_hash
                 )

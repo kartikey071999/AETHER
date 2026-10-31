@@ -10,10 +10,11 @@ from uuid import UUID, uuid5
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from aether.agents.work_queue import task_ref_in
 from aether.communication.messages import AgentId, AgentMessage, MessageType
 from aether.observability.events import build_event
 from aether.observability.recorder import EventRecorder
-from aether.storage.models import ObjectiveRecord, RequirementRecord, TaskRecord
+from aether.storage.models import ObjectiveRecord, RequirementRecord
 
 TERMINAL_OBJECTIVE_STATES = frozenset({"cancelled", "completed", "failed"})
 IGNORED_DECISION = "ignored_terminal_objective"
@@ -58,7 +59,7 @@ async def objective_of(session: AsyncSession, message: AgentMessage) -> Objectiv
     objective_id = message.objective_id or _uuid(payload.get("objective_id"))
     if objective_id is None:
         task_id = message.task_id or _uuid(payload.get("task_id"))
-        task = await session.get(TaskRecord, task_id) if task_id else None
+        task = await task_ref_in(session, task_id) if task_id else None
         objective_id = task.objective_id if task is not None else None
     if objective_id is None:
         requirement_id = message.requirement_id or _uuid(payload.get("requirement_id"))
