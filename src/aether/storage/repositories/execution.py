@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aether.storage.models import ExecutionRunRecord, RunStatus
@@ -20,6 +21,30 @@ class ExecutionRunRepository:
     async def get(self, run_id: UUID) -> ExecutionRunRecord | None:
         async with self._sessions() as session:
             return await session.get(ExecutionRunRecord, run_id)
+
+    async def history(
+        self,
+        *,
+        task_id: UUID | None = None,
+        agent: str | None = None,
+        operation: str | None = None,
+        limit: int = 100,
+    ) -> list[ExecutionRunRecord]:
+        """Recent finished executions, including actual usage for future task estimates."""
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        statement = select(ExecutionRunRecord).where(ExecutionRunRecord.finished_at.is_not(None))
+        if task_id is not None:
+            statement = statement.where(ExecutionRunRecord.task_id == task_id)
+        if agent is not None:
+            statement = statement.where(ExecutionRunRecord.agent == agent)
+        if operation is not None:
+            statement = statement.where(ExecutionRunRecord.operation == operation)
+        statement = statement.order_by(
+            ExecutionRunRecord.finished_at.desc(), ExecutionRunRecord.id
+        ).limit(limit)
+        async with self._sessions() as session:
+            return list(await session.scalars(statement))
 
     @staticmethod
     async def stage_started(

@@ -72,6 +72,9 @@ class AetherSettings(BaseSettings):
     min_free_disk_gb: float = Field(default=5.0, ge=0)
     task_timeout_seconds: int = Field(default=1800, ge=1)
     max_task_retries: int = Field(default=3, ge=0, le=20)
+    resource_sample_seconds: float = Field(default=30.0, ge=1, allow_inf_nan=False)
+    resource_retention_days: int = Field(default=30, ge=1)
+    resource_event_seconds: float = Field(default=300.0, ge=60, allow_inf_nan=False)
 
     # Agent runtime hooks. Nested limits accept JSON (AETHER_ORCHESTR='{"max_active_objectives": 5}')
     # or __-delimited keys (AETHER_ORCHESTR__MAX_ACTIVE_OBJECTIVES=5); tick overrides are a JSON

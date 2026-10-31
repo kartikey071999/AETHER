@@ -1,6 +1,6 @@
 """Transactional operations that keep durable state and audit events aligned.
 
-Every state-changing repository method writes an ``EventRecord`` in the same transaction.
+Audit events commit with state changes; frequent host samples use rate-limited events.
 """
 
 from aether.storage.repositories._events import add_event
@@ -36,6 +36,7 @@ from aether.storage.repositories.research import (
     InvalidFindingTransition,
     ResearchFindingRepository,
 )
+from aether.storage.repositories.resources import ResourceMeasurementRepository
 from aether.storage.repositories.security import (
     OperationAuthorizationRequests,
     SecurityDecisionRepository,
@@ -77,6 +78,7 @@ __all__ = [
     "RequirementConflictError",
     "RequirementRepository",
     "ResearchFindingRepository",
+    "ResourceMeasurementRepository",
     "SecurityDecisionRepository",
     "TaskDependencyRepository",
     "TaskRepository",

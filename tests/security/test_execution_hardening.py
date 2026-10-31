@@ -110,6 +110,9 @@ async def test_grandchild_killed_on_cancellation(registry, approve, roots, datab
         run = (await session.scalars(select(ExecutionRunRecord))).one()
     assert run.status == RunStatus.CANCELLED
     assert run.finished_at is not None
+    assert run.resource_usage["duration_seconds"] > 0
+    assert "peak_rss_bytes" in run.resource_usage
+    assert run.resource_usage["rss_sample_seconds"] == 0.1
 
 
 async def test_failed_job_attachment_never_runs_child(

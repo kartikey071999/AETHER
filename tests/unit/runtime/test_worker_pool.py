@@ -1,5 +1,6 @@
 import asyncio
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 from runtime_helpers import StubAgent, event_counts, get_task, make_task, stub_for, wait_until
@@ -50,6 +51,30 @@ async def test_successful_task_is_completed_with_events(sessions, objective_id) 
     counts = await event_counts(sessions, task_id)
     assert counts["task.completed"] == 1 and counts["task.lease_released"] == 1
     assert pool.running_count == 0
+
+
+async def test_task_duration_is_measured_and_existing_results_preserved(
+    sessions, objective_id, monkeypatch
+) -> None:
+    ticks = iter((100.0, 105.25))
+    monkeypatch.setattr(
+        "aether.runtime.worker.time", SimpleNamespace(monotonic=lambda: next(ticks))
+    )
+    pool = build_pool(sessions)
+    task_id = await make_task(sessions, objective_id)
+    async with sessions() as session, session.begin():
+        task = await session.get(TaskRecord, task_id)
+        task.result = {"agent_output": "preserved"}
+    await pool.submit(task_id, StubAgent())
+    await pool.join()
+    task = await get_task(sessions, task_id)
+    assert task.state == TaskStatus.COMPLETED
+    assert task.result == {
+        "agent_output": "preserved",
+        "resource_usage": {"duration_seconds": 5.25},
+    }
+    assert task.started_at is not None and task.completed_at is not None
+    assert (await event_counts(sessions, task_id))["task.completed"] == 1
 
 
 async def test_global_concurrency_limit_is_enforced(sessions, objective_id) -> None:
@@ -121,6 +146,7 @@ async def test_timeout_retries_then_fails_when_attempts_exhausted(sessions, obje
     assert (await get_task(sessions, final)).state == TaskStatus.FAILED
     assert (await event_counts(sessions, retryable))["task.timed_out"] == 1
     assert (await event_counts(sessions, final))["task.timed_out"] == 1
+    assert (await get_task(sessions, final)).result["resource_usage"]["duration_seconds"] >= 0.05
     assert agent.active == 0
 
 

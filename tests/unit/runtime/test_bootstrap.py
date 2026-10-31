@@ -158,7 +158,15 @@ def test_cli_run_once_starts_records_events_and_exits_cleanly(
     types = [row[0] for row in rows]
     assert "runtime.started" in types and "runtime.stopped" in types
     assert types.index("runtime.started") < types.index("runtime.stopped")
-    assert all(row[1] == "runtime" and row[2] == "runtime.engine" and row[3] for row in rows)
+    runtime_rows = [row for row in rows if row[0].startswith("runtime.")]
+    assert all(
+        row[1] == "runtime" and row[2] == "runtime.engine" and row[3] for row in runtime_rows
+    )
+    resource_rows = [row for row in rows if row[0] == "resource.measured"]
+    assert len(resource_rows) == 1
+    assert resource_rows[0][1:3] == ("resource", "storage.resources")
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM resource_measurements").fetchone()[0] == 1
     assert (tmp_path / "logs" / "runtime.log").exists()
     assert capsys.readouterr().err == ""
 
@@ -191,9 +199,10 @@ def test_cli_events_tail_prints_recent_events_in_order(
 
     cli.main(["events", "tail"])
     lines = capsys.readouterr().out.strip().splitlines()
-    assert "runtime.security_initialized" in lines[0]
-    assert "runtime.models_initialized" in lines[1]
-    assert "runtime.started" in lines[2]
+    assert "resource.measured" in lines[0]
+    assert "runtime.security_initialized" in lines[1]
+    assert "runtime.models_initialized" in lines[2]
+    assert "runtime.started" in lines[3]
     assert "runtime.stopped" in lines[-1]
 
 

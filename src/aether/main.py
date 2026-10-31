@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
@@ -369,7 +370,7 @@ async def _demo_capability(live: bool, timeout: float) -> int:
         create_schema=False,
     )
     async with scenario:
-        objective_id = await scenario.submit_objective(tag="demo")
+        objective_id = await scenario.submit_objective(tag=f"demo {uuid4().hex[:8]}")
         print(f"Objective submitted: {objective_id}")
         try:
             trace = await scenario.run_until(objective_id, finished, timeout=timeout)
