@@ -33,7 +33,7 @@ def test_collections_are_real_paginated_rows(seeded, path):
     assert response.headers["cache-control"] == "no-store"
     page = Page.model_validate(response.json())
     assert page.items and page.total >= len(page.items)
-    assert page.limit == 50 and page.offset == 0
+    assert page.limit == (100 if path == "/resources" else 50) and page.offset == 0
     expected = {
         "/objectives": "objective",
         "/tasks": "task",
@@ -75,8 +75,9 @@ def test_pagination_is_bounded_and_offset_is_real(seeded, path):
     assert first["total"] == whole["total"]
     assert len(first["items"]) == 1
     assert second["items"] == whole["items"][1:2]
-    assert client.get(path, params={"limit": 200}).status_code == 200
-    for params in ({"limit": 0}, {"limit": 201}, {"offset": -1}):
+    maximum = 1000 if path == "/resources" else 200
+    assert client.get(path, params={"limit": maximum}).status_code == 200
+    for params in ({"limit": 0}, {"limit": maximum + 1}, {"offset": -1}):
         assert client.get(path, params=params).status_code == 422
     assert client.get(path, params={"offset": 10_000}).json()["items"] == []
 

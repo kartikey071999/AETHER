@@ -73,12 +73,15 @@ to observe. ORCHESTR contexts expose `resource_measurements` and `execution_runs
 `ExecutionRunRepository.history(task_id=..., agent=..., operation=..., limit=...)`
 provides finished runs for future estimates without changing estimates automatically.
 
-`aether.api.create_app(database.sessions)` creates a read-only FastAPI application
-with `GET /resources`, returning measurement rows as a JSON array. Optional
-`since`, `until`, and `task_id` filters and `limit` (default 100, maximum 1000) /
-`offset` pagination bound responses. The caller owns database/server lifecycle;
-the factory opens no listener and does not start a second sampler. Other API
-surfaces and dashboard integration remain future work.
+`aether.api.create_app(settings, database=database)` creates the local FastAPI
+application with `GET /resources` and the operational routes described below.
+Resource history uses `ResourceMeasurementRepository.range` and returns the
+standard `items`/`total`/`limit`/`offset` Page envelope, newest first with UTC
+timestamps. Optional timezone-aware `since` (inclusive), `until` (exclusive), and
+`task_id` filters and `limit` (default 100, 1-1000) / `offset` (nonnegative)
+pagination bound responses. A range requires `since < until` when both are
+supplied; invalid queries return 422. An injected database remains caller-owned;
+the factory opens no listener and does not start a second sampler.
 
 Inter-agent contracts live in `aether.communication.contracts`: one frozen
 Pydantic payload model per `MessageType` (`PAYLOAD_MODELS`, `validate_payload`),
@@ -149,7 +152,8 @@ it does not assert that workers are alive. Read endpoints are unauthenticated:
 `/scheduler/decisions`, `/resources`, `/errors`, `/executions`, `/tests`, `/events`,
 `/messages`, and `/providers/usage`. Collections return
 `{"items": [...], "total": N, "limit": 50, "offset": 0}`.
-Use `limit` (1-200) and `offset` (nonnegative) on every collection, and on task
+Use `limit` (1-200, default 50; `/resources` uses 1-1000, default 100) and
+`offset` (nonnegative) on every collection, and on task
 detail's nested dependencies, executions, and events. Embedded test results,
 capability verification runs, and recovery attempts have their own bounded pages
 starting at offset zero. `/tasks` filters by `state` and `agent`; `/events` by
@@ -159,7 +163,9 @@ independent verification verdict (unknown when there are no tasks).
 Provider usage aggregates the current UTC day against configured provider and
 model budgets, including outstanding reservations. Empty tables return empty
 collections, never demonstration data. Resource measurements are read from
-`resource_measurements`; no measurements are invented when none have been recorded.
+`resource_measurements` through the measurement repository, with optional
+timezone-aware `since`/`until` and `task_id` filters; no measurements are invented
+when none have been recorded.
 
 Set a private `AETHER_API_TOKEN` to enable administrative endpoints. Missing or
 blank tokens return 503 for every write; enabled writes require

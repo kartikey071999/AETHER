@@ -33,6 +33,7 @@ from aether.storage.models import (
     TestRunRecord,
 )
 from aether.storage.repositories.provider_usage import ProviderUsageRepository
+from aether.storage.repositories.resources import ResourceMeasurementRepository
 
 
 def record_data(record: Base) -> dict[str, Any]:
@@ -282,6 +283,39 @@ class ApiRepository:
             offset=offset,
         )
 
+    async def resources(
+        self,
+        *,
+        since: datetime | None,
+        until: datetime | None,
+        task_id: UUID | None,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        rows = await ResourceMeasurementRepository(self.sessions).range(
+            since=since, until=until, task_id=task_id, limit=limit, offset=offset
+        )
+        # range() supplies bounded rows; the Page total covers all matching measurements.
+        statement = select(func.count()).select_from(ResourceMeasurementRecord)
+        if since is not None:
+            statement = statement.where(
+                ResourceMeasurementRecord.observed_at >= since.astimezone(UTC)
+            )
+        if until is not None:
+            statement = statement.where(
+                ResourceMeasurementRecord.observed_at < until.astimezone(UTC)
+            )
+        if task_id is not None:
+            statement = statement.where(ResourceMeasurementRecord.task_id == task_id)
+        async with self.sessions() as session:
+            total = await session.scalar(statement)
+        return {
+            "items": [record_data(row) for row in rows],
+            "total": int(total or 0),
+            "limit": limit,
+            "offset": offset,
+        }
+
     async def provider_usage(
         self, settings: ProviderSettings, *, limit: int, offset: int
     ) -> dict[str, Any]:
@@ -331,9 +365,6 @@ READ_COLLECTIONS = {
     "/scheduler/decisions": select(EventRecord)
     .where(EventRecord.event_type == "scheduler.decision")
     .order_by(EventRecord.created_at.desc(), EventRecord.id.desc()),
-    "/resources": select(ResourceMeasurementRecord).order_by(
-        ResourceMeasurementRecord.observed_at.desc(), ResourceMeasurementRecord.id
-    ),
     "/executions": select(ExecutionRunRecord).order_by(
         ExecutionRunRecord.started_at.desc(), ExecutionRunRecord.id
     ),

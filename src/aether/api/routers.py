@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
+from pydantic import AwareDatetime
 from sqlalchemy.exc import SQLAlchemyError
 
 from aether.agents.muse import record_user_response
@@ -112,6 +113,24 @@ async def messages(
 @reads.get("/providers/usage", response_model=Page)
 async def provider_usage(api: Services, page: Pagination) -> JSONResponse:
     return api.response(await api.repository.provider_usage(api.provider_settings, **page))
+
+
+@reads.get("/resources", response_model=Page)
+async def resources(
+    api: Services,
+    since: Annotated[AwareDatetime | None, Query()] = None,
+    until: Annotated[AwareDatetime | None, Query()] = None,
+    task_id: Annotated[UUID | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> JSONResponse:
+    if since is not None and until is not None and since >= until:
+        raise HTTPException(422, "since must precede until")
+    return api.response(
+        await api.repository.resources(
+            since=since, until=until, task_id=task_id, limit=limit, offset=offset
+        )
+    )
 
 
 def _collection_route(path: str):

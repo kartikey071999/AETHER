@@ -25,7 +25,6 @@ from aether.storage.models import (
     AgentHealthStatus,
     Base,
     CapabilityStatus,
-    ResourceMeasurementRecord,
     ResultOutcome,
     RunStatus,
     TaskStatus,
@@ -40,6 +39,7 @@ from aether.storage.repositories import (
     ObjectiveRepository,
     PersonRepository,
     RequirementRepository,
+    ResourceMeasurementRepository,
     TaskDependencyRepository,
     TaskRepository,
 )
@@ -177,16 +177,13 @@ async def populate(client):
             finished_at=now,
             exit_code=0,
         )
-        # There is no measurement writer repository yet; exercise its real persisted table.
-        resource = ResourceMeasurementRecord(
-            cpu_percent=12.5,
-            available_ram_bytes=123456,
-            free_disk_bytes=654321,
-            observed_at=now,
-        )
-        session.add(resource)
-        await session.flush()
-        decision_id, execution_id, resource_id = decision.id, execution.id, resource.id
+        decision_id, execution_id = decision.id, execution.id
+    resource_id = await ResourceMeasurementRepository(sessions).record(
+        cpu_percent=12.5,
+        available_ram_bytes=123456,
+        free_disk_bytes=654321,
+        observed_at=now,
+    )
     runs = TestRunRepository(sessions)
     test_run = await runs.create(
         suite="Actual offline suite",
