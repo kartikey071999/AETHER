@@ -47,7 +47,8 @@ ALLOWED_TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.CANCELLED: frozenset(),
 }
 
-_TERMINAL_STATES = frozenset({TaskStatus.COMPLETED, TaskStatus.CANCELLED})
+# States that end a run of the task; FAILED can still be retried, but the run did finish.
+FINISHED_TASK_STATES = frozenset({TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED})
 
 
 # Backwards-compatible alias used before the repositories package split.
@@ -148,8 +149,10 @@ class TaskRepository:
                 task.scheduled_at = now
             elif new_status is TaskStatus.RUNNING and task.started_at is None:
                 task.started_at = now
-            elif new_status in _TERMINAL_STATES:
+            elif new_status in FINISHED_TASK_STATES:
                 task.completed_at = now
+            elif old_status is TaskStatus.FAILED and new_status is TaskStatus.RETRYING:
+                task.completed_at = None
             if result is not None:
                 task.result = to_json(result)
             if error is not None:
@@ -200,6 +203,45 @@ class TaskRepository:
                 objective_id=task.objective_id,
                 task_id=task.id,
             )
+
+    async def set_requirement(
+        self,
+        task_id: UUID,
+        requirement_id: UUID,
+        *,
+        actor: str,
+        reason: str,
+        correlation_id: UUID | None = None,
+    ) -> bool:
+        """Link a task to the requirement it implements or verifies.
+
+        Returns False (and emits nothing) when the task is already linked to that requirement.
+        A task linked to a different requirement is not silently relinked.
+        """
+        async with self._sessions() as session, session.begin():
+            task = await _lock_task(session, task_id)
+            if task.requirement_id == requirement_id:
+                return False
+            if task.requirement_id is not None:
+                raise ValueError(
+                    f"Task {task_id} is already linked to requirement {task.requirement_id}"
+                )
+            task.requirement_id = requirement_id
+            task.updated_at = utcnow()
+            add_event(
+                session,
+                event_type="task.requirement_linked",
+                aggregate_type="task",
+                aggregate_id=task.id,
+                actor=actor,
+                payload={"requirement_id": requirement_id, "reason": reason},
+                category=EventCategory.TASK,
+                correlation_id=correlation_id,
+                objective_id=task.objective_id,
+                task_id=task.id,
+                idempotency_key=f"task.requirement_linked:{task.id}:{requirement_id}",
+            )
+            return True
 
     async def set_estimates(
         self,

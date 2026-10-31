@@ -27,6 +27,7 @@ from aether.storage.models import (
     RunStatus,
     TestResultRecord,
     TestRunRecord,
+    TestVerdict,
 )
 from aether.storage.repositories import CapabilityRepository
 
@@ -135,6 +136,7 @@ async def test_success_requires_every_criterion_and_registers(
 
     run = await TestRunStore(ctx.sessions).get(first.message_id)
     assert run.status == RunStatus.SUCCEEDED
+    assert run.verdict == TestVerdict.VERIFIED
     assert run.passed == 2 and run.failed == 0
     assert all(item["passed"] for item in run.acceptance_results)
     assert run.report_path and Path(run.report_path).exists()
@@ -169,6 +171,7 @@ async def test_failed_criterion_blocks_registration(
     run = await run_verification(agent, ctx, publish, approve_pending, work)
 
     assert run.status == RunStatus.FAILED
+    assert run.verdict == TestVerdict.FAILED
     assert run.failed == 1
     failing = [item for item in run.acceptance_results if not item["passed"]]
     assert [item["criterion"] for item in failing] == ["AC2: rejects text input"]
@@ -197,6 +200,7 @@ async def test_criterion_without_a_test_is_never_verified(
     run = await run_verification(agent, ctx, publish, approve_pending, work)
 
     assert run.status == RunStatus.CANCELLED  # inconclusive
+    assert run.verdict == TestVerdict.INCONCLUSIVE
     capability = await load(database, CapabilityRecord, work.capability_id)
     assert capability.lifecycle_status == CapabilityStatus.INSTALLED
     assert await sent(MessageType.CAPABILITY_REGISTER) == []

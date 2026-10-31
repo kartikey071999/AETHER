@@ -427,15 +427,13 @@ class LedgerAgent(BaseAgent):
         store = TestRunStore(ctx.sessions)
         await store.finish(
             spec.run_id,
-            status=verdict.run_status,
+            verdict=verdict.verdict,
             counts=merged_counts(parsed),
             cases=parsed.cases,
             acceptance_results=[result.to_json() for result in criteria],
             execution_run_id=execution_run_id,
             report_path=report_path,
-            duration_seconds=duration_seconds,
             evidence=evidence,
-            task_id=spec.task_id,
             correlation_id=spec.correlation_id,
             now=ctx.clock(),
         )

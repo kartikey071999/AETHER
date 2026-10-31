@@ -542,21 +542,15 @@ class ScenarioTrace:
         return [task for task in self.tasks if task.assigned_agent == agent.value]
 
     def run_window(self, task_id: UUID) -> tuple[datetime, datetime | None] | None:
-        """When the task first started running and when it last left ``running`` (from events).
+        """When the task first started running and when it finished, from ``tasks``.
 
-        The second value is None while the task is still running.
+        The second value is None while the task has not finished.
         """
-        started: datetime | None = None
-        ended: datetime | None = None
-        for event in self.transitions:
-            if event.aggregate_id != task_id:
-                continue
-            data = _data(event)
-            if data.get("to_status") == "running" and started is None:
-                started = _aware(event.created_at)
-            elif data.get("from_status") == "running" and started is not None:
-                ended = _aware(event.created_at)
-        return (started, ended) if started is not None else None
+        for task in self.tasks:
+            if task.id == task_id and task.started_at is not None:
+                ended = _aware(task.completed_at) if task.completed_at else None
+                return _aware(task.started_at), ended
+        return None
 
     def messages_of(
         self,
@@ -578,13 +572,8 @@ class ScenarioTrace:
 
     @property
     def verdicts(self) -> list[str]:
-        """LEDGER's verdicts, in order, from the test reports it sent to ORCHESTR."""
-        return [
-            str(row.payload.get("verdict"))
-            for row in self.messages_of(
-                MessageType.TEST_REPORT, source=AgentId.LEDGER, target=AgentId.ORCHESTR
-            )
-        ]
+        """LEDGER's verdicts, in order, from the persisted ``test_runs.verdict``."""
+        return [str(run.verdict) for run in self.test_runs if run.verdict]
 
     @property
     def completed(self) -> bool:

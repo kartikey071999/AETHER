@@ -43,18 +43,21 @@ from aether.storage.repositories.security import (
 from aether.storage.repositories.tasks import (
     _ALLOWED_TRANSITIONS,  # noqa: F401 - compatibility re-export
     ALLOWED_TASK_TRANSITIONS,
+    FINISHED_TASK_STATES,
     InvalidTaskTransition,
     TaskRepository,
 )
 from aether.storage.repositories.test_runs import (
     InvalidTestRunTransition,
     TestResultInput,
+    TestRunCounts,
     TestRunRepository,
 )
 
 __all__ = [
     "ALLOWED_REQUIREMENT_TRANSITIONS",
     "ALLOWED_TASK_TRANSITIONS",
+    "FINISHED_TASK_STATES",
     "AgentHeartbeatRepository",
     "AgentRepository",
     "AuthorizationRequestRepository",
@@ -81,6 +84,7 @@ __all__ = [
     "TaskDependencyRepository",
     "TaskRepository",
     "TestResultInput",
+    "TestRunCounts",
     "TestRunRepository",
     "add_event",
     "agent_aggregate_id",
