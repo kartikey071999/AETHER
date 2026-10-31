@@ -170,6 +170,7 @@ async def evaluate_completion(env: Env, objective: ObjectiveRecord) -> bool:
         objective=objective,
         results=[{"objective": objective.title, "tasks_completed": len(tasks)}],
         verified=criteria,
+        uncertain=["Behaviour outside the listed completion criteria was not independently tested"],
     )
     await env.store.objectives.set_status(
         objective.id, "completed", actor=ACTOR, reason="all completion criteria verified"

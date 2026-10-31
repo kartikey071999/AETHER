@@ -1,19 +1,64 @@
 """Finding the plan for a task: a stored one, a deterministic template, or a validated LLM draft."""
 
+import re
 from collections.abc import Sequence
+from uuid import UUID
+
+from sqlalchemy import select
 
 from aether.agents.base import AgentContext
 from aether.agents.forge.planning import build_template_plan, draft_with_llm, extract_spec
 from aether.agents.forge.schemas import ForgeConfig, ForgePlan, PlanDefect, Refusal, RefusalCode
 from aether.agents.forge.store import latest_plan, save_plan
-from aether.storage.models import RequirementRecord, TaskRecord
+from aether.storage.models import RequirementRecord, RequirementStatus, TaskRecord
+
+_ACTIONABLE = (RequirementStatus.APPROVED.value, RequirementStatus.IN_PROGRESS.value)
+_CRITERIA_HEADER = re.compile(r"^\s*acceptance criteria:\s*$", re.IGNORECASE)
+_BULLET = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
 
 
 async def load_requirement(ctx: AgentContext, task: TaskRecord) -> RequirementRecord | None:
-    if task.requirement_id is None:
-        return None
+    """The task's requirement, else the objective's approved capability requirement.
+
+    Plans are made before research adopts an approach, so implementation tasks often carry no
+    ``requirement_id``; FORGE then retrieves the structured requirement from the shared records.
+    """
     async with ctx.sessions() as session:
-        return await session.get(RequirementRecord, task.requirement_id)
+        if task.requirement_id is not None:
+            return await session.get(RequirementRecord, task.requirement_id)
+        return await session.scalar(
+            select(RequirementRecord)
+            .where(
+                RequirementRecord.objective_id == task.objective_id,
+                RequirementRecord.requirement_type == "capability",
+                RequirementRecord.status.in_(_ACTIONABLE),
+            )
+            .order_by(RequirementRecord.created_at.desc(), RequirementRecord.id)
+            .limit(1)
+        )
+
+
+def description_criteria(description: str) -> tuple[str, ...]:
+    """Bullets under an ``Acceptance criteria:`` heading of a task description."""
+    criteria: list[str] = []
+    collecting = False
+    for line in (description or "").splitlines():
+        if _CRITERIA_HEADER.match(line):
+            collecting = True
+            continue
+        if not collecting:
+            continue
+        bullet = _BULLET.match(line)
+        if bullet is None:
+            if line.strip():
+                break
+            continue
+        criteria.append(bullet.group(1))
+    return tuple(criteria)
+
+
+def _clean(items: Sequence[str] | None) -> tuple[str, ...]:
+    return tuple(item.strip() for item in (items or ()) if isinstance(item, str) and item.strip())
 
 
 async def resolve_plan(
@@ -28,17 +73,22 @@ async def resolve_plan(
     if stored is not None:
         return stored, None
     requirement = await load_requirement(ctx, task)
-    criteria = tuple(item.strip() for item in criteria_hint if item.strip()) or tuple(
-        item.strip() for item in (requirement.acceptance_criteria if requirement else []) if item
+    requirement_id = requirement.id if requirement is not None else task.requirement_id
+    # The structured requirement is authoritative; the assignment hint and the task text are
+    # fallbacks, so the plan does not depend on which of execution/assignment ran first.
+    criteria = (
+        _clean(requirement.acceptance_criteria if requirement else None)
+        or _clean(criteria_hint)
+        or description_criteria(task.description)
     )
     try:
         spec = extract_spec(task.description, requirement.description if requirement else "")
         if spec is not None:
             plan = build_template_plan(
-                spec, task, requirement_id=task.requirement_id, criteria=criteria, config=config
+                spec, task, requirement_id=requirement_id, criteria=criteria, config=config
             )
         else:
-            plan = await _draft(ctx, task, criteria, config)
+            plan = await _draft(ctx, task, requirement_id, criteria, config)
     except PlanDefect as error:
         return None, Refusal(RefusalCode.PLAN_INVALID, str(error))
     if plan is None:
@@ -51,7 +101,11 @@ async def resolve_plan(
 
 
 async def _draft(
-    ctx: AgentContext, task: TaskRecord, criteria: tuple[str, ...], config: ForgeConfig
+    ctx: AgentContext,
+    task: TaskRecord,
+    requirement_id: UUID | None,
+    criteria: tuple[str, ...],
+    config: ForgeConfig,
 ) -> ForgePlan | None:
     if ctx.tools is None:
         return None
@@ -61,7 +115,7 @@ async def _draft(
     return await draft_with_llm(
         ctx,
         task,
-        requirement_id=task.requirement_id,
+        requirement_id=requirement_id,
         criteria=criteria,
         registered_tools=registered,
         config=config,

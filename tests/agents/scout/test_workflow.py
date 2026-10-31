@@ -783,3 +783,77 @@ async def test_inactive_objective_cannot_adopt_a_finding(context, objective_id):
     )
     assert await records(context, RequirementRecord) == []
     assert (await records(context, ResearchFindingRecord))[0].status == "rejected"
+
+
+async def _adopt_one_round(context, objective_id, candidate="Candidate"):
+    """SCOUT consolidates one evidence-backed, high-confidence finding."""
+    finding_id = await ResearchFindingRepository(context.sessions).submit(
+        agent="ROGUE",
+        objective_id=objective_id,
+        question="Question",
+        findings="Summary",
+        confidence=0.8,
+        classification="hypothesis",
+        candidate_approaches=[{"name": candidate}],
+        recommendation=candidate,
+        evidence=[
+            EvidenceInput(source_uri="file:source", summary="Evidence", content_hash="e" * 64)
+        ],
+    )
+    await ScoutAgent().handle_message(
+        build_message(
+            AgentId.ROGUE,
+            AgentId.SCOUT,
+            ResearchFindingPayload(
+                finding_id=finding_id,
+                objective_id=objective_id,
+                question="Question",
+                summary="Summary",
+                confidence=0.8,
+                classification="hypothesis",
+                submitted_by=AgentId.ROGUE,
+            ),
+        ),
+        context,
+    )
+
+
+async def test_adopted_requirement_uses_objective_criteria_and_is_approved_for_ledger(context):
+    # Regression (T-040): requirements carried generic criteria that never matched the
+    # objective's completion criteria, and nobody evaluated them, so they stayed proposed.
+    criteria = ["AC1: counts words", "AC2: handles empty input"]
+    objective_id = await ObjectiveRepository(context.sessions).create(
+        title="Text statistics", completion_criteria=criteria
+    )
+    await _adopt_one_round(context, objective_id)
+
+    [requirement] = await records(context, RequirementRecord)
+    assert requirement.acceptance_criteria == criteria
+    evaluated = [
+        item
+        for item in await records(context, MessageRecord)
+        if item.message_type == MessageType.REQUIREMENT_EVALUATED.value
+    ]
+    assert len(evaluated) == 1
+    assert evaluated[0].source_agent == "SCOUT" and evaluated[0].target_agent == "LEDGER"
+    assert evaluated[0].payload["outcome"] == "approved"
+    assert evaluated[0].payload["requirement_id"] == str(requirement.id)
+    assert evaluated[0].payload["acceptance_criteria"] == criteria
+
+
+async def test_second_adoption_for_the_same_objective_is_rejected_with_rationale(
+    context, objective_id
+):
+    # Regression (T-040): each research round adopted again and forked a second requirement.
+    await _adopt_one_round(context, objective_id, "First")
+    await _adopt_one_round(context, objective_id, "Second")
+
+    requirements = await records(context, RequirementRecord)
+    assert len(requirements) == 1
+    findings = sorted(await records(context, ResearchFindingRecord), key=lambda f: f.created_at)
+    assert [finding.status for finding in findings] == [
+        FindingStatus.ADOPTED,
+        FindingStatus.REJECTED,
+    ]
+    assert "already adopted" in findings[1].rationale
+    assert str(requirements[0].id) in findings[1].rationale

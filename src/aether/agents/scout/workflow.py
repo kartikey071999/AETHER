@@ -23,11 +23,13 @@ from aether.communication.bus import MessageBus
 from aether.communication.contracts import (
     CandidateApproach,
     ConsolidationDecision,
+    EvaluationOutcome,
     EvidenceItem,
     EvidenceTrust,
     FindingDecision,
     Payload,
     ProgressUpdatePayload,
+    RequirementEvaluatedPayload,
     RequirementSubmitPayload,
     RequirementType,
     ResearchBudget,
@@ -46,6 +48,8 @@ from aether.storage.models import (
     FindingStatus,
     MessageRecord,
     ObjectiveRecord,
+    RequirementRecord,
+    RequirementStatus,
     ResearchFindingRecord,
     TaskRecord,
     TaskStatus,
@@ -63,6 +67,14 @@ from aether.storage.repositories.tasks import ALLOWED_TASK_TRANSITIONS
 
 class ResearchLimitReached(ValueError):
     """Admission was refused rather than silently growing the queue."""
+
+
+_OPEN_REQUIREMENTS = (
+    RequirementStatus.PROPOSED.value,
+    RequirementStatus.APPROVED.value,
+    RequirementStatus.IN_PROGRESS.value,
+    RequirementStatus.SATISFIED.value,
+)
 
 
 def as_utc(value: datetime) -> datetime:
@@ -621,23 +633,53 @@ async def consolidate(
                 decision=ConsolidationDecision.NEEDS_EVIDENCE,
                 rationale="An owning objective is required before creating requirements",
             )
+        if decision.decision is ConsolidationDecision.ADOPT:
+            async with transaction.sessions() as session:
+                adopted = await session.scalar(
+                    select(RequirementRecord.id)
+                    .where(
+                        RequirementRecord.objective_id == finding.objective_id,
+                        RequirementRecord.created_by == AgentId.SCOUT.value,
+                        RequirementRecord.requirement_type == RequirementType.CAPABILITY.value,
+                        RequirementRecord.status.in_(_OPEN_REQUIREMENTS),
+                    )
+                    .limit(1)
+                )
+            if adopted is not None:
+                # One adopted approach per objective; later rounds must not fork the work.
+                decision = FindingDecision(
+                    finding_id=finding.id,
+                    decision=ConsolidationDecision.REJECT,
+                    rationale=(
+                        "Another approach is already adopted for this objective "
+                        f"(requirement {adopted}); this alternative is recorded, not adopted"
+                    ),
+                )
         requirement_ids: list[UUID] = []
+        requirement_title = ""
+        criteria: list[str] = []
         if decision.decision is ConsolidationDecision.ADOPT:
             candidate = next(
                 CandidateApproach.model_validate(item)
                 for item in finding.candidate_approaches
                 if item["name"] == finding.recommendation
             )
+            # The objective's own completion criteria are what verification must prove.
             criteria = [
+                item.strip()
+                for item in (objective.completion_criteria if objective else [])
+                if isinstance(item, str) and item.strip()
+            ] or [
                 f"Demonstrate that {candidate.name} addresses: {finding.question}",
                 "Provide offline automated tests for nominal and failure paths",
                 "Measure resource use against the reviewed resource estimates",
                 "All privileged effects use approved tools and WARDEN authorization",
             ]
+            requirement_title = f"Evaluate {candidate.name}"[:200]
             requirement_id = await RequirementRepository(transaction.sessions).create(
                 objective_id=finding.objective_id,
                 task_id=finding.task_id,
-                title=f"Evaluate {candidate.name}"[:200],
+                title=requirement_title,
                 description=f"{finding.findings}\n\n{json.dumps(candidate.model_dump(mode='json'))}",
                 requirement_type=RequirementType.CAPABILITY.value,
                 created_by=AgentId.SCOUT.value,
@@ -654,7 +696,7 @@ async def consolidate(
                     requirement_id=requirement_id,
                     objective_id=finding.objective_id,
                     task_id=finding.task_id,
-                    title=f"Evaluate {candidate.name}"[:200],
+                    title=requirement_title,
                     description=candidate.description,
                     requirement_type=RequirementType.CAPABILITY,
                     acceptance_criteria=criteria,
@@ -736,6 +778,28 @@ async def consolidate(
                         actor=AgentId.SCOUT.value,
                         correlation_id=message.correlation_id,
                     )
+        if requirement_ids:
+            # SCOUT evaluated the evidence and adopted the approach: the requirement is approved
+            # for implementation (operations still need WARDEN; completion needs LEDGER).
+            await publish(
+                AgentId.SCOUT,
+                AgentId.LEDGER,
+                RequirementEvaluatedPayload(
+                    requirement_id=requirement_ids[0],
+                    objective_id=finding.objective_id,
+                    title=requirement_title,
+                    requirement_type=RequirementType.CAPABILITY,
+                    acceptance_criteria=criteria,
+                    source_finding_id=finding.id,
+                    security_review_required=True,
+                    outcome=EvaluationOutcome.APPROVED,
+                    rationale=decision.rationale,
+                ),
+                transaction,
+                key=finding.id,
+                suffix="evaluated:LEDGER",
+                correlation_id=message.correlation_id,
+            )
         statuses = {
             ConsolidationDecision.ADOPT: FindingStatus.ADOPTED,
             ConsolidationDecision.REJECT: FindingStatus.REJECTED,

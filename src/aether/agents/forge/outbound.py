@@ -4,8 +4,8 @@ from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
-from aether.agents.forge.planning import forge_id
-from aether.agents.forge.schemas import ForgePlan
+from aether.agents.forge.planning import forge_id, relative_path
+from aether.agents.forge.schemas import ForgePlan, PlanDefect
 from aether.communication.contracts import (
     ROUTES,
     BlockerKind,
@@ -109,6 +109,22 @@ def result_message(
     )
 
 
+def _test_files(task: TaskRecord, plan: ForgePlan) -> list[str]:
+    """Pytest files the plan wrote, relative to the task workspace."""
+    found: list[str] = []
+    for step in plan.steps:
+        if step.tool != "write_file":
+            continue
+        try:
+            path = relative_path(step.arguments.get("path"), task.id)
+        except PlanDefect:
+            continue
+        name = path.rsplit("/", 1)[-1]
+        if name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py")):
+            found.append(path)
+    return list(dict.fromkeys(found))
+
+
 def verification_message(
     task: TaskRecord,
     plan: ForgePlan,
@@ -119,15 +135,19 @@ def verification_message(
     artifacts: Sequence[str],
     evidence: Sequence[dict[str, Any]],
 ) -> AgentMessage:
-    """A request for independent verification; FORGE never declares anything verified itself."""
+    """A request for independent verification; FORGE never declares anything verified itself.
+
+    The suite names the test files FORGE wrote; LEDGER runs them itself inside the task workspace.
+    """
+    tests = _test_files(task, plan)
     payload = VerificationRequestPayload(
         task_id=task.id,
         requirement_id=requirement_id,
-        suite=f"forge-plan-{str(plan.plan_id)[:8]}",
+        suite=" ".join(tests) if tests else f"forge-plan-{str(plan.plan_id)[:8]}",
         acceptance_criteria=list(criteria),
         execution_run_ids=[UUID(item) for item in run_ids],
         artifacts=list(artifacts),
-        evidence=list(evidence),
+        evidence=[*evidence, {"workspace": str(task.id)}],
     )
     return build_message(
         AgentId.FORGE,

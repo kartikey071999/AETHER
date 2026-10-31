@@ -18,5 +18,6 @@ class ResourceMonitor:
         return HostResources(
             cpu_percent=psutil.cpu_percent(interval=None),
             available_ram_bytes=psutil.virtual_memory().available,
-            free_disk_bytes=psutil.disk_usage(disk_path).free,
+            # psutil on Windows only accepts str paths.
+            free_disk_bytes=psutil.disk_usage(str(disk_path)).free,
         )

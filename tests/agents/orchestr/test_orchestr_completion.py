@@ -71,6 +71,19 @@ async def test_verified_report_completes_the_objective(harness: Harness) -> None
     assert len(finals) == 1
 
 
+async def test_final_update_separates_verified_from_uncertain(harness: Harness) -> None:
+    objective_id = await harness.objective()
+    await complete_all(harness, objective_id)
+    await harness.send(AgentId.LEDGER, report(), objective_id=objective_id)
+
+    [final] = harness.bus.of_type(MessageType.COMMUNICATION_REQUEST, target=AgentId.MUSE)
+    payload = final.payload if isinstance(final.payload, dict) else final.payload.model_dump()
+    assert payload["verified"] == [CRITERION]
+    # Spec section 10: MUSE must not present untested behaviour as verified.
+    assert payload["uncertain"]
+    assert CRITERION not in payload["uncertain"]
+
+
 async def test_completion_is_published_once_even_when_redelivered(harness: Harness) -> None:
     objective_id = await harness.objective()
     await complete_all(harness, objective_id)

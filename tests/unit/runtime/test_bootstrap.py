@@ -158,7 +158,15 @@ def test_cli_run_once_starts_records_events_and_exits_cleanly(
     types = [row[0] for row in rows]
     assert "runtime.started" in types and "runtime.stopped" in types
     assert types.index("runtime.started") < types.index("runtime.stopped")
-    assert all(row[1] == "runtime" and row[2] == "runtime.engine" and row[3] for row in rows)
+    runtime_rows = [row for row in rows if row[0].startswith("runtime.")]
+    assert all(
+        row[1] == "runtime" and row[2] == "runtime.engine" and row[3] for row in runtime_rows
+    )
+    resource_rows = [row for row in rows if row[0] == "resource.measured"]
+    assert len(resource_rows) == 1
+    assert resource_rows[0][1:3] == ("resource", "storage.resources")
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM resource_measurements").fetchone()[0] == 1
     assert (tmp_path / "logs" / "runtime.log").exists()
     assert capsys.readouterr().err == ""
 
@@ -191,9 +199,10 @@ def test_cli_events_tail_prints_recent_events_in_order(
 
     cli.main(["events", "tail"])
     lines = capsys.readouterr().out.strip().splitlines()
-    assert "runtime.security_initialized" in lines[0]
-    assert "runtime.models_initialized" in lines[1]
-    assert "runtime.started" in lines[2]
+    assert "resource.measured" in lines[0]
+    assert "runtime.security_initialized" in lines[1]
+    assert "runtime.models_initialized" in lines[2]
+    assert "runtime.started" in lines[3]
     assert "runtime.stopped" in lines[-1]
 
 
@@ -224,3 +233,20 @@ def test_cli_run_rejects_invalid_duration(argument: str) -> None:
     with pytest.raises(SystemExit) as exit_info:
         cli.main(["run", "--duration", argument])
     assert exit_info.value.code == 2
+
+
+async def test_build_runtime_accepts_explicit_engine_limits(tmp_path: Path) -> None:
+    from aether.runtime.engine import EngineLimits
+
+    limits = EngineLimits(message_poll_seconds=0.05, scheduler_interval_seconds=0.1)
+    runtime = build_runtime(_settings(tmp_path), engine_limits=limits)
+    try:
+        assert runtime.engine._limits is limits
+    finally:
+        await runtime.close()
+
+    default = build_runtime(_settings(tmp_path))
+    try:
+        assert default.engine._limits.message_poll_seconds != 0.05
+    finally:
+        await default.close()
