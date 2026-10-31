@@ -523,6 +523,7 @@ class ScenarioTrace:
     interactions: list[InteractionRecord]
     messages: list[MessageRecord]
     outbox_paths: list[Path]
+    scheduler_deferrals: list[EventRecord] = field(default_factory=list)
 
     @property
     def task_ids(self) -> set[UUID]:
@@ -670,6 +671,21 @@ async def collect_trace(runtime: Runtime, objective_id: UUID) -> ScenarioTrace:
                 )
             ).all()
         )
+        scheduler_deferrals = list(
+            reversed(
+                (
+                    await session.scalars(
+                        select(EventRecord)
+                        .where(
+                            EventRecord.event_type == "scheduler.decision",
+                            EventRecord.created_at >= objective.created_at,
+                        )
+                        .order_by(EventRecord.created_at.desc())
+                        .limit(_DEFERRAL_EVENT_LIMIT)
+                    )
+                ).all()
+            )
+        )
         orchestr_decisions = list(
             (
                 await session.scalars(
@@ -788,7 +804,51 @@ async def collect_trace(runtime: Runtime, objective_id: UUID) -> ScenarioTrace:
         interactions=interactions,
         messages=messages,
         outbox_paths=outbox_paths,
+        scheduler_deferrals=scheduler_deferrals,
     )
+
+
+_DEFERRAL_EVENT_LIMIT = 200
+_REQUIREMENT_APPROVED = frozenset(
+    {"approved", "in_progress", "implemented", "verified", "satisfied"}
+)
+
+
+def pending_reasons(trace: ScenarioTrace) -> dict[UUID, str]:
+    """Why each still-pending task has not been released, from persisted state only."""
+    latest: dict[UUID, str] = {}
+    for event in trace.scheduler_deferrals:  # oldest first, so later decisions win
+        deferred = _data(event).get("deferred")
+        if isinstance(deferred, dict):
+            for raw_id, reason in deferred.items():
+                try:
+                    latest[UUID(str(raw_id))] = str(reason)
+                except ValueError:
+                    continue
+    requirements = {requirement.id: requirement for requirement in trace.requirements}
+    states = {task.id: task.state for task in trace.tasks}
+    dependencies: dict[UUID, list[UUID]] = {}
+    for dependency in trace.dependencies:
+        dependencies.setdefault(dependency.task_id, []).append(dependency.depends_on_task_id)
+    reasons: dict[UUID, str] = {}
+    for task in trace.tasks:
+        if task.state != "pending":
+            continue
+        unfinished = [
+            dep for dep in dependencies.get(task.id, []) if states.get(dep) != "completed"
+        ]
+        requirement = requirements.get(task.requirement_id) if task.requirement_id else None
+        if unfinished:
+            reasons[task.id] = f"waiting: {len(unfinished)} dependency task(s) not completed"
+        elif task.assigned_agent == AgentId.FORGE.value and (
+            requirement is None or str(requirement.status) not in _REQUIREMENT_APPROVED
+        ):
+            reasons[task.id] = "held: no approved requirement"
+        elif task.id in latest:
+            reasons[task.id] = latest[task.id]
+        else:
+            reasons[task.id] = "no scheduler decision recorded yet"
+    return reasons
 
 
 def _when(value: datetime | None) -> str:
@@ -846,6 +906,14 @@ def format_trace(trace: ScenarioTrace) -> list[str]:
     for event in trace.scheduler_decisions[:20]:
         task_id = event.task_id
         lines.append(f"  {_when(event.created_at)} selected {names.get(task_id, _short(task_id))}")
+    pending = pending_reasons(trace)
+    if pending:
+        lines.append(f"Pending tasks ({len(pending)}):")
+        for task in trace.tasks:
+            if task.id in pending:
+                lines.append(
+                    f"  {_short(task.id)} {task.assigned_agent or '-':8} {pending[task.id]}"
+                )
     lines.append(f"ORCHESTR decisions ({len(trace.orchestr_decisions)}):")
     for event in trace.orchestr_decisions:
         data = _data(event)
