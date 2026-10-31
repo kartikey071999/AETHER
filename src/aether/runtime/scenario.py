@@ -45,7 +45,7 @@ from aether.models import MockProvider, ModelProvider, ProviderSettings
 from aether.models.contracts import CompletionRequest, CompletionResponse
 from aether.observability.recorder import split_legacy_payload
 from aether.runtime.bootstrap import Runtime, build_runtime
-from aether.runtime.engine import EngineLimits
+from aether.runtime.engine import EngineLimits, ResourceSnapshotter
 from aether.security.policy import SecuritySettings
 from aether.storage.models import (
     Base,
@@ -361,6 +361,8 @@ class CapabilityScenario:
     # FORGE configuration; ``None`` keeps the runtime default (templates, no LLM refinement).
     forge_config: ForgeConfig | None = None
     create_schema: bool = True
+    # None reads the real host; tests pin resources so machine load cannot defer or pause work.
+    resource_monitor: ResourceSnapshotter | None = None
     runtime: Runtime | None = None
 
     async def start(self) -> Runtime:
@@ -385,6 +387,7 @@ class CapabilityScenario:
             or ProviderSettings(_env_file=None, mock=True, max_retries=0),
             model_providers=self.model_providers,
             engine_limits=scenario_engine_limits(settings, self.timing),
+            resource_monitor=self.resource_monitor,
         )
         self.runtime = runtime
         try:

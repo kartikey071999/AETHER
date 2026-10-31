@@ -474,6 +474,8 @@ class Engine:
         """Let loops finish their current iteration; cancelling mid-query can wedge SQLite."""
         loops, self._loops = self._loops, []
         self._loops_stopping.set()
+        for agent_id in self._agents:
+            self._bus.wake(agent_id)  # idle message loops return now, not after their poll
         if loops:
             _, pending = await asyncio.wait(loops, timeout=grace)
             for loop_task in pending:
@@ -515,7 +517,9 @@ class Engine:
         while not self._loops_stopping.is_set():
             try:
                 if not await self._bus.wait_for_messages(
-                    agent.agent_id, self._limits.message_poll_seconds
+                    agent.agent_id,
+                    self._limits.message_poll_seconds,
+                    stop=self._loops_stopping,
                 ):
                     continue
                 messages = await self._bus.claim(

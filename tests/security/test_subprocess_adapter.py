@@ -118,6 +118,7 @@ async def test_adapter_refuses_grant_for_a_different_operation(
     assert raised.value.reason is BlockReason.INVALID_AUTHORIZATION
 
 
+@pytest.mark.slow
 async def test_timeout_kills_the_whole_process_tree(registry, approve, roots, database) -> None:
     result = await _approved_run(
         registry,

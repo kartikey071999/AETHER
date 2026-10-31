@@ -13,6 +13,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlite_schema import copy_schema_to, schema_database
 
 from aether.agents import AGENT_DEFINITIONS
 from aether.agents.base import AgentContext, BaseAgent, TaskResult, TaskResultStatus
@@ -36,7 +37,7 @@ from aether.runtime.scheduler import Scheduler, SchedulerPolicy
 from aether.security import ApprovalService, OperationKind, SecuritySettings
 from aether.security.policy import SecurityPolicy
 from aether.storage.database import Database
-from aether.storage.models import Base, EventRecord, TaskRecord, TaskStatus
+from aether.storage.models import EventRecord, TaskRecord, TaskStatus
 from aether.storage.repositories import (
     ExecutionRunRepository,
     ObjectiveRepository,
@@ -153,9 +154,7 @@ class SweepingWarden(BaseAgent):
 
 @pytest_asyncio.fixture
 async def database(tmp_path: Path) -> AsyncIterator[Database]:
-    db = Database(f"sqlite+aiosqlite:///{(tmp_path / 'hooks.db').as_posix()}")
-    async with db.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    db = schema_database(tmp_path / "hooks.db")
     yield db
     await db.close()
 
@@ -305,8 +304,7 @@ def settings(tmp_path: Path) -> AetherSettings:
 @pytest_asyncio.fixture
 async def runtime(settings: AetherSettings) -> AsyncIterator[Runtime]:
     runtime = build_runtime(settings, security_settings=SecuritySettings(_env_file=None))
-    async with runtime.database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    copy_schema_to(settings.database_url.get_secret_value())
     yield runtime
     await runtime.close()
 

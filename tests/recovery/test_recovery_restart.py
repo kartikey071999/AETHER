@@ -9,7 +9,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
+import pytest
 from reliability_support import (
+    QuietMonitor,
     RecordingAgent,
     assign_message,
     build_engine,
@@ -178,11 +180,12 @@ async def _create_message(database: Database) -> MessageRecord:
     return row
 
 
+@pytest.mark.slow
 async def test_redelivered_objective_after_crash_is_created_and_planned_once(
     tmp_path: Path,
 ) -> None:
     settings = scenario_settings(tmp_path)
-    first = CapabilityScenario(settings, timing=FAST)
+    first = CapabilityScenario(settings, timing=FAST, resource_monitor=QuietMonitor())
     async with first:
         objective_id = await first.submit_objective(tag="redelivery")
         runtime = first.runtime
@@ -214,7 +217,9 @@ async def test_redelivered_objective_after_crash_is_created_and_planned_once(
     finally:
         await database.close()
 
-    second = CapabilityScenario(settings, timing=FAST, create_schema=False)
+    second = CapabilityScenario(
+        settings, timing=FAST, create_schema=False, resource_monitor=QuietMonitor()
+    )
     async with second:
         runtime = second.runtime
         assert runtime is not None

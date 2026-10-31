@@ -4,10 +4,10 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from sqlite_schema import schema_database
 
 from aether.observability.events import AetherEvent, build_event
 from aether.storage.database import Database
-from aether.storage.models import Base
 
 
 @pytest.fixture
@@ -28,10 +28,8 @@ def event() -> AetherEvent:
 
 @pytest.fixture
 async def database(tmp_path: Path) -> AsyncIterator[Database]:
-    database = Database(f"sqlite+aiosqlite:///{(tmp_path / 'events.db').as_posix()}")
+    database = schema_database(tmp_path / "events.db")
     try:
-        async with database.engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
         yield database
     finally:
         await database.close()

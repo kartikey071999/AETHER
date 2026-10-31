@@ -120,6 +120,7 @@ async def test_two_runtimes_racing_for_the_same_tasks_lease_each_once(
     await _lease_race([database, peer_database], objective_id)
 
 
+@pytest.mark.slow
 async def test_two_running_engines_execute_each_task_and_message_once(
     database, peer_database, objective_id
 ) -> None:

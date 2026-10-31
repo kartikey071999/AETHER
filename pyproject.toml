@@ -45,6 +45,7 @@ asyncio_mode = "auto"
 markers = [
     "live: opt-in real provider smoke tests (AETHER_LIVE_TESTS=1)",
     "postgres: PostgreSQL concurrency variants; skipped unless AETHER_TEST_POSTGRES_URL is set",
+    "slow: multi-second end-to-end/subprocess tests; run by default, deselect with -m 'not slow'",
 ]
 
 [tool.ruff]

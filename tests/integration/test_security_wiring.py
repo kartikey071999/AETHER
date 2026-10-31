@@ -9,6 +9,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import select
+from sqlite_schema import copy_schema_to
 
 from aether import main as cli
 from aether.agents import AGENT_DEFINITIONS
@@ -28,7 +29,7 @@ from aether.security import (
     SecuritySettings,
 )
 from aether.security.readonly import PermissionView
-from aether.storage.models import Base, EventRecord, MessageRecord, TaskRecord, TaskStatus
+from aether.storage.models import EventRecord, MessageRecord, TaskRecord, TaskStatus
 from aether.storage.repositories import ObjectiveRepository
 from aether.tools import AgentTools, Tool, ToolRegistry
 from aether.tools.adapters import SafeFiles, SafeHttp, SafeSubprocess
@@ -107,8 +108,7 @@ def settings(tmp_path: Path) -> AetherSettings:
 
 async def _open(settings: AetherSettings, argv: list[str]) -> Runtime:
     runtime = build_runtime(settings, _agents(argv), security_settings=_security_settings())
-    async with runtime.database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    copy_schema_to(settings.database_url.get_secret_value())
     return runtime
 
 

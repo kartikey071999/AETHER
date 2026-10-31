@@ -146,13 +146,20 @@ class MessageBus:
             )
             return {agent: count for agent, count in rows.all()}
 
-    async def wait_for_messages(self, agent_id: AgentId, timeout: float) -> bool:
-        """Wait for pending messages; the DB is polled so other processes and restarts work."""
+    async def wait_for_messages(
+        self, agent_id: AgentId, timeout: float, *, stop: asyncio.Event | None = None
+    ) -> bool:
+        """Wait for pending messages; the DB is polled so other processes and restarts work.
+
+        Returns False early once ``stop`` is set (call :meth:`wake` to interrupt the wait).
+        """
         wakeup = self._wakeups.setdefault(agent_id.value, asyncio.Event())
         deadline = time.monotonic() + max(timeout, 0.0)
         while True:
             # Clear before checking so a publish between check and wait is never lost.
             wakeup.clear()
+            if stop is not None and stop.is_set():
+                return False
             if await self.pending_count(agent_id) > 0:
                 return True
             remaining = deadline - time.monotonic()
