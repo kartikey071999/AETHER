@@ -354,13 +354,16 @@ async def generate_objective(
 
 def investigations(request: ResearchRequestPayload, limits: ResearchLimits) -> list[SourceSpec]:
     scope = request.scope.strip()
-    sources = (
-        ResearchScope.model_validate_json(scope).sources
-        if scope.startswith("{")
-        else list(limits.default_sources)
-    )
+    if scope.startswith("{"):
+        sources = ResearchScope.model_validate_json(scope).sources
+    elif limits.default_sources:
+        sources = list(limits.default_sources)
+    elif limits.web_research:
+        sources = web_sources(request.question, limits)
+    else:
+        sources = []
     unique = {
-        (source.kind, source.location): source
+        (source.kind, source.location, source.query): source
         for source in sources
         if source.perspective in {"both", request.mode.value}
     }
@@ -368,6 +371,141 @@ def investigations(request: ResearchRequestPayload, limits: ResearchLimits) -> l
     if request.mode is ResearchMode.UNCONVENTIONAL:
         selected.reverse()
     return selected[: request.budget.max_sources]
+
+
+_STOPWORDS = frozenset(
+    [
+        "about",
+        "after",
+        "also",
+        "and",
+        "any",
+        "are",
+        "best",
+        "between",
+        "can",
+        "could",
+        "does",
+        "each",
+        "for",
+        "from",
+        "have",
+        "how",
+        "into",
+        "its",
+        "library",
+        "libraries",
+        "more",
+        "most",
+        "new",
+        "not",
+        "our",
+        "should",
+        "than",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "use",
+        "used",
+        "using",
+        "want",
+        "what",
+        "when",
+        "where",
+        "which",
+        "while",
+        "who",
+        "why",
+        "will",
+        "with",
+        "would",
+        "you",
+        "your",
+        "python",
+        "package",
+        "packages",
+        "tool",
+        "tools",
+        "way",
+        "ways",
+    ]
+)
+_SEARCH_WORD = re.compile(r"[a-z0-9][a-z0-9_+.-]*")
+_GITHUB_FULL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$")
+
+
+def search_terms(question: str, limit: int = 6) -> str:
+    """Distinctive keywords of ``question`` for documentation and repository searches."""
+    words = (word.strip(".-+") for word in _SEARCH_WORD.findall(question.lower()))
+    kept = [word for word in words if len(word) > 2 and word not in _STOPWORDS]
+    return " ".join(list(dict.fromkeys(kept))[:limit])[:200]
+
+
+def web_sources(question: str, limits: ResearchLimits) -> list[SourceSpec]:
+    """Derived web sources: documentation (conventional) and GitHub (unconventional) searches."""
+    terms = search_terms(question)
+    if not terms:
+        return []
+    return [
+        SourceSpec(
+            kind="docs",
+            location=limits.docs_base_url,
+            query=terms,
+            purpose="Search reference documentation",
+        ),
+        SourceSpec(
+            kind="github_search",
+            location=terms,
+            purpose="Find existing implementations",
+        ),
+    ]
+
+
+def tool_request(source: SourceSpec, question: str) -> tuple[str, dict[str, object]]:
+    """The registry tool and arguments that read ``source``."""
+    if source.kind == "http":
+        return "http_request", {"url": source.location, "method": "GET"}
+    if source.kind == "file":
+        return "read_file", {"path": source.location, "max_bytes": 16384}
+    if source.kind == "web":
+        return "web.extract", {"url": source.location}
+    if source.kind == "pypi":
+        return "pypi.package", {"name": source.location}
+    if source.kind == "github":
+        owner, _, repo = source.location.partition("/")
+        return "github.repo", {"owner": owner, "repo": repo}
+    if source.kind == "github_search":
+        return "github.search", {"query": source.location}
+    return "docs.search", {
+        "base_url": source.location,
+        "query": source.query or search_terms(question) or question[:200],
+    }
+
+
+def github_follow_ups(facts: object, limit: int) -> list[SourceSpec]:
+    """``github`` sources for the top repositories of a github.search result.
+
+    The names come from untrusted search data, so they only ever become validated
+    ``owner/repo`` arguments of the read-only github.repo tool, never free-form requests.
+    """
+    if not isinstance(facts, dict) or not isinstance(facts.get("repositories"), list):
+        return []
+    follow_ups: list[SourceSpec] = []
+    for hit in facts["repositories"]:
+        name = hit.get("full_name") if isinstance(hit, dict) else None
+        if isinstance(name, str) and _GITHUB_FULL_NAME.match(name):
+            follow_ups.append(
+                SourceSpec(kind="github", location=name, purpose="Inspect a candidate repository")
+            )
+        if len(follow_ups) >= limit:
+            break
+    return follow_ups
 
 
 async def reserve_budget(

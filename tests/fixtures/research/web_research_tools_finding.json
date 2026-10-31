@@ -1,0 +1,195 @@
+{
+  "description": "Seeded SCOUT finding (T-052): web scraping/extraction library comparison. Evidence hashes are SHA-256 of the PyPI JSON API responses retrieved at retrieved_at; see docs/web-research.md.",
+  "agent": "SCOUT",
+  "question": "Which HTML fetching and extraction approach should AETHER use for SCOUT and ROGUE web research?",
+  "draft": {
+    "summary": "Compared HTML extraction approaches for AETHER web research by licence, maintenance, size, Windows support and security surface. The standard library parser covers readable-text, link and metadata extraction for documentation pages with zero new dependencies; selectolax is the best optional upgrade if parsing speed or CSS selectors become necessary; headless browsers are out of scope.",
+    "candidates": [
+      {
+        "name": "stdlib html.parser",
+        "description": "Event-driven HTMLParser with AETHER's own readable-text, link and metadata extraction.",
+        "pros": [
+          "No new dependency",
+          "Pure Python, works everywhere AETHER runs",
+          "Small, auditable attack surface",
+          "Never executes JavaScript"
+        ],
+        "cons": [
+          "Slower than C parsers on very large pages",
+          "No CSS selectors",
+          "Content heuristics are AETHER's own"
+        ],
+        "dependencies": [],
+        "risks": [
+          "Extraction quality on unusual layouts must be covered by fixtures"
+        ]
+      },
+      {
+        "name": "selectolax",
+        "description": "Lexbor-based HTML5 parser with CSS selectors.",
+        "pros": [
+          "MIT",
+          "No runtime dependencies",
+          "Fast",
+          "Windows wheels"
+        ],
+        "cons": [
+          "Compiled extension (~1.6 MB wheel)",
+          "Adds a parser surface written in C"
+        ],
+        "dependencies": [
+          "selectolax==1.0.2"
+        ],
+        "risks": [
+          "Memory-safety bugs in native code"
+        ]
+      },
+      {
+        "name": "BeautifulSoup + markdownify",
+        "description": "Tolerant tree builder, optionally converted to Markdown.",
+        "pros": [
+          "MIT",
+          "Widely known API"
+        ],
+        "cons": [
+          "Three to four new packages",
+          "Slow with the default parser"
+        ],
+        "dependencies": [
+          "beautifulsoup4",
+          "soupsieve",
+          "typing-extensions",
+          "markdownify",
+          "six"
+        ],
+        "risks": []
+      },
+      {
+        "name": "trafilatura / readability-lxml",
+        "description": "Main-content extraction tuned for articles.",
+        "pros": [
+          "Best boilerplate removal for news-style pages"
+        ],
+        "cons": [
+          "Pulls lxml and several helper packages",
+          "Tuned for articles, not reference docs"
+        ],
+        "dependencies": [
+          "lxml",
+          "justext",
+          "htmldate",
+          "courlan"
+        ],
+        "risks": [
+          "Large native dependency (lxml)"
+        ]
+      },
+      {
+        "name": "Playwright headless browser",
+        "description": "Real browser rendering for JavaScript-heavy sites.",
+        "pros": [
+          "Renders client-side content"
+        ],
+        "cons": [
+          "~48 MB wheel plus browser downloads",
+          "Executes untrusted JavaScript",
+          "Bypasses SafeHttp DNS pinning"
+        ],
+        "dependencies": [
+          "playwright",
+          "greenlet",
+          "pyee"
+        ],
+        "risks": [
+          "Very large security surface; cannot be gated per request by PermissionService"
+        ]
+      }
+    ],
+    "recommendation": "stdlib html.parser",
+    "confidence": 0.7,
+    "classification": "hypothesis",
+    "evidence_indices": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "security_considerations": [
+      "Every request is a web_fetch operation authorized by PermissionService and sent through SafeHttp DNS pinning",
+      "Extracted text is UntrustedContent; instruction-like content is quarantined, never followed",
+      "Avoid GPL html2text for licence compatibility and headless browsers for JavaScript execution risk"
+    ],
+    "next_steps": [
+      "Measure extraction quality on a wider fixture set before considering selectolax",
+      "Coordinator review if selectolax==1.0.2 is ever proposed as an optional dependency"
+    ]
+  },
+  "evidence": [
+    {
+      "source_uri": "https://pypi.org/pypi/selectolax/json",
+      "summary": "selectolax 1.0.2, MIT, no runtime dependencies, compiled wheels incl. win_amd64 (largest ~1.6 MB), uploaded 2026-10-22.",
+      "content_hash": "25b6a0b1dfac40e1c79aa82a26c12a460acf5f17b3f585045defeae48e2707c8",
+      "retrieved_at": "2026-10-31T10:17:10+00:00"
+    },
+    {
+      "source_uri": "https://pypi.org/pypi/beautifulsoup4/json",
+      "summary": "beautifulsoup4 4.15.0, MIT, pure Python (~110 KB) plus soupsieve and typing-extensions, uploaded 2026-06-07.",
+      "content_hash": "0434c8678c65c3db2eb58edc7bd4a7c2d81170ba9d6cab9d81718eab19b3dfb5",
+      "retrieved_at": "2026-10-31T10:17:10+00:00"
+    },
+    {
+      "source_uri": "https://pypi.org/pypi/trafilatura/json",
+      "summary": "trafilatura 2.3.1, Apache-2.0, pulls lxml, justext, htmldate, courlan, urllib3, charset_normalizer and certifi.",
+      "content_hash": "46efbc8750181489fb885d4b07872af2cfdce6db77a3348d91ff3a849fb6b17a",
+      "retrieved_at": "2026-10-31T10:17:11+00:00"
+    },
+    {
+      "source_uri": "https://pypi.org/pypi/readability-lxml/json",
+      "summary": "readability-lxml 0.9, Apache-2.0, depends on lxml[html-clean], chardet and cssselect.",
+      "content_hash": "3d095b03e482662e8a5fed392c753b40f7914ce1d07b07f053302a4d092e855a",
+      "retrieved_at": "2026-10-31T10:17:11+00:00"
+    },
+    {
+      "source_uri": "https://pypi.org/pypi/markdownify/json",
+      "summary": "markdownify 1.2.3, MIT classifier, depends on beautifulsoup4 and six.",
+      "content_hash": "66c2da08d9f0a4ff51182f427dcc44bf5bbd4e0658f14d29a8820e352e34e2f2",
+      "retrieved_at": "2026-10-31T10:17:11+00:00"
+    },
+    {
+      "source_uri": "https://pypi.org/pypi/playwright/json",
+      "summary": "playwright 1.64.1, Apache-2.0, ~48 MB platform wheel plus separately downloaded browser builds.",
+      "content_hash": "f6ecee318a864f0d6059329fcdd05fe45d114b050995522269a465439f871c9c",
+      "retrieved_at": "2026-10-31T10:17:12+00:00"
+    },
+    {
+      "source_uri": "https://pypi.org/pypi/lxml/json",
+      "summary": "lxml 6.1.3, BSD-3-Clause, compiled libxml2/libxslt wheels up to ~8.9 MB.",
+      "content_hash": "30dda8543e22202de5603da9e688a856cec2169ea89bce5a38a5f11705029adf",
+      "retrieved_at": "2026-10-31T10:17:13+00:00"
+    },
+    {
+      "source_uri": "https://pypi.org/pypi/html2text/json",
+      "summary": "html2text 2025.4.15, GPL-3.0-or-later.",
+      "content_hash": "f753493e3082bf0f8ddb6b5b57ce2f05538709ae80b67135b1f537f0bde64e25",
+      "retrieved_at": "2026-10-31T10:17:13+00:00"
+    },
+    {
+      "source_uri": "https://pypi.org/pypi/html5lib/json",
+      "summary": "html5lib 1.1, MIT, last release 2020-06-22.",
+      "content_hash": "1e44b17181b3a4538838d4d6b6d31f122910f8ea883cd26505469d403ca5c37b",
+      "retrieved_at": "2026-10-31T10:17:14+00:00"
+    },
+    {
+      "source_uri": "https://docs.python.org/3/library/html.parser.html",
+      "summary": "html.parser.HTMLParser is part of the standard library: a tolerant, event-driven tokenizer with no extra dependency.",
+      "content_hash": null,
+      "retrieved_at": null
+    }
+  ]
+}

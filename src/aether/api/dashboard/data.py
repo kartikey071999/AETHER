@@ -12,12 +12,14 @@ from aether.storage.models import (
     CapabilityRecord,
     InteractionDirection,
     InteractionRecord,
+    ObjectiveRecord,
     RequirementRecord,
     ResearchFindingRecord,
     SecurityDecisionRecord,
     TaskDependencyRecord,
     TaskRecord,
     TaskStatus,
+    TestRunRecord,
 )
 
 LIST_LIMIT = 100
@@ -184,3 +186,33 @@ async def events(api: ApiServices, *, event_type: str | None) -> dict[str, Any]:
         event_type=event_type, task_id=None, limit=WIDE_LIMIT, offset=0
     )
     return api.sanitize(page)
+
+
+async def task_detail(api: ApiServices, task_id: UUID) -> dict[str, Any]:
+    """One task with its runs, verification evidence, security decisions and events."""
+    task = api.sanitize(await api.repository.task(task_id, limit=50, offset=0))
+    tests = await _items(
+        api,
+        select(TestRunRecord)
+        .where(TestRunRecord.task_id == task_id)
+        .order_by(TestRunRecord.started_at.desc(), TestRunRecord.id),
+        20,
+    )
+    decisions = await _items(
+        api,
+        select(SecurityDecisionRecord)
+        .where(SecurityDecisionRecord.task_id == task_id)
+        .order_by(SecurityDecisionRecord.created_at.desc()),
+        20,
+    )
+    objective = await _items(
+        api, select(ObjectiveRecord).where(ObjectiveRecord.id == UUID(task["objective_id"])), 1
+    )
+    return {
+        "task": task,
+        "objective": (
+            {"id": objective[0]["id"], "title": objective[0]["title"]} if objective else None
+        ),
+        "tests": tests,
+        "decisions": decisions,
+    }

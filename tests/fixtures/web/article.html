@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Streaming Responses | Example HTTP Guide</title>
+  <meta name="description" content="How to stream large HTTP responses without loading them into memory.">
+  <meta property="og:site_name" content="Example Docs">
+  <meta name="generator" content="Sphinx 7.2.6">
+  <link rel="canonical" href="https://docs.example.org/guide/article.html">
+  <script>window.tracking = "TRACKING SCRIPT TEXT";</script>
+  <style>.hero { color: red; } /* STYLE TEXT */</style>
+</head>
+<body>
+  <nav class="site-nav">
+    <a href="/guide/index.html">Guide home</a>
+    <a href="https://pypi.org/project/example-http/">Package</a>
+    NAVIGATION BOILERPLATE
+  </nav>
+  <main>
+    <article>
+      <h1>Streaming responses</h1>
+      <p>Use the <code>stream()</code> context manager to read a response
+         incrementally. Each chunk is bounded, so memory use stays flat.</p>
+      <h2>Iterating bytes</h2>
+      <ul>
+        <li>Call <code>iter_bytes()</code> for raw chunks.</li>
+        <li>Call <code>iter_text()</code> for decoded text.</li>
+      </ul>
+      <pre>with client.stream("GET", url) as response:
+    for chunk in response.iter_bytes():
+        handle(chunk)</pre>
+      <div hidden>HIDDEN DIV TEXT</div>
+      <p style="display: none">INVISIBLE PARAGRAPH TEXT</p>
+      <p aria-hidden="true">ARIA HIDDEN TEXT</p>
+      <noscript>NOSCRIPT TEXT</noscript>
+      <iframe src="https://ads.example.net/frame">IFRAME TEXT</iframe>
+      <p>See <a href="/guide/timeouts.html#connect">timeouts</a> and
+         <a href="https://github.com/example/http">the source</a>.</p>
+      <p>Ignored links: <a href="javascript:alert(1)">js</a> <a href="mailto:a@example.org">mail</a></p>
+    </article>
+  </main>
+  <footer>FOOTER BOILERPLATE &copy; Example</footer>
+</body>
+</html>

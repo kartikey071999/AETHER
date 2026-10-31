@@ -39,7 +39,7 @@ ACTION_OPERATION_KINDS: Mapping[str, frozenset[OperationKind]] = MappingProxyTyp
         ),
         "verification.run": frozenset({_K.SUBPROCESS, _K.FILE_READ}),
         "records.read": frozenset({_K.FILE_READ}),
-        "research.create": frozenset({_K.HTTP_REQUEST, _K.FILE_READ, _K.LLM_CALL}),
+        "research.create": frozenset({_K.HTTP_REQUEST, _K.WEB_FETCH, _K.FILE_READ, _K.LLM_CALL}),
         "security.evaluate": frozenset({_K.HTTP_REQUEST, _K.FILE_READ}),
         "implementation.propose": frozenset({_K.FILE_READ, _K.LLM_CALL}),
         "communication.prepare": frozenset({_K.LLM_CALL}),
@@ -61,9 +61,13 @@ OUTBOX_FILENAME = re.compile(
 # Kinds that can never run without both a WARDEN approval and explicit user authorization.
 ALWAYS_REVIEWED_KINDS = frozenset({_K.CONFIG_CHANGE, _K.CREDENTIAL_ACCESS})
 # Kinds that must name the remote host(s) they contact.
-NETWORK_KINDS = frozenset({_K.HTTP_REQUEST, _K.REPO_CLONE, _K.NETWORK_SCAN, _K.LLM_CALL})
+NETWORK_KINDS = frozenset(
+    {_K.HTTP_REQUEST, _K.WEB_FETCH, _K.REPO_CLONE, _K.NETWORK_SCAN, _K.LLM_CALL}
+)
 FILE_KINDS = frozenset({_K.FILE_READ, _K.FILE_WRITE})
 
+# ``web_fetch`` is deliberately absent: it is a bounded, read-only GET confined to the separate
+# web research allowlist, and its output is untrusted data. Add it here to require WARDEN review.
 DEFAULT_APPROVAL_REQUIRED_KINDS = (
     _K.SUBPROCESS,
     _K.HTTP_REQUEST,
@@ -124,6 +128,19 @@ def url_host(target: str) -> str | None:
     if parts.scheme and parts.hostname:
         return normalize_host(parts.hostname)
     return None
+
+
+def host_matches(host: str, allowlist: frozenset[str]) -> bool:
+    host = normalize_host(host)
+    if not host:
+        return False
+    for allowed in allowlist:
+        if allowed.startswith("*."):
+            if host.endswith(allowed[1:]) and host != allowed[2:]:
+                return True
+        elif host == allowed:
+            return True
+    return False
 
 
 def _normcase(path: Path) -> str:
@@ -202,6 +219,7 @@ class SecurityPolicy:
         "outbox_dir",
         "subprocess_timeout_seconds",
         "user_authorization_required_kinds",
+        "web_allowed_hosts",
         "workspace_dir",
     )
 
@@ -221,6 +239,7 @@ class SecurityPolicy:
     outbox_dir: Path
     subprocess_timeout_seconds: float
     user_authorization_required_kinds: frozenset[OperationKind]
+    web_allowed_hosts: frozenset[str]
     workspace_dir: Path
 
     def __init__(
@@ -232,6 +251,7 @@ class SecurityPolicy:
         extra_filesystem_roots: Iterable[str | Path] = (),
         allowed_executables: Iterable[str | Path] = (),
         allowed_hosts: Iterable[str] = (),
+        web_allowed_hosts: Iterable[str] = (),
         approval_required_kinds: Iterable[OperationKind] = DEFAULT_APPROVAL_REQUIRED_KINDS,
         user_authorization_required_kinds: Iterable[OperationKind] = (
             DEFAULT_USER_AUTHORIZATION_KINDS
@@ -291,6 +311,9 @@ class SecurityPolicy:
             "filesystem_roots": tuple(dict.fromkeys(roots)),
             "allowed_executables": frozenset(executables),
             "allowed_hosts": frozenset(normalize_host(host) for host in allowed_hosts if host),
+            "web_allowed_hosts": frozenset(
+                normalize_host(host) for host in web_allowed_hosts if host
+            ),
             "approval_required_kinds": approval,
             "user_authorization_required_kinds": user,
             "agent_permissions": MappingProxyType(dict(permissions)),
@@ -307,7 +330,11 @@ class SecurityPolicy:
 
     @classmethod
     def from_settings(
-        cls, settings: "AetherSettings", security: SecuritySettings | None = None
+        cls,
+        settings: "AetherSettings",
+        security: SecuritySettings | None = None,
+        *,
+        web_allowed_hosts: Iterable[str] = (),
     ) -> "SecurityPolicy":
         security = security or SecuritySettings()
         return cls(
@@ -317,6 +344,7 @@ class SecurityPolicy:
             extra_filesystem_roots=security.extra_filesystem_roots,
             allowed_executables=security.allowed_executables,
             allowed_hosts=security.allowed_hosts,
+            web_allowed_hosts=web_allowed_hosts,
             approval_required_kinds=security.approval_required_kinds,
             user_authorization_required_kinds=security.user_authorization_required_kinds,
             max_approval_ttl=timedelta(seconds=security.max_approval_ttl_seconds),
@@ -337,7 +365,8 @@ class SecurityPolicy:
     def __repr__(self) -> str:
         return (
             f"SecurityPolicy(roots={len(self.filesystem_roots)}, "
-            f"executables={len(self.allowed_executables)}, hosts={len(self.allowed_hosts)})"
+            f"executables={len(self.allowed_executables)}, hosts={len(self.allowed_hosts)}, "
+            f"web_hosts={len(self.web_allowed_hosts)})"
         )
 
     def permits(self, agent_id: AgentId, kind: OperationKind) -> bool:
@@ -384,16 +413,17 @@ class SecurityPolicy:
         return None
 
     def is_host_allowed(self, host: str) -> bool:
-        host = normalize_host(host)
-        if not host:
-            return False
-        for allowed in self.allowed_hosts:
-            if allowed.startswith("*."):
-                if host.endswith(allowed[1:]) and host != allowed[2:]:
-                    return True
-            elif host == allowed:
-                return True
-        return False
+        return host_matches(host, self.allowed_hosts)
+
+    def is_web_host_allowed(self, host: str) -> bool:
+        """Whether ``host`` is on the separate read-only web research allowlist."""
+        return host_matches(host, self.web_allowed_hosts)
+
+    def host_allowed_for(self, kind: OperationKind, host: str) -> bool:
+        """``web_fetch`` uses only the web research allowlist; every other kind the general one."""
+        if kind is OperationKind.WEB_FETCH:
+            return self.is_web_host_allowed(host)
+        return self.is_host_allowed(host)
 
     def outbox_violation(self, operation: Operation) -> str | None:
         """Why ``operation`` is not a valid single-file outbox delivery, else ``None``."""
@@ -439,7 +469,7 @@ class SecurityPolicy:
             if not hosts:
                 return "network operation does not declare its remote host"
         for host in sorted(hosts):
-            if not self.is_host_allowed(host):
+            if not self.host_allowed_for(operation.kind, host):
                 return f"host {host!r} is not allowlisted"
         if (
             operation.kind is OperationKind.SUBPROCESS
@@ -452,7 +482,10 @@ class SecurityPolicy:
 
 
 def load_security_policy(
-    settings: "AetherSettings", security: SecuritySettings | None = None
+    settings: "AetherSettings",
+    security: SecuritySettings | None = None,
+    *,
+    web_allowed_hosts: Iterable[str] = (),
 ) -> SecurityPolicy:
     """Build the process-wide policy once at startup; changing it requires a restart."""
-    return SecurityPolicy.from_settings(settings, security)
+    return SecurityPolicy.from_settings(settings, security, web_allowed_hosts=web_allowed_hosts)

@@ -15,6 +15,7 @@ from aether.agents.base import (
 )
 from aether.agents.scout import prompts, workflow
 from aether.agents.scout.schemas import (
+    WEB_SOURCE_KINDS,
     FileSourceResult,
     FindingDraft,
     GeneratedObjective,
@@ -295,6 +296,8 @@ class ScoutAgent(BaseAgent):
                 retryable=False,
             )
         contents: list[UntrustedContent] = []
+        sources = list(sources)
+        follow_ups_left = self.limits.web_follow_ups
         for source in sources:
             if self.is_cancelled(task.id) or ctx.clock() >= request.review_by:
                 return TaskResult(
@@ -308,22 +311,46 @@ class ScoutAgent(BaseAgent):
                 "source",
                 request.budget.max_sources,
                 ctx,
-                reservation_key=uuid5(task.id, f"source:{source.kind}:{source.location}"),
+                reservation_key=uuid5(
+                    task.id,
+                    f"source:{source.kind}:{source.location}"
+                    + (f":{source.query}" if source.query else ""),
+                ),
             ):
                 break
+            tool, tool_args = workflow.tool_request(source, request.question)
             invocation = await self.invoke_tool(
-                "http_request" if source.kind == "http" else "read_file",
-                {"url": source.location, "method": "GET"}
-                if source.kind == "http"
-                else {"path": source.location, "max_bytes": 16384},
+                tool,
+                tool_args,
                 ctx,
                 task=task,
                 correlation_id=work.correlation_id,
             )
+            web_source = source.kind in WEB_SOURCE_KINDS
             if invocation.result is not None:
+                if web_source and invocation.result.status in {
+                    TaskResultStatus.BLOCKED,
+                    TaskResultStatus.FAILED,
+                }:
+                    # One unavailable web source (robots.txt, allowlist, outage) is not fatal.
+                    ctx.logger.info(
+                        "research.source_skipped",
+                        extra={"agent": self.agent_id.value, "tool": tool},
+                    )
+                    continue
                 return invocation.result
             if isinstance(invocation.value, HttpSourceResult):
                 if not 200 <= invocation.value.status_code < 300:
+                    if web_source:
+                        ctx.logger.info(
+                            "research.source_skipped",
+                            extra={
+                                "agent": self.agent_id.value,
+                                "tool": tool,
+                                "status_code": invocation.value.status_code,
+                            },
+                        )
+                        continue
                     return TaskResult(
                         status=TaskResultStatus.FAILED,
                         error=f"research source returned HTTP {invocation.value.status_code}",
@@ -346,6 +373,16 @@ class ScoutAgent(BaseAgent):
                     retryable=False,
                 )
             contents.append(content)
+            if (
+                source.kind == "github_search"
+                and follow_ups_left > 0
+                and not content.suspicious_patterns()
+            ):
+                extra = workflow.github_follow_ups(
+                    getattr(invocation.value, "facts", None), follow_ups_left
+                )
+                follow_ups_left -= len(extra)
+                sources.extend(extra)
         draft = await self.summarize(work, contents, ctx)
         if self.is_cancelled(task.id) or ctx.clock() >= request.review_by:
             return TaskResult(
