@@ -15,6 +15,7 @@ from aether.agents.forge.schemas import (
     RefusalCode,
     RuntimeScopeDefect,
 )
+from aether.agents.work_queue import work_queue
 from aether.communication.contracts import BlockerKind
 from aether.communication.messages import AgentId
 from aether.security.operations import OperationKind
@@ -230,12 +231,7 @@ class Preflight:
     ) -> None:
         edges = await TaskDependencyRepository(ctx.sessions).list_dependencies(task.id)
         wanted: list[UUID] = [*plan.depends_on, *edges]
-        incomplete = []
-        async with ctx.sessions() as session:
-            for dependency_id in dict.fromkeys(wanted):
-                dependency = await session.get(TaskRecord, dependency_id, populate_existing=True)
-                if dependency is None or dependency.state != TaskStatus.COMPLETED.value:
-                    incomplete.append(str(dependency_id))
+        incomplete = [str(item) for item in await work_queue(ctx, AgentId.FORGE).incomplete(wanted)]
         if incomplete:
             report.refusals.append(
                 Refusal(

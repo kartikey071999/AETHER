@@ -13,7 +13,6 @@ from aether.agents.muse.workflow import (
     feedback_preferences,
     handoff_options,
     personalization,
-    polish_opening,
     render_message,
     require_permission,
     routine_notification,
@@ -42,6 +41,8 @@ from aether.tools import ExecutionFailed, ToolCallContext, ToolInputError, Unkno
 class MuseSettings:
     data_dir: Path = Path("data")
     dedupe_window: timedelta = timedelta(hours=1)
+    # Kept for configuration compatibility; the opening is always chosen deterministically from
+    # explicit preferences (the former model "polish" could only return that same template).
     polish: bool = False
 
     def __post_init__(self) -> None:
@@ -104,23 +105,10 @@ class MuseAgent(BaseAgent):
                 request, preferences, options, deadline=message.deadline, context_names=names
             )
             settings = self._settings(ctx)
-            rendered = canonical
-            if settings.polish and not routine_notification(request, options):
-                opening = await polish_opening(
-                    preferences, ctx, objective_id=request.objective_id, task_id=request.task_id
-                )
-                rendered = render_message(
-                    request,
-                    preferences,
-                    options,
-                    deadline=message.deadline,
-                    context_names=names,
-                    opening=opening,
-                )
             stored = await repository.prepare_outbox(
                 message,
                 request,
-                rendered=rendered,
+                rendered=canonical,
                 canonical_text=canonical,
                 channel=preferences.channel,
                 data_dir=settings.data_dir.absolute(),

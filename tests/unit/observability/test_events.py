@@ -311,6 +311,12 @@ PAYLOAD_EXAMPLES = {
         "dedupe_hash": "0" * 64,
         "reason": "duplicate notice within the dedupe window",
     },
+    "task.access_denied": {
+        "requested_by": "FORGE",
+        "operation": "read_task",
+        "owner": "SCOUT",
+        "reason": "task belongs to SCOUT",
+    },
 }
 
 
