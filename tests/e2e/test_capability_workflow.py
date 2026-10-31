@@ -202,6 +202,18 @@ async def test_happy_path_verifies_the_capability_and_reports_it(tmp_path: Path)
     # 12. MUSE wrote the update, separating verified results from uncertainty.
     [outbox] = trace.outbox_paths
     text = outbox.read_text(encoding="utf-8")
+    reported_request = trace.messages_of(MessageType.COMMUNICATION_REQUEST, target=AgentId.MUSE)[-1]
+    reported_result = reported_request.payload["results"][0]
+    assert (
+        f"{reported_result['tasks_completed']} tasks completed for "
+        f"'{reported_result['objective']}'" in text
+    ), report
+    assert '{"objective"' not in text, report
+    roadmap_names = [
+        " ".join(capability.name.rsplit(" [", 1)[0].split()).casefold()
+        for capability in trace.capabilities
+    ]
+    assert len(roadmap_names) == len(set(roadmap_names)), report
     verified_part, _, uncertain_part = text.partition("## Uncertain")
     assert "## Verified" in verified_part
     assert all(criterion in verified_part for criterion in ACCEPTANCE_CRITERIA)
