@@ -42,7 +42,10 @@ build-backend = "uv_build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-markers = ["live: opt-in real provider smoke tests (AETHER_LIVE_TESTS=1)"]
+markers = [
+    "live: opt-in real provider smoke tests (AETHER_LIVE_TESTS=1)",
+    "postgres: PostgreSQL concurrency variants; skipped unless AETHER_TEST_POSTGRES_URL is set",
+]
 
 [tool.ruff]
 line-length = 100

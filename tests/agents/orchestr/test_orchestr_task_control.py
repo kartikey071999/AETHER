@@ -16,6 +16,7 @@ from aether.runtime.control import (
     TaskControl,
 )
 from aether.storage.models import EventRecord, TaskRecord, TaskStatus
+from aether.storage.repositories.tasks import TaskRepository
 
 
 @pytest.fixture
@@ -114,6 +115,30 @@ async def test_cancelling_without_task_control_leaves_running_tasks_and_logs_it(
 
     assert await harness.state(running.id) is TaskStatus.RUNNING
     assert await harness.store.decisions(task_id=running.id, decision="task_cancel_unavailable")
+
+
+async def test_a_task_leased_while_its_objective_is_cancelled_still_gets_a_cancel_request(
+    harness: Harness, control: TaskControl, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    objective_id = await harness.objective()
+    tasks = await harness.tasks(objective_id)
+    target = tasks["research.scout"]
+    await harness.store.tasks.transition(target.id, TaskStatus.SCHEDULED, actor="test")
+    original = TaskRepository.transition
+
+    async def worker_leases_first(self, task_id, new_status, **kwargs):
+        if task_id == target.id and new_status is TaskStatus.CANCELLED:
+            # The worker pool leased the task between ORCHESTR's read and its move.
+            await original(self, task_id, TaskStatus.RUNNING, actor="worker")
+        return await original(self, task_id, new_status, **kwargs)
+
+    monkeypatch.setattr(TaskRepository, "transition", worker_leases_first)
+
+    await _cancel(harness, objective_id, "no longer needed")
+
+    assert await harness.state(target.id) is TaskStatus.RUNNING
+    assert await control.pending_action(target.id) is ControlAction.CANCEL
+    assert await harness.store.decisions(task_id=target.id, decision="task_cancel_requested")
 
 
 async def test_cancelling_is_not_repeated_for_the_same_message(
