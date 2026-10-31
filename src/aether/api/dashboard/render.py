@@ -1,4 +1,8 @@
-"""HTML rendering; every dynamic value goes through ``esc`` and no script or style is inline."""
+"""HTML rendering; every dynamic value goes through ``esc`` and no script or style is inline.
+
+The server-rendered pages are complete without JavaScript. ``dashboard.js`` redraws the same
+markup from the ``/dashboard/data`` JSON views, so the class names here are a shared contract.
+"""
 
 import json
 import re
@@ -7,18 +11,58 @@ from datetime import UTC, datetime
 from html import escape
 from typing import Any
 
+from aether.api.dashboard import assets
+
 REFRESH_SECONDS = 10
 STALE_HEARTBEAT_SECONDS = 120
+WARN_RATIO = 0.7
+CRITICAL_RATIO = 0.9
 NAV = (
-    ("overview", "/dashboard", "Overview"),
-    ("objectives", "/dashboard/objectives", "Objectives"),
-    ("tasks", "/dashboard/tasks", "Tasks"),
-    ("security", "/dashboard/security", "Security"),
-    ("resources", "/dashboard/resources", "Resources"),
-    ("providers", "/dashboard/providers", "Providers"),
-    ("events", "/dashboard/events", "Events"),
+    ("overview", "/dashboard", "Overview", "g h"),
+    ("objectives", "/dashboard/objectives", "Objectives", "g o"),
+    ("tasks", "/dashboard/tasks", "Tasks", "g t"),
+    ("security", "/dashboard/security", "Security", "g s"),
+    ("resources", "/dashboard/resources", "Resources", "g r"),
+    ("providers", "/dashboard/providers", "Providers", "g p"),
+    ("events", "/dashboard/events", "Events", "g e"),
 )
+SHORTCUTS = (
+    ("/", "Focus the row filter"),
+    ("g h", "Go to overview"),
+    ("g o", "Go to objectives"),
+    ("g t", "Go to tasks"),
+    ("g s", "Go to security"),
+    ("g r", "Go to resources"),
+    ("g p", "Go to providers"),
+    ("g e", "Go to events"),
+    ("j / k", "Move between table rows"),
+    ("Enter", "Open the selected task"),
+    ("r", "Refresh now"),
+    ("t", "Toggle light / dark theme"),
+    ("Esc", "Close panel, dialog or filter"),
+    ("?", "Show this help"),
+)
+ICONS = {
+    "overview": "M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v4.5H9zM2.5 9h4.5v4.5H2.5zM9 9h4.5v4.5H9z",
+    "objectives": "M8 1.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13zM8 5a3 3 0 1 0 0 6a3 3 0 1 0 0-6z",
+    "tasks": "M6 3.5h7.5M6 8h7.5M6 12.5h7.5M2.5 3.5h1M2.5 8h1M2.5 12.5h1",
+    "security": "M8 1.5l5.5 2v4c0 3.3-2.3 5.9-5.5 7c-3.2-1.1-5.5-3.7-5.5-7v-4z",
+    "resources": "M1.5 8.5h3l2-5l3 9l2-4h3",
+    "providers": "M2.5 12a5.5 5.5 0 1 1 11 0M8 12l2.8-3.6",
+    "events": "M8 1.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13zM8 4.5V8l2.5 1.5",
+    "sun": "M8 5.2a2.8 2.8 0 1 0 0 5.6a2.8 2.8 0 1 0 0-5.6zM8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15"
+    "M3 3l1.1 1.1M11.9 11.9L13 13M3 13l1.1-1.1M11.9 4.1L13 3",
+    "moon": "M13.5 9.6A5.6 5.6 0 0 1 6.4 2.5a5.6 5.6 0 1 0 7.1 7.1z",
+    "pause": "M5.5 3.5v9M10.5 3.5v9",
+    "play": "M5 3.2l8 4.8l-8 4.8z",
+    "help": "M8 1.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13zM6.2 6.3a1.9 1.9 0 1 1 2.7 1.7"
+    "c-.6.3-.9.7-.9 1.3v.3M8 11.2v.3",
+    "search": "M7 2.5a4.5 4.5 0 1 0 0 9a4.5 4.5 0 1 0 0-9zM10.3 10.3l3.2 3.2",
+    "close": "M4 4l8 8M12 4l-8 8",
+    "mark": "M8 1.8l6.2 11.4H1.8zM8 6.6l2.6 4.8H5.4z",
+}
 _CSS_TOKEN = re.compile(r"[^a-z0-9_-]")
+Column = str | tuple[str, str]
 
 
 def esc(value: Any) -> str:
@@ -29,14 +73,15 @@ def css_token(value: Any) -> str:
     return _CSS_TOKEN.sub("-", str(value).lower())
 
 
+def icon(name: str) -> str:
+    return (
+        '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">'
+        f'<path d="{ICONS[name]}"/></svg>'
+    )
+
+
 def badge(value: Any) -> str:
     return f'<span class="badge s-{css_token(value)}">{esc(value)}</span>'
-
-
-def when(value: Any) -> str:
-    if not value:
-        return esc(None)
-    return esc(str(value).replace("T", " ")[:19] + " UTC")
 
 
 def parse_time(value: Any) -> datetime | None:
@@ -47,18 +92,38 @@ def parse_time(value: Any) -> datetime | None:
     return stamp.replace(tzinfo=UTC) if stamp.tzinfo is None else stamp
 
 
+def relative(seconds: float) -> str:
+    """Compact relative time; negative seconds lie in the future."""
+    future = seconds < -0.5
+    seconds = abs(seconds)
+    if seconds < 90:
+        text = f"{int(seconds)}s"
+    elif seconds < 5400:
+        text = f"{int(seconds // 60)}m"
+    elif seconds < 172_800:
+        text = f"{int(seconds // 3600)}h"
+    else:
+        text = f"{int(seconds // 86_400)}d"
+    return f"in {text}" if future else f"{text} ago"
+
+
 def age(value: Any, now: datetime) -> tuple[str, float | None]:
     stamp = parse_time(value) if value else None
     if stamp is None:
         return "never", None
     seconds = max(0.0, (now - stamp).total_seconds())
-    if seconds < 90:
-        return f"{int(seconds)}s ago", seconds
-    if seconds < 5400:
-        return f"{int(seconds // 60)}m ago", seconds
-    if seconds < 172_800:
-        return f"{int(seconds // 3600)}h ago", seconds
-    return f"{int(seconds // 86_400)}d ago", seconds
+    return relative(seconds), seconds
+
+
+def when(value: Any, now: datetime) -> str:
+    """Relative time as text with the exact UTC time on hover; JS keeps the text current."""
+    moment = parse_time(value) if value else None
+    if moment is None:
+        return esc(None)
+    moment = moment.astimezone(UTC)
+    absolute = moment.strftime("%Y-%m-%d %H:%M:%S UTC")
+    text = relative((now - moment).total_seconds())
+    return f'<time datetime="{esc(moment.isoformat())}" title="{absolute}">{esc(text)}</time>'
 
 
 def number(value: Any) -> float:
@@ -78,35 +143,111 @@ def human_bytes(value: Any) -> str:
 
 
 def compact_json(value: Any) -> str:
-    return esc(json.dumps(value, sort_keys=True, default=str)[:400]) if value else esc(None)
+    if not value:
+        return esc(None)
+    text = esc(json.dumps(value, sort_keys=True, default=str)[:400])
+    return f'<code class="payload" title="{text}">{text}</code>'
+
+
+def count(value: Any) -> str:
+    amount = number(value)
+    return f"{amount:,.0f}" if amount.is_integer() else f"{amount:,.2f}"
+
+
+def keyed(value: float, html: str) -> str:
+    """Wrap formatted ``html`` with its machine-readable sort key."""
+    return f'<data value="{value:.15g}">{html}</data>'
 
 
 def short_id(value: Any) -> str:
-    return f'<code title="{esc(value)}">{esc(str(value)[:8])}</code>'
+    if not value:
+        return esc(None)
+    return f'<code class="id" title="{esc(value)}" data-copy="{esc(value)}">{esc(str(value)[:8])}</code>'
 
 
-def empty(message: str) -> str:
-    return f'<p class="empty">{esc(message)}</p>'
+def empty(message: str, hint: str = "") -> str:
+    extra = f'<p class="empty-hint">{esc(hint)}</p>' if hint else ""
+    return f'<div class="empty"><p class="empty-title">{esc(message)}</p>{extra}</div>'
 
 
-def section(title: str, body: str, *, count: int | None = None) -> str:
-    suffix = f' <span class="count">{count}</span>' if count is not None else ""
-    return f"<section><h2>{esc(title)}{suffix}</h2>{body}</section>"
+def section(
+    title: str, body: str, *, count: int | None = None, key: str = "", note: str = ""
+) -> str:
+    ident = f' id="{esc(key)}"' if key else ""
+    suffix = f'<span class="count">{count}</span>' if count is not None else ""
+    aside = f'<span class="panel-note">{esc(note)}</span>' if note else ""
+    return (
+        f'<section class="panel"{ident}><div class="panel-head"><h2>{esc(title)}</h2>'
+        f"{suffix}{aside}</div>{body}</section>"
+    )
 
 
-def table(headers: Sequence[str], rows: Iterable[Sequence[str]], empty_message: str) -> str:
+def page_head(title: str, sub_html: str = "") -> str:
+    """``sub_html`` must already be escaped markup."""
+    extra = f'<p class="page-sub">{sub_html}</p>' if sub_html else ""
+    return f'<div class="page-head"><h1>{esc(title)}</h1>{extra}</div>'
+
+
+def table(
+    columns: Sequence[Column],
+    rows: Iterable[Sequence[str]],
+    empty_message: str,
+    *,
+    hint: str = "",
+    key: str = "",
+    row_attrs: Sequence[str] | None = None,
+) -> str:
     rows = list(rows)
     if not rows:
-        return empty(empty_message)
-    head = "".join(f"<th>{esc(item)}</th>" for item in headers)
-    body = "".join("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>" for row in rows)
-    return f'<div class="scroll"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
+        return empty(empty_message, hint)
+    names = [item if isinstance(item, str) else item[0] for item in columns]
+    kinds = ["" if isinstance(item, str) else f' class="{item[1]}"' for item in columns]
+    head = "".join(
+        f'<th scope="col"{kind}>{esc(name)}</th>' for name, kind in zip(names, kinds, strict=True)
+    )
+    body = "".join(
+        f"<tr{(' ' + row_attrs[index]) if row_attrs and row_attrs[index] else ''}>"
+        + "".join(f"<td{kind}>{cell}</td>" for cell, kind in zip(row, kinds, strict=True))
+        + "</tr>"
+        for index, row in enumerate(rows)
+    )
+    table_key = f' data-table="{esc(key)}"' if key else ""
+    return (
+        f'<div class="table-wrap"><table class="data"{table_key}>'
+        f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>"
+    )
+
+
+def tone(ratio: float) -> str:
+    if ratio >= CRITICAL_RATIO:
+        return "crit"
+    if ratio >= WARN_RATIO:
+        return "warn"
+    return "ok"
+
+
+def bar(ratio: float, label: str, *, kind: str = "progress", marks: bool = False) -> str:
+    width = max(0.0, min(ratio, 1.0)) * 100
+    lines = (
+        "".join(
+            f'<line class="bar-mark" x1="{mark * 100:g}" x2="{mark * 100:g}" y1="0" y2="8"/>'
+            for mark in (WARN_RATIO, CRITICAL_RATIO)
+        )
+        if marks
+        else ""
+    )
+    return (
+        f'<svg class="bar t-{kind}" viewBox="0 0 100 8" preserveAspectRatio="none" role="img" '
+        f'aria-label="{esc(label)}"><rect class="bar-track" width="100" height="8"/>'
+        f'<rect class="bar-fill" width="{width:.1f}" height="8"/>{lines}</svg>'
+    )
 
 
 def progress(done: float, total: float) -> str:
+    ratio = done / total if total else 0.0
     return (
-        f'<progress max="{max(total, 1):g}" value="{min(done, max(total, 1)):g}"></progress> '
-        f"{done:g}/{total:g}"
+        f'<span class="progress">{bar(ratio, f"{done:g} of {total:g} tasks completed")}'
+        f'<span class="num">{done:g}/{total:g}</span></span>'
     )
 
 
@@ -114,43 +255,138 @@ def objective_link(objective: dict[str, Any]) -> str:
     return f'<a href="/dashboard/objectives/{esc(objective["id"])}">{esc(objective["title"])}</a>'
 
 
-def layout(title: str, active: str, content: str, *, auth_panel: str = "") -> str:
-    links = "".join(
-        f'<a href="{href}"{" aria-current=page" if key == active else ""}>{esc(label)}</a>'
-        for key, href, label in NAV
+def task_attr(task_id: Any) -> str:
+    return f'data-task-id="{esc(task_id)}"' if task_id else ""
+
+
+def _nav(active: str) -> str:
+    return "".join(
+        f'<a href="{href}"{" aria-current=page" if key == active else ""}>'
+        f'{icon(key)}<span class="nav-label">{esc(label)}</span>'
+        f'<kbd class="nav-key">{esc(keys)}</kbd></a>'
+        for key, href, label, keys in NAV
     )
+
+
+def _shortcuts() -> str:
+    rows = "".join(
+        f"<div><dt>{''.join(f'<kbd>{esc(part)}</kbd>' for part in keys.split())}</dt>"
+        f"<dd>{esc(text)}</dd></div>"
+        for keys, text in SHORTCUTS
+    )
+    return (
+        '<dialog id="shortcuts" class="dialog" aria-labelledby="shortcuts-title">'
+        '<div class="dialog-head"><h2 id="shortcuts-title">Keyboard shortcuts</h2>'
+        '<button type="button" class="icon-btn" data-close-dialog aria-label="Close shortcuts">'
+        f'{icon("close")}</button></div><dl class="keys">{rows}</dl></dialog>'
+    )
+
+
+def layout(title: str, active: str, content: str, *, auth_panel: str = "", source: str = "") -> str:
+    label = next((name for key, _, name, _ in NAV if key == active), title)
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<meta name="color-scheme" content="dark light">'
         f"<title>{esc(title)} &middot; AETHER</title>"
-        '<link rel="stylesheet" href="/dashboard/static/dashboard.css"></head>'
-        f'<body data-refresh-seconds="{REFRESH_SECONDS}">'
-        f"<header><strong>AETHER</strong><nav>{links}</nav>"
-        '<span id="api-status" class="badge s-unknown">api: checking</span></header>'
-        f'{auth_panel}<main id="content">{content}</main>'
-        '<script src="/dashboard/static/dashboard.js" defer></script></body></html>'
+        f'<link rel="stylesheet" href="{assets.url("dashboard.css")}">'
+        f'<script src="{assets.url("theme.js")}"></script></head>'
+        f'<body data-refresh-seconds="{REFRESH_SECONDS}" data-page="{esc(active)}"'
+        f' data-source="{esc(source)}" data-stale-seconds="{STALE_HEARTBEAT_SECONDS}">'
+        '<a class="skip" href="#content">Skip to content</a><div class="shell">'
+        '<aside class="sidebar"><a class="brand" href="/dashboard">'
+        f'<svg class="mark" viewBox="0 0 16 16" aria-hidden="true"><path d="{ICONS["mark"]}"/>'
+        "</svg><span>AETHER</span></a>"
+        f'<nav class="nav" aria-label="Sections">{_nav(active)}</nav>'
+        '<div class="sidebar-foot">'
+        '<span id="api-status" class="badge s-unknown">api: checking</span>'
+        '<span class="foot-actions">'
+        '<button type="button" id="theme-toggle" class="icon-btn js-only"'
+        ' aria-label="Toggle colour theme" title="Toggle theme (t)">'
+        f'<span class="when-dark">{icon("sun")}</span><span class="when-light">{icon("moon")}'
+        "</span></button>"
+        '<button type="button" id="shortcuts-open" class="icon-btn js-only"'
+        f' aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">{icon("help")}</button>'
+        "</span></div></aside>"
+        '<div class="main"><div class="topbar">'
+        f'<span class="crumb">{esc(label)}</span>'
+        '<label class="search js-only"><span class="visually-hidden">Filter rows</span>'
+        f'{icon("search")}<input id="search" type="search" autocomplete="off" spellcheck="false"'
+        ' placeholder="Filter rows on this page"><kbd>/</kbd></label>'
+        '<span id="live" class="live js-only" data-state="idle" role="status">'
+        '<span class="live-dot" aria-hidden="true"></span><span id="live-text">Live</span></span>'
+        '<button type="button" id="live-toggle" class="icon-btn js-only" aria-pressed="false"'
+        ' aria-label="Pause live updates" title="Pause live updates">'
+        f'<span class="when-live">{icon("pause")}</span><span class="when-paused">'
+        f"{icon('play')}</span></button></div>"
+        f'{auth_panel}<main id="content" tabindex="-1">{content}</main></div></div>'
+        '<aside id="drawer" class="drawer" aria-labelledby="drawer-title" hidden>'
+        '<div class="drawer-head"><h2 id="drawer-title">Task</h2>'
+        '<button type="button" id="drawer-close" class="icon-btn" aria-label="Close task details">'
+        f'{icon("close")}</button></div><div id="drawer-body" class="drawer-body"></div></aside>'
+        f"{_shortcuts()}"
+        '<div id="toasts" class="toasts" role="status" aria-live="polite"></div>'
+        f'<script src="{assets.url("core.js")}" defer></script>'
+        f'<script src="{assets.url("dashboard.js")}" defer></script></body></html>'
     )
 
 
+def stat(label: str, value: Any, *, state: str = "", hint: str = "") -> str:
+    extra = f'<span class="stat-hint">{esc(hint)}</span>' if hint else ""
+    marker = f" s-{css_token(state)}" if state else ""
+    return (
+        f'<div class="stat{marker}"><span class="stat-label">{esc(label)}</span>'
+        f'<span class="stat-value">{esc(value)}</span>{extra}</div>'
+    )
+
+
+def task_mix(counts: dict[str, int]) -> str:
+    total = sum(counts.values())
+    offset = 0.0
+    segments = []
+    for state, count in counts.items():
+        if count:
+            width = 100 * count / total
+            segments.append(
+                f'<rect class="seg s-{css_token(state)}" x="{offset:.2f}" width="{width:.2f}"'
+                ' height="8"/>'
+            )
+            offset += width
+    chart = (
+        '<svg class="mix" viewBox="0 0 100 8" preserveAspectRatio="none" role="img" '
+        f'aria-label="{total} tasks by state">{"".join(segments)}</svg>'
+        if total
+        else ""
+    )
+    items = "".join(
+        f'<li{" class=zero" if not count else ""}>{badge(state)} <strong class="num">{count}'
+        "</strong></li>"
+        for state, count in counts.items()
+    )
+    return f'{chart}<ul class="counts">{items}</ul>'
+
+
 def overview_page(data: dict[str, Any], now: datetime) -> str:
-    agent_rows = []
+    agent_rows, attrs, healthy = [], [], 0
     for agent in data["agents"]:
         beat = agent.get("latest_heartbeat")
-        text, seconds = age(beat["observed_at"] if beat else None, now)
+        _, seconds = age(beat["observed_at"] if beat else None, now)
         status = agent["status"] if beat else "no heartbeat"
         if seconds is not None and seconds > STALE_HEARTBEAT_SECONDS:
             status = "stale"
+        elif beat and status not in ("degraded", "stopping", "stopped"):
+            healthy += 1
+        current = beat["current_task_id"] if beat else None
         agent_rows.append(
             [
                 f"<strong>{esc(agent['agent_id'])}</strong>",
                 badge(status),
-                esc(text),
-                short_id(beat["current_task_id"])
-                if beat and beat["current_task_id"]
-                else esc(None),
+                when(beat["observed_at"], now) if beat else '<span class="muted">never</span>',
+                short_id(current),
                 esc(agent["responsibility"]),
             ]
         )
+        attrs.append(task_attr(current))
     active = [item for item in data["objectives"] if item["status"] == "active"]
     objective_rows = []
     for item in active:
@@ -160,58 +396,85 @@ def overview_page(data: dict[str, Any], now: datetime) -> str:
             [
                 objective_link(item),
                 badge(item["status"]),
-                progress(stats["completed_tasks"], stats["total_tasks"])
-                + (f" ({percent:.0f}%)" if percent is not None else " (no tasks)"),
+                progress(stats["completed_tasks"], stats["total_tasks"]),
+                f"{percent:.0f}%" if percent is not None else '<span class="muted">no tasks</span>',
                 esc(item["priority"]),
             ]
         )
-    counts = "".join(
-        f"<li>{badge(state)} <strong>{count}</strong></li>"
-        for state, count in data["task_counts"].items()
-    )
+    counts = data["task_counts"]
     error_rows = [
         [
-            when(item["occurred_at"]),
+            when(item["occurred_at"], now),
             esc(item["agent"]),
-            esc(item["error_type"]),
+            f"<code>{esc(item['error_type'])}</code>",
             esc(item["message"]),
             badge("resolved" if item["resolved"] else "open"),
         ]
         for item in data["errors"]
     ]
+    waiting = counts.get("waiting_for_approval", 0) + counts.get("waiting_for_verification", 0)
+    failing = counts.get("failed", 0) + counts.get("blocked", 0)
+    unresolved = sum(1 for item in data["errors"] if not item["resolved"])
+    stats_html = (
+        '<div class="stats">'
+        + stat(
+            "Agents healthy",
+            f"{healthy}/{len(data['agents'])}",
+            state="ok" if data["agents"] and healthy == len(data["agents"]) else "",
+        )
+        + stat("Active objectives", len(active))
+        + stat("Running tasks", counts.get("running", 0), state="running")
+        + stat(
+            "Waiting", waiting, state="paused" if waiting else "", hint="approval or verification"
+        )
+        + stat("Failed or blocked", failing, state="failed" if failing else "")
+        + stat("Open errors", unresolved, state="open" if unresolved else "", hint="latest 10")
+        + "</div>"
+    )
     return (
-        "<h1>Overview</h1>"
+        page_head("Overview", esc("Agents, objectives and task flow from persistent state."))
+        + stats_html
         + section(
             "Agents",
             table(
                 ["Agent", "Status", "Last heartbeat", "Current task", "Responsibility"],
                 agent_rows,
                 "No agents are registered yet.",
+                hint="Agents appear here once the runtime registers them.",
+                key="agents",
+                row_attrs=attrs,
             ),
             count=len(agent_rows),
+            key="agents",
         )
         + section(
             "Active objectives",
             table(
-                ["Objective", "Status", "Progress", "Priority"],
+                ["Objective", "Status", "Progress", ("Done", "num"), ("Priority", "num")],
                 objective_rows,
                 "No active objectives.",
+                hint="Objectives submitted to the API show here while they are active.",
+                key="active-objectives",
             ),
             count=len(objective_rows),
+            key="active-objectives",
         )
-        + section("Tasks by state", f'<ul class="counts">{counts}</ul>')
+        + section("Tasks by state", task_mix(counts), count=sum(counts.values()), key="task-mix")
         + section(
             "Recent errors",
             table(
                 ["When", "Agent", "Type", "Message", "State"],
                 error_rows,
                 "No errors have been recorded.",
+                hint="Failures and their recovery attempts are listed here.",
+                key="errors",
             ),
+            key="errors",
         )
     )
 
 
-def objectives_page(data: dict[str, Any]) -> str:
+def objectives_page(data: dict[str, Any], now: datetime) -> str:
     rows = []
     for item in data["items"]:
         stats = item["progress"]
@@ -221,17 +484,21 @@ def objectives_page(data: dict[str, Any]) -> str:
                 badge(item["status"]),
                 esc(item["priority"]),
                 progress(stats["completed_tasks"], stats["total_tasks"]),
-                when(item["created_at"]),
+                when(item["created_at"], now),
+                short_id(item["id"]),
             ]
         )
-    return "<h1>Objectives</h1>" + section(
+    return page_head("Objectives") + section(
         "All objectives",
         table(
-            ["Objective", "Status", "Priority", "Progress", "Created"],
+            ["Objective", "Status", ("Priority", "num"), "Progress", "Created", "ID"],
             rows,
             "No objectives have been submitted yet.",
+            hint="Submit one with POST /objectives using the API token.",
+            key="objectives",
         ),
         count=data["total"],
+        key="objectives",
     )
 
 
@@ -257,29 +524,40 @@ def _dag(tasks: list[dict[str, Any]], dependencies: list[dict[str, Any]]) -> str
             return f'<li>{label} <span class="muted">(listed above)</span></li>'
         shown.add(task_id)
         nested = "".join(node(child) for child in children.get(task_id, []))
-        return f"<li>{label}{f'<ul>{nested}</ul>' if nested else ''}</li>"
+        return f"<li {task_attr(task_id)}>{label}{f'<ul>{nested}</ul>' if nested else ''}</li>"
 
     roots = [task["id"] for task in tasks if task["id"] not in has_parent]
     # A defensive pass keeps any task that is only reachable through a cycle visible.
     body = "".join(node(root) for root in roots) + "".join(
         node(task["id"]) for task in tasks if task["id"] not in shown
     )
-    return f'<ul class="dag">{body}</ul>' if body else empty("This objective has no tasks.")
+    if not body:
+        return empty("This objective has no tasks.", "ORCHESTR adds tasks as it plans the work.")
+    return f'<div id="task-graph" class="graph-host"></div><ul class="dag">{body}</ul>'
 
 
-def objective_page(data: dict[str, Any]) -> str:
+def objective_page(data: dict[str, Any], now: datetime) -> str:
     item = data["objective"]
     stats = item["progress"]
     criteria = "".join(f"<li>{esc(entry)}</li>" for entry in item["completion_criteria"])
     head = (
-        f"<h1>{esc(item['title'])}</h1>"
-        f"<p>{badge(item['status'])} priority {esc(item['priority'])} &middot; "
-        f"{progress(stats['completed_tasks'], stats['total_tasks'])}</p>"
-        f"<p>{esc(item['description'])}</p>"
-        + (f"<h3>Completion criteria</h3><ul>{criteria}</ul>" if criteria else "")
+        '<nav class="crumbs" aria-label="Breadcrumb">'
+        '<a href="/dashboard/objectives">Objectives</a><span aria-hidden="true">/</span>'
+        f"{short_id(item['id'])}</nav>"
+        f'<div class="page-head"><h1>{esc(item["title"])}</h1>'
+        f'<p class="meta">{badge(item["status"])}<span>priority '
+        f'<strong class="num">{esc(item["priority"])}</strong></span>'
+        f"{progress(stats['completed_tasks'], stats['total_tasks'])}"
+        f"<span>created {when(item['created_at'], now)}</span></p></div>"
+        f'<p class="lead">{esc(item["description"])}</p>'
+        + (
+            f'<div class="criteria"><h3>Completion criteria</h3><ul>{criteria}</ul></div>'
+            if criteria
+            else ""
+        )
     )
     requirements = table(
-        ["Requirement", "Type", "Status", "Priority", "Acceptance criteria"],
+        ["Requirement", "Type", "Status", ("Priority", "num"), "Acceptance criteria"],
         [
             [
                 esc(row["title"]),
@@ -291,9 +569,10 @@ def objective_page(data: dict[str, Any]) -> str:
             for row in data["requirements"]
         ],
         "No requirements recorded for this objective.",
+        key="requirements",
     )
     findings = table(
-        ["Agent", "Question", "Findings", "Class", "Confidence", "Status"],
+        ["Agent", "Question", "Findings", "Class", ("Confidence", "num"), "Status"],
         [
             [
                 esc(row["agent"]),
@@ -306,12 +585,14 @@ def objective_page(data: dict[str, Any]) -> str:
             for row in data["findings"]
         ],
         "No research findings recorded for this objective.",
+        key="findings",
     )
     capability_rows = []
     for row in data["capabilities"]:
         evidence = "<br>".join(
             f"{esc(run['suite'])}: {badge(run['verdict'] or run['status'])} "
-            f"{run['passed']} passed, {run['failed']} failed, {run['errors']} errors"
+            f"{esc(run['passed'])} passed, {esc(run['failed'])} failed, "
+            f"{esc(run['errors'])} errors"
             for run in row["verification_evidence"]
         ) or esc(None)
         capability_rows.append(
@@ -326,66 +607,79 @@ def objective_page(data: dict[str, Any]) -> str:
         ["Capability", "Lifecycle", "Verification", "Evidence"],
         capability_rows,
         "No capabilities are linked to this objective.",
+        key="capabilities",
     )
     decisions = table(
         ["When", "Decision", "Operation", "Rationale", "Expires"],
         [
             [
-                when(row["created_at"]),
+                when(row["created_at"], now),
                 badge(row["decision"]),
-                esc(row["operation"]),
+                f"<code>{esc(row['operation'])}</code>",
                 esc(row["rationale"]),
-                when(row["expires_at"]),
+                when(row["expires_at"], now),
             ]
             for row in data["decisions"]
         ],
         "No security decisions for this objective's tasks.",
+        key="objective-decisions",
+        row_attrs=[task_attr(row["task_id"]) for row in data["decisions"]],
     )
     authorizations = table(
         ["Requested", "Question", "Status", "Responded"],
         [
             [
-                when(row["requested_at"]),
+                when(row["requested_at"], now),
                 esc(row["question"]),
                 badge(row["status"]),
-                when(row["responded_at"]),
+                when(row["responded_at"], now),
             ]
             for row in data["authorizations"]
         ],
         "No authorization requests for this objective.",
+        key="authorizations",
     )
     final = data["final_message"]
     final_html = (
-        f'<p class="muted">{when(final["occurred_at"])} via {esc(final["channel"])}</p>'
+        f'<p class="muted">{when(final["occurred_at"], now)} via {esc(final["channel"])}</p>'
         f'<pre class="message">{esc(final["summary"])}</pre>'
         if final
         else empty("MUSE has not sent a message for this objective yet.")
     )
     return (
-        '<p><a href="/dashboard/objectives">&larr; All objectives</a></p>'
-        + head
-        + section("Task graph", _dag(data["tasks"], data["dependencies"]), count=len(data["tasks"]))
+        head
+        + section(
+            "Task graph",
+            _dag(data["tasks"], data["dependencies"]),
+            count=len(data["tasks"]),
+            key="graph",
+        )
         + section("Requirements", requirements, count=len(data["requirements"]))
         + section("Research findings", findings, count=len(data["findings"]))
         + section("Capabilities and verification", capabilities, count=len(data["capabilities"]))
         + section("Security decisions", decisions, count=len(data["decisions"]))
         + section("Authorization requests", authorizations, count=len(data["authorizations"]))
-        + section("Final MUSE message", final_html)
+        + section("Final MUSE message", final_html, key="final")
     )
 
 
 def tasks_page(
-    data: dict[str, Any], states: Sequence[str], state: str | None, agent: str | None
+    data: dict[str, Any],
+    states: Sequence[str],
+    state: str | None,
+    agent: str | None,
+    now: datetime,
 ) -> str:
     options = "".join(
         f'<option value="{esc(item)}"{" selected" if item == state else ""}>{esc(item)}</option>'
         for item in states
     )
     form = (
-        '<form method="get" class="filters"><label>State <select name="state">'
+        '<form method="get" class="filters" id="task-filters"><label>State <select name="state">'
         f'<option value="">all</option>{options}</select></label>'
-        f'<label>Agent <input name="agent" maxlength="24" value="{escape(agent or "")}"></label>'
-        '<button type="submit">Filter</button></form>'
+        f'<label>Agent <input name="agent" maxlength="24" value="{escape(agent or "")}"'
+        ' autocomplete="off"></label>'
+        '<button type="submit">Apply</button></form>'
     )
     rows = [
         [
@@ -394,27 +688,43 @@ def tasks_page(
             esc(item["assigned_agent"]),
             esc(item["priority"]),
             f"{esc(item['attempt'])}/{esc(item['max_attempts'])}",
-            esc(item["last_error"]),
-            when(item["updated_at"]),
+            f'<span class="error-text">{esc(item["last_error"])}</span>'
+            if item["last_error"]
+            else esc(None),
+            when(item["updated_at"], now),
+            short_id(item["id"]),
         ]
         for item in data["items"]
     ]
     return (
-        "<h1>Tasks</h1>"
+        page_head("Tasks", esc("Select a row to see its runs, evidence and events."))
         + form
         + section(
             "Tasks",
             table(
-                ["Task", "State", "Agent", "Priority", "Attempts", "Last error", "Updated"],
+                [
+                    "Task",
+                    "State",
+                    "Agent",
+                    ("Priority", "num"),
+                    ("Attempts", "num"),
+                    "Last error",
+                    "Updated",
+                    "ID",
+                ],
                 rows,
                 "No tasks match.",
+                hint="Clear the filters or wait for ORCHESTR to plan work.",
+                key="tasks",
+                row_attrs=[task_attr(item["id"]) for item in data["items"]],
             ),
             count=data["total"],
+            key="tasks",
         )
     )
 
 
-def security_page(data: dict[str, Any]) -> str:
+def security_page(data: dict[str, Any], now: datetime) -> str:
     pending = data["pending"]["items"]
     pending_rows = []
     for item in pending:
@@ -423,40 +733,47 @@ def security_page(data: dict[str, Any]) -> str:
         if person:
             attrs = f'data-request-id="{request_id}" data-person-id="{esc(person)}"'
             actions = (
-                f'<button type="button" data-respond="approved" {attrs}>Approve</button> '
+                '<span class="actions">'
+                f'<button type="button" class="approve" data-respond="approved" {attrs}>Approve'
+                "</button>"
                 f'<button type="button" class="deny" data-respond="denied" {attrs}>Deny</button>'
+                "</span>"
             )
         else:
             actions = '<span class="muted">Not delivered to a person yet</span>'
         pending_rows.append(
             [
-                when(item["requested_at"]),
+                when(item["requested_at"], now),
                 esc(item["question"]),
-                when(item["expires_at"]),
+                when(item["expires_at"], now),
                 actions,
             ]
         )
     decision_rows = [
         [
-            when(item["created_at"]),
+            when(item["created_at"], now),
             badge(item["decision"]),
-            esc(item["operation"]),
+            f"<code>{esc(item['operation'])}</code>",
             esc(item["rationale"]),
             compact_json(item["scope"]),
-            when(item["expires_at"]),
+            when(item["expires_at"], now),
         ]
         for item in data["decisions"]["items"]
     ]
     return (
-        "<h1>Security</h1>"
+        page_head(
+            "Security", esc("Approvals waiting on a person, and WARDEN's recorded decisions.")
+        )
         + section(
             "Pending approvals",
             table(
                 ["Requested", "Question", "Expires", "Respond"],
                 pending_rows,
                 "Nothing is waiting for approval.",
+                key="pending",
             ),
             count=len(pending_rows),
+            key="pending",
         )
         + section(
             "Security decisions",
@@ -464,22 +781,26 @@ def security_page(data: dict[str, Any]) -> str:
                 ["When", "Decision", "Operation", "Rationale", "Scope", "Expires"],
                 decision_rows,
                 "No security decisions have been recorded.",
+                key="decisions",
+                row_attrs=[task_attr(item["task_id"]) for item in data["decisions"]["items"]],
             ),
             count=data["decisions"]["total"],
+            key="decisions",
         )
     )
 
 
 AUTH_PANEL = (
-    '<section id="auth-panel"><h2>Approval authentication</h2>'
+    '<section id="auth-panel" class="auth" aria-labelledby="auth-title">'
+    '<div class="auth-text"><h2 id="auth-title">Approval authentication</h2>'
     '<p class="muted">The API token is kept in this browser tab only (sessionStorage) and is sent'
-    " solely as a request header when you approve or deny.</p>"
-    '<label>API token <input id="api-token" type="password" autocomplete="off"'
-    ' spellcheck="false"></label> '
-    '<button type="button" id="forget-token">Forget token</button>'
+    " solely as a request header when you approve or deny.</p></div>"
+    '<div class="auth-fields"><label>API token <input id="api-token" type="password"'
+    ' autocomplete="off" spellcheck="false"></label>'
     '<label>Response note <input id="respond-note" maxlength="500"'
     ' placeholder="Optional note recorded with the decision"></label>'
-    '<div id="respond-status" role="status"></div></section>'
+    '<button type="button" id="forget-token">Forget token</button></div>'
+    '<div id="respond-status" class="respond-status" role="status"></div></section>'
 )
 
 
@@ -491,137 +812,157 @@ def sparkline(
     low = min(values) if low is None else low
     high = max(values) if high is None else high
     span = (high - low) or 1.0
-    width, height = 300, 50
+    width, height = 300, 56
     points = [
         (
             width * index / max(len(values) - 1, 1),
-            height - 2 - (height - 4) * (value - low) / span,
+            height - 3 - (height - 6) * (value - low) / span,
         )
         for index, value in enumerate(values)
     ]
     if len(points) == 1:
         points = [(0.0, points[0][1]), (float(width), points[0][1])]
-    path = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
+    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
+    area = f"M0,{height} L{line.replace(' ', ' L')} L{width},{height} Z"
     return (
-        f'<svg class="spark" viewBox="0 0 {width} {height}" role="img" aria-label="trend">'
-        f'<polyline fill="none" stroke="currentColor" stroke-width="1.5" points="{path}"/></svg>'
+        f'<svg class="spark" viewBox="0 0 {width} {height}" preserveAspectRatio="none" '
+        'role="img" aria-label="trend">'
+        f'<path class="spark-area" d="{area}"/>'
+        f'<polyline class="spark-line" points="{line}"/></svg>'
     )
 
 
-def resources_page(data: dict[str, Any]) -> str:
+def resources_page(data: dict[str, Any], now: datetime) -> str:
     items = data["items"]
     if not items:
-        return "<h1>Resources</h1>" + empty("No resource measurements have been recorded yet.")
+        return page_head("Resources") + section(
+            "Host resources",
+            empty(
+                "No resource measurements have been recorded yet.",
+                "The runtime samples CPU, RAM and disk while agents run.",
+            ),
+        )
     latest = items[0]
     chronological = list(reversed(items))
+
+    def series(key: str) -> list[float]:
+        return [number(item[key]) for item in chronological]
+
+    cpu, ram, disk = series("cpu_percent"), series("available_ram_bytes"), series("free_disk_bytes")
     cards = [
-        (
-            "CPU",
-            f"{number(latest['cpu_percent']):.1f}%",
-            [number(i["cpu_percent"]) for i in chronological],
-            0.0,
-            100.0,
-        ),
-        (
-            "Available RAM",
-            human_bytes(latest["available_ram_bytes"]),
-            [number(i["available_ram_bytes"]) for i in chronological],
-            None,
-            None,
-        ),
-        (
-            "Free disk",
-            human_bytes(latest["free_disk_bytes"]),
-            [number(i["free_disk_bytes"]) for i in chronological],
-            None,
-            None,
-        ),
+        ("cpu", "CPU", f"{number(latest['cpu_percent']):.1f}%", cpu, 0.0, 100.0, "%"),
+        ("ram", "Available RAM", human_bytes(latest["available_ram_bytes"]), ram, None, None, "B"),
+        ("disk", "Free disk", human_bytes(latest["free_disk_bytes"]), disk, None, None, "B"),
     ]
     body = "".join(
-        f'<div class="card"><h3>{esc(name)}</h3><p class="big">{esc(value)}</p>'
-        f"{sparkline(series, low=low, high=high)}</div>"
-        for name, value, series, low, high in cards
+        f'<div class="metric" data-metric="{key}"><div class="metric-head">'
+        f'<h3>{esc(name)}</h3><span class="metric-value">{esc(value)}</span></div>'
+        f"{sparkline(values, low=low, high=high)}"
+        '<div class="metric-range"><span>min '
+        f"{esc(f'{min(values):.1f}%' if unit == '%' else human_bytes(min(values)))}</span><span>max "
+        f"{esc(f'{max(values):.1f}%' if unit == '%' else human_bytes(max(values)))}</span></div>"
+        "</div>"
+        for key, name, value, values, low, high, unit in cards
     )
     rows = [
         [
-            when(item["observed_at"]),
-            f"{number(item['cpu_percent']):.1f}%",
-            human_bytes(item["available_ram_bytes"]),
-            human_bytes(item["free_disk_bytes"]),
+            when(item["observed_at"], now),
+            keyed(number(item["cpu_percent"]), f"{number(item['cpu_percent']):.1f}%"),
+            keyed(number(item["available_ram_bytes"]), human_bytes(item["available_ram_bytes"])),
+            keyed(number(item["free_disk_bytes"]), human_bytes(item["free_disk_bytes"])),
         ]
         for item in items[:20]
     ]
     return (
-        "<h1>Resources</h1>"
-        f'<p class="muted">Latest measurement {when(latest["observed_at"])}; '
-        f"trend covers the last {len(items)} of {data['total']} measurements.</p>"
-        f'<div class="cards">{body}</div>'
+        page_head(
+            "Resources",
+            f"Latest measurement {when(latest['observed_at'], now)}; trend covers the last "
+            f"{len(items)} of {data['total']} measurements.",
+        )
+        + f'<div class="metrics">{body}</div>'
         + section(
             "Recent measurements",
-            table(["Observed", "CPU", "Available RAM", "Free disk"], rows, ""),
+            table(
+                ["Observed", ("CPU", "num"), ("Available RAM", "num"), ("Free disk", "num")],
+                rows,
+                "",
+                key="measurements",
+            ),
+            key="measurements",
         )
     )
 
 
-def _budget_bar(used: Any, limit: Any, *, money: bool = False) -> str:
-    used_text = f"${number(used):.4f}" if money else f"{number(used):g}"
+def budget(used: Any, limit: Any, *, money: bool = False) -> str:
+    used_text = f"${number(used):.4f}" if money else count(used)
     if limit is None:
-        return f'{esc(used_text)} <span class="muted">(no limit)</span>'
-    limit_text = f"${number(limit):.2f}" if money else f"{number(limit):g}"
-    return f"{progress_value(number(used), number(limit))} {esc(used_text)} / {esc(limit_text)}"
-
-
-def progress_value(used: float, limit: float) -> str:
-    cap = max(limit, 1e-9)
-    return f'<progress max="{cap:g}" value="{min(used, cap):g}"></progress>'
+        return f'<span class="num">{esc(used_text)}</span> <span class="muted">no limit</span>'
+    limit_text = f"${number(limit):.2f}" if money else count(limit)
+    ratio = number(used) / number(limit) if number(limit) > 0 else 1.0
+    level = tone(ratio)
+    return (
+        f'<span class="budget">{bar(ratio, f"{ratio:.0%} of budget", kind=level, marks=True)}'
+        f'<span class="num">{esc(used_text)} / {esc(limit_text)}</span>'
+        f'<span class="pct t-{level}">{ratio:.0%}</span></span>'
+    )
 
 
 def providers_page(data: dict[str, Any]) -> str:
-    rows = []
+    rows, attrs = [], []
+    date = data["items"][0]["date"] if data["items"] else ""
     for item in data["items"]:
-        today, budget = item["today"], item["budget"] or {}
+        today, policy = item["today"], item["budget"] or {}
         rows.append(
             [
                 f"<strong>{esc(item['provider'])}</strong>",
-                esc(item["date"]),
-                _budget_bar(today["requests"], budget.get("max_requests_per_day")),
-                _budget_bar(today["tokens"], budget.get("max_tokens_per_day")),
-                _budget_bar(today["cost_usd"], budget.get("max_cost_usd_per_day"), money=True),
+                budget(today["requests"], policy.get("max_requests_per_day")),
+                budget(today["tokens"], policy.get("max_tokens_per_day")),
+                budget(today["cost_usd"], policy.get("max_cost_usd_per_day"), money=True),
                 esc(today["active"]),
             ]
         )
+        attrs.append("")
         for model in item["model_budgets"]:
-            usage, policy = model["today"], model["budget"]
+            usage, limits = model["today"], model["budget"]
             rows.append(
                 [
-                    f"&nbsp;&nbsp;{esc(item['provider'])}/{esc(model['model'])}",
-                    esc(item["date"]),
-                    _budget_bar(usage["requests"], policy.get("max_requests_per_day")),
-                    _budget_bar(usage["tokens"], policy.get("max_tokens_per_day")),
-                    _budget_bar(usage["cost_usd"], policy.get("max_cost_usd_per_day"), money=True),
+                    f'<span class="sub-row">{esc(item["provider"])}/{esc(model["model"])}</span>',
+                    budget(usage["requests"], limits.get("max_requests_per_day")),
+                    budget(usage["tokens"], limits.get("max_tokens_per_day")),
+                    budget(usage["cost_usd"], limits.get("max_cost_usd_per_day"), money=True),
                     esc(usage["active"]),
                 ]
             )
-    return "<h1>Providers</h1>" + section(
+            attrs.append('class="sub"')
+    return page_head(
+        "Providers",
+        esc(
+            f"Bars turn amber at {WARN_RATIO:.0%} and red at {CRITICAL_RATIO:.0%} of a daily budget."
+        ),
+    ) + section(
         "Today's usage vs budgets (UTC day)",
         table(
-            ["Provider", "Date", "Requests", "Tokens", "Cost", "In flight"],
+            ["Provider", "Requests", "Tokens", "Cost", ("In flight", "num")],
             rows,
             "No provider usage or budgets are configured.",
+            key="providers",
+            row_attrs=attrs,
         ),
+        key="providers",
+        note=date,
     )
 
 
-def events_page(data: dict[str, Any], event_type: str | None) -> str:
+def events_page(data: dict[str, Any], event_type: str | None, now: datetime) -> str:
     form = (
-        '<form method="get" class="filters"><label>Event type '
-        f'<input name="type" maxlength="64" value="{escape(event_type or "")}"></label>'
-        '<button type="submit">Filter</button></form>'
+        '<form method="get" class="filters" id="event-filters"><label>Event type '
+        f'<input name="type" maxlength="64" value="{escape(event_type or "")}"'
+        ' autocomplete="off"></label><button type="submit">Apply</button></form>'
     )
     rows = [
         [
-            when(item["created_at"]),
-            esc(item["event_type"]),
+            when(item["created_at"], now),
+            f"<code>{esc(item['event_type'])}</code>",
             esc(item["category"]),
             esc(item["actor"]),
             f"{esc(item['aggregate_type'])} {short_id(item['aggregate_id'])}",
@@ -630,7 +971,7 @@ def events_page(data: dict[str, Any], event_type: str | None) -> str:
         for item in data["items"]
     ]
     return (
-        "<h1>Events</h1>"
+        page_head("Events", esc("The append-only event log, newest first."))
         + form
         + section(
             "Latest events",
@@ -638,7 +979,10 @@ def events_page(data: dict[str, Any], event_type: str | None) -> str:
                 ["When", "Type", "Category", "Actor", "Subject", "Payload"],
                 rows,
                 "No events match.",
+                key="events",
+                row_attrs=[task_attr(item["task_id"]) for item in data["items"]],
             ),
             count=data["total"],
+            key="events",
         )
     )
