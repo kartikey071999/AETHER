@@ -43,6 +43,8 @@ def agent_services(
     Only what each agent reads: ORCHESTR's scheduling inputs and MUSE's settings. WARDEN's
     approvals/policy come from `SecurityServices`, and ORCHESTR's `task_control` from the engine.
     """
+    from datetime import timedelta
+
     from aether.agents.muse import MuseSettings
     from aether.agents.orchestr.limits import LIMITS_SERVICE
 
@@ -53,7 +55,12 @@ def agent_services(
             "disk_path": settings.data_dir,
             LIMITS_SERVICE: settings.orchestr,
         },
-        AgentId.MUSE: {"muse_settings": MuseSettings(data_dir=settings.data_dir)},
+        AgentId.MUSE: {
+            "muse_settings": MuseSettings(
+                data_dir=settings.data_dir,
+                dedupe_window=timedelta(minutes=settings.muse_dedupe_window_minutes),
+            )
+        },
     }
     present = set(agent_ids)
     return {agent_id: values for agent_id, values in services.items() if agent_id in present}

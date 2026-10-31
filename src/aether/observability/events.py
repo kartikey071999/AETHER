@@ -768,3 +768,22 @@ EVENT_TYPES["provider.budget_exhausted"] = ProviderBudgetExhaustedPayload
 EVENT_TYPES["provider.circuit_opened"] = ProviderCircuitOpenedPayload
 EVENT_CATEGORIES["provider.budget_exhausted"] = EventCategory.PROVIDER
 EVENT_CATEGORIES["provider.circuit_opened"] = EventCategory.PROVIDER
+
+
+# --- notification dedupe (T-047) ---
+
+
+class CommunicationSuppressedPayload(EventPayload):
+    """MUSE suppressed a notice duplicating one the audience already got within the window."""
+
+    request_message_id: UUID
+    duplicate_of_message_id: UUID
+    duplicate_of_interaction_id: UUID
+    audience: UUID | None = None
+    notice_kind: str
+    dedupe_hash: str = Field(min_length=64, max_length=64)
+    reason: str
+
+
+EVENT_TYPES["communication.suppressed"] = CommunicationSuppressedPayload
+EVENT_CATEGORIES["communication.suppressed"] = EventCategory.DECISION

@@ -29,6 +29,8 @@ class HandoffOptions(MuseModel):
     context_entity_ids: list[UUID] = Field(default_factory=list, max_length=20)
     context_names: list[str] = Field(default_factory=list, max_length=20)
     routine: bool = False
+    # What the notice is about (e.g. ORCHESTR's update kind); part of the dedupe key.
+    notice_kind: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class OpeningPolish(MuseModel):
@@ -54,6 +56,9 @@ class OutboxCheckpoint(MuseModel):
     task_id: UUID | None = None
     requirement_id: UUID | None = None
     prepared_at: UtcDatetime
+    # Dedupe identity (T-047); absent on checkpoints written before it existed.
+    notice_kind: str | None = None
+    dedupe_hash: str | None = None
 
 
 class ResponseCheckpoint(MuseModel):

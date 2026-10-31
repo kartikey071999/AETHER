@@ -96,6 +96,9 @@ class AetherSettings(BaseSettings):
     task_interrupt_grace_seconds: float = Field(default=10.0, ge=0)
     orchestr: OrchestrLimits = Field(default_factory=OrchestrLimits)
     research: ResearchLimits = Field(default_factory=ResearchLimits)
+    # MUSE suppresses a notice repeating one the same audience got for the same objective and
+    # notice kind within this many minutes (0 disables duplicate suppression).
+    muse_dedupe_window_minutes: float = Field(default=60.0, ge=0, allow_inf_nan=False)
 
     @field_validator("agent_tick_overrides")
     @classmethod
