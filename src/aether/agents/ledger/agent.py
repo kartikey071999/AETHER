@@ -58,7 +58,7 @@ from aether.communication.contracts import (
     validate_payload,
 )
 from aether.communication.messages import AgentId, AgentMessage, MessageType
-from aether.security.approvals import DecisionOutcome
+from aether.security import DecisionOutcome
 from aether.storage.models import (
     CapabilityRecord,
     CapabilityStatus,
