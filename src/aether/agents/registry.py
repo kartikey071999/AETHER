@@ -46,7 +46,7 @@ AGENT_DEFINITIONS: tuple[AgentDefinition, ...] = (
     AgentDefinition(
         AgentId.MUSE,
         "Personalizes final user-facing communication from ORCHESTR's structured handoff.",
-        ("preferences.read", "communication.prepare"),
+        ("preferences.read", "communication.prepare", "communication.deliver"),
     ),
 )
 

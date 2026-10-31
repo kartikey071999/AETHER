@@ -183,7 +183,9 @@ class BaseAgent(ABC):
             value = await ctx.tools.invoke(tool, args, call)
         except OperationBlocked as blocked:
             operation = ctx.tools.build_operation(tool, args, call)
-            return ToolInvocation(result=await blocked_result(blocked, operation, ctx))
+            return ToolInvocation(
+                result=await blocked_result(blocked, operation, ctx, correlation_id=correlation_id)
+            )
         except (ToolInputError, UnknownTool) as error:
             return ToolInvocation(
                 result=TaskResult(

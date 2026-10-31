@@ -9,6 +9,7 @@ from aether.security.permissions import PermissionService
 from aether.tools.adapters._base import ExecutionFailed
 from aether.tools.adapters.files import FileReadInput, FileWriteInput, SafeFiles
 from aether.tools.adapters.http import HttpInput, HttpResult, Resolver, SafeHttp
+from aether.tools.adapters.outbox import OutboxDelivery, OutboxDeliveryInput, OutboxDeliveryResult
 from aether.tools.adapters.subprocess import (
     SafeSubprocess,
     SubprocessInput,
@@ -27,7 +28,8 @@ def build_default_registry(
     http_transport: httpx.AsyncBaseTransport | None = None,
     http_resolver: Resolver | None = None,
 ) -> ToolRegistry:
-    """Registry with the standard tools: run_process, http_request, read_file, write_file."""
+    """Registry with the standard tools: run_process, http_request, read_file, write_file and
+    deliver_outbox_message."""
     registry = ToolRegistry(permissions)
     files = SafeFiles(permissions)
     registry.register(
@@ -62,6 +64,15 @@ def build_default_registry(
             "write_file", OperationKind.FILE_WRITE, FileWriteInput, files, "Write a confined file."
         )
     )
+    registry.register(
+        Tool(
+            "deliver_outbox_message",
+            OperationKind.FILE_WRITE,
+            OutboxDeliveryInput,
+            OutboxDelivery(permissions),
+            "Create one new markdown message file directly in the data outbox (never overwrites).",
+        )
+    )
     return registry
 
 
@@ -71,6 +82,9 @@ __all__ = [
     "FileWriteInput",
     "HttpInput",
     "HttpResult",
+    "OutboxDelivery",
+    "OutboxDeliveryInput",
+    "OutboxDeliveryResult",
     "SafeFiles",
     "SafeHttp",
     "SafeSubprocess",

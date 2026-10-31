@@ -6,7 +6,10 @@ when the runtime data directory differs from the default ``data`` directory.
 
 Only communication.request produces user-facing messages. Other contract-accepted notices
 are recorded, not promoted to communication requests. Outbound artifacts always use the
-bound MUSE tool facade; denied writes remain staged, never delivered. ``resume_pending(ctx)``
+bound MUSE tool facade; denied writes remain staged, never delivered. The facade's only write
+is the narrow ``deliver_outbox_message`` tool (``communication.deliver``): one new
+``<UTC timestamp>-<uuid>.md`` file directly in ``data_dir/outbox``, never overwritten.
+``resume_pending(ctx)``
 replays incomplete deliveries and responses after restart. ``execute_task`` resumes existing
 handoffs for that task; it never treats a task description as permission to communicate.
 

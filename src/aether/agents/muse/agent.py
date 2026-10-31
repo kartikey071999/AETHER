@@ -155,12 +155,12 @@ class MuseAgent(BaseAgent):
                 )
             if ctx.tools.agent_id is not AgentId.MUSE:
                 raise PermissionError("MUSE cannot use another agent's tool facade")
-            args = {"path": str(saved.path), "content": stored.text, "append": False}
+            args = {"path": str(saved.path), "content": stored.text}
             try:
-                result = await ctx.tools.invoke("write_file", args, call)
+                result = await ctx.tools.invoke("deliver_outbox_message", args, call)
             except OperationBlocked as blocked:
                 if blocked.reason in REVIEWABLE_REASONS:
-                    operation = ctx.tools.build_operation("write_file", args, call)
+                    operation = ctx.tools.build_operation("deliver_outbox_message", args, call)
                     await ctx.bus.publish(
                         build_message(
                             AgentId.MUSE,
@@ -298,8 +298,8 @@ class MuseAgent(BaseAgent):
                     correlation_id=saved.correlation_id,
                 )
                 operation = ctx.tools.build_operation(
-                    "write_file",
-                    {"path": str(saved.path), "content": stored.text, "append": False},
+                    "deliver_outbox_message",
+                    {"path": str(saved.path), "content": stored.text},
                     call,
                 )
                 if operation.input_hash != input_hash:
@@ -430,6 +430,6 @@ async def delete_person_data(
 ) -> None:
     """Trusted, explicit privacy deletion request; not available through inter-agent payloads."""
     await require_permission(ctx, "communication.prepare")
-    await MuseRepository(ctx.sessions).delete_person(
-        person_id, correlation_id or uuid4(), ctx.clock()
+    await MuseRepository(ctx.sessions).delete_person_data(
+        person_id, "MUSE", correlation_id=correlation_id or uuid4(), now=ctx.clock()
     )

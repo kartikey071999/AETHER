@@ -161,7 +161,13 @@ async def test_container_injects_the_same_services_into_all_seven_agents(
         assert isinstance(ctx.tools, AgentTools) and ctx.tools.agent_id is agent_id
         assert {tool.name for tool in ctx.tools.list_tools()} == set(security.tools.tools)
         assert ctx.bus is runtime.engine.bus
-    assert set(security.tools.tools) == {"run_process", "http_request", "read_file", "write_file"}
+    assert set(security.tools.tools) == {
+        "run_process",
+        "http_request",
+        "read_file",
+        "write_file",
+        "deliver_outbox_message",
+    }
 
 
 def _reachable(root: object) -> list[object]:
@@ -333,7 +339,7 @@ async def test_start_emits_security_initialized_without_secrets(
     assert len(events) == 1
     payload: dict[str, Any] = events[0].payload
     assert payload["policy_fingerprint"] == runtime.security.fingerprint
-    assert payload["tool_count"] == 4
+    assert payload["tool_count"] == 5
     assert payload["allowlist_sizes"]["hosts"] == 1
     assert payload["allowlist_sizes"]["executables"] == 1
     assert sys.executable not in str(payload)
