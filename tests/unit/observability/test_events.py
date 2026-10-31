@@ -295,6 +295,15 @@ PAYLOAD_EXAMPLES = {
         "decision_id": str(uuid4()),
         "question": "Allow the change?",
     },
+    "communication.suppressed": {
+        "request_message_id": str(uuid4()),
+        "duplicate_of_message_id": str(uuid4()),
+        "duplicate_of_interaction_id": str(uuid4()),
+        "audience": str(uuid4()),
+        "notice_kind": "escalation",
+        "dedupe_hash": "0" * 64,
+        "reason": "duplicate notice within the dedupe window",
+    },
 }
 
 
