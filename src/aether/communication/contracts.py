@@ -114,6 +114,19 @@ class ObjectiveState(StrEnum):
     COMPLETED = "completed"
 
 
+class ObjectiveRejectionReason(StrEnum):
+    RATE_LIMIT = "rate_limit"
+    ACTIVE_LIMIT = "active_limit"
+    MISSING_COST = "missing_cost"
+    INVALID = "invalid"
+
+
+class ResourceDecision(StrEnum):
+    GRANTED = "granted"
+    DEFERRED = "deferred"
+    DENIED = "denied"
+
+
 class ResearchMode(StrEnum):
     CONVENTIONAL = "conventional"
     UNCONVENTIONAL = "unconventional"
@@ -363,6 +376,19 @@ class ObjectiveCompletedPayload(Payload):
         if not all(result.passed for result in self.criteria_results):
             raise ValueError("every completion criterion must pass before completion")
         return self
+
+
+class ObjectiveRejectedPayload(Payload):
+    request_message_id: UUID
+    generating_agent: AgentId
+    reason: ObjectiveRejectionReason
+    detail: Text
+    objective_id: UUID | None = None
+
+    def check_envelope(self, message: AgentMessage) -> None:
+        super().check_envelope(message)
+        if self.generating_agent is not message.target_agent:
+            raise ValueError("objective.rejected must be addressed to the generating agent")
 
 
 # --------------------------------------------------------------------------------------------
@@ -638,6 +664,37 @@ class ResourceRequestPayload(Payload):
     deadline: UtcDatetime | None = None
 
 
+class ResourceResponsePayload(Payload):
+    request_message_id: UUID
+    requested_by: AgentId
+    decision: ResourceDecision
+    reason: Text
+    retry_after: float | None = Field(default=None, ge=0, description="Retry delay in seconds")
+    task_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _retry_only_when_deferred(self) -> Self:
+        if self.retry_after is not None and self.decision is not ResourceDecision.DEFERRED:
+            raise ValueError("retry_after is only valid for deferred resource requests")
+        return self
+
+    def check_envelope(self, message: AgentMessage) -> None:
+        super().check_envelope(message)
+        if self.requested_by is not message.target_agent:
+            raise ValueError("resource.response must be addressed to the requester")
+
+
+class PromotionRequestPayload(Payload):
+    """Evidence for review, not permission to deploy or execute the workspace."""
+
+    task_id: UUID
+    objective_id: UUID | None = None
+    requirement_id: UUID | None = None
+    workspace_path: Text
+    artifacts: list[Text] = Field(min_length=1)
+    verification_evidence: list[JsonDict] = Field(min_length=1)
+
+
 class ImplementationPlanPayload(Payload):
     plan_id: UUID = Field(default_factory=uuid4)
     requirement_id: UUID
@@ -809,6 +866,14 @@ class BlockerPayload(Payload):
             raise ValueError(f"{self.kind.value} blockers are routed to {sorted(allowed)}")
         return self
 
+    def check_envelope(self, message: AgentMessage) -> None:
+        super().check_envelope(message)
+        if (
+            message.target_agent is not AgentId.ORCHESTR
+            and message.target_agent is not self.route_to
+        ):
+            raise ValueError("blockers must target their resolver or escalate to ORCHESTR")
+
 
 class ProgressUpdatePayload(Payload):
     task_id: UUID | None = None
@@ -869,6 +934,7 @@ PAYLOAD_MODELS: dict[MessageType, type[Payload]] = {
     MessageType.OBJECTIVE_CREATE: ObjectiveCreatePayload,
     MessageType.OBJECTIVE_UPDATE: ObjectiveUpdatePayload,
     MessageType.OBJECTIVE_COMPLETED: ObjectiveCompletedPayload,
+    MessageType.OBJECTIVE_REJECTED: ObjectiveRejectedPayload,
     MessageType.TASK_CREATE: TaskCreatePayload,
     MessageType.TASK_ASSIGN: TaskAssignPayload,
     MessageType.TASK_TRANSITION: TaskTransitionPayload,
@@ -883,6 +949,8 @@ PAYLOAD_MODELS: dict[MessageType, type[Payload]] = {
     MessageType.AUTHORIZATION_REQUEST: AuthorizationRequestPayload,
     MessageType.USER_RESPONSE: UserResponsePayload,
     MessageType.RESOURCE_REQUEST: ResourceRequestPayload,
+    MessageType.RESOURCE_RESPONSE: ResourceResponsePayload,
+    MessageType.PROMOTION_REQUEST: PromotionRequestPayload,
     MessageType.IMPLEMENTATION_PLAN: ImplementationPlanPayload,
     MessageType.EXECUTION_REQUEST: ExecutionRequestPayload,
     MessageType.EXECUTION_RESULT: ExecutionResultPayload,
@@ -911,6 +979,7 @@ ROUTES: dict[MessageType, frozenset[AgentId]] = {
     MessageType.OBJECTIVE_COMPLETED: frozenset(
         {AgentId.LEDGER, AgentId.SCOUT, AgentId.ROGUE, AgentId.MUSE}
     ),
+    MessageType.OBJECTIVE_REJECTED: _ALL,
     MessageType.TASK_CREATE: frozenset({AgentId.ORCHESTR}),
     MessageType.TASK_ASSIGN: _WORKERS,
     MessageType.TASK_TRANSITION: frozenset({AgentId.ORCHESTR, AgentId.LEDGER}),
@@ -927,6 +996,8 @@ ROUTES: dict[MessageType, frozenset[AgentId]] = {
     MessageType.AUTHORIZATION_REQUEST: frozenset({AgentId.ORCHESTR, AgentId.MUSE}),
     MessageType.USER_RESPONSE: frozenset({AgentId.ORCHESTR, AgentId.WARDEN}),
     MessageType.RESOURCE_REQUEST: frozenset({AgentId.ORCHESTR}),
+    MessageType.RESOURCE_RESPONSE: _WORKERS,
+    MessageType.PROMOTION_REQUEST: frozenset({AgentId.ORCHESTR, AgentId.LEDGER}),
     MessageType.IMPLEMENTATION_PLAN: frozenset(
         {AgentId.ORCHESTR, AgentId.FORGE, AgentId.LEDGER, AgentId.WARDEN}
     ),
@@ -937,7 +1008,9 @@ ROUTES: dict[MessageType, frozenset[AgentId]] = {
         {AgentId.ORCHESTR, AgentId.FORGE, AgentId.SCOUT, AgentId.ROGUE}
     ),
     MessageType.CAPABILITY_REGISTER: frozenset({AgentId.ORCHESTR, AgentId.SCOUT}),
-    MessageType.BLOCKER: frozenset({AgentId.ORCHESTR, AgentId.SCOUT, AgentId.ROGUE, AgentId.FORGE}),
+    MessageType.BLOCKER: frozenset(
+        {AgentId.ORCHESTR, AgentId.SCOUT, AgentId.ROGUE, AgentId.FORGE, AgentId.WARDEN}
+    ),
     MessageType.PROGRESS_UPDATE: frozenset({AgentId.ORCHESTR, AgentId.LEDGER}),
     MessageType.HEALTH_EVENT: frozenset({AgentId.ORCHESTR, AgentId.LEDGER}),
     MessageType.COMMUNICATION_REQUEST: frozenset({AgentId.MUSE}),
@@ -951,6 +1024,7 @@ SENDERS: dict[MessageType, frozenset[AgentId]] = {
         {AgentId.ORCHESTR, AgentId.SCOUT, AgentId.ROGUE, AgentId.LEDGER, AgentId.MUSE}
     ),
     MessageType.OBJECTIVE_COMPLETED: frozenset({AgentId.ORCHESTR}),
+    MessageType.OBJECTIVE_REJECTED: frozenset({AgentId.ORCHESTR}),
     MessageType.TASK_CREATE: _ALL,
     MessageType.TASK_ASSIGN: frozenset({AgentId.ORCHESTR}),
     MessageType.TASK_TRANSITION: _ALL,
@@ -969,6 +1043,8 @@ SENDERS: dict[MessageType, frozenset[AgentId]] = {
     MessageType.AUTHORIZATION_REQUEST: frozenset({AgentId.ORCHESTR, AgentId.WARDEN}),
     MessageType.USER_RESPONSE: frozenset({AgentId.MUSE}),
     MessageType.RESOURCE_REQUEST: _WORKERS,
+    MessageType.RESOURCE_RESPONSE: frozenset({AgentId.ORCHESTR}),
+    MessageType.PROMOTION_REQUEST: frozenset({AgentId.FORGE}),
     MessageType.IMPLEMENTATION_PLAN: frozenset({AgentId.FORGE, AgentId.SCOUT}),
     MessageType.EXECUTION_REQUEST: frozenset({AgentId.ORCHESTR}),
     MessageType.EXECUTION_RESULT: frozenset({AgentId.FORGE}),

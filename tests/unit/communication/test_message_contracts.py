@@ -263,6 +263,38 @@ SAMPLES: dict[MessageType, tuple[AgentId, AgentId, dict]] = {
         AgentId.ORCHESTR,
         {"task_id": str(TASK), "resources": ESTIMATE, "download_mb": 300, "reason": "build"},
     ),
+    MessageType.RESOURCE_RESPONSE: (
+        AgentId.ORCHESTR,
+        AgentId.FORGE,
+        {
+            "request_message_id": str(uuid4()),
+            "requested_by": "FORGE",
+            "decision": "deferred",
+            "reason": "insufficient disk space",
+            "retry_after": 60,
+            "task_id": str(TASK),
+        },
+    ),
+    MessageType.OBJECTIVE_REJECTED: (
+        AgentId.ORCHESTR,
+        AgentId.SCOUT,
+        {
+            "request_message_id": str(uuid4()),
+            "generating_agent": "SCOUT",
+            "reason": "active_limit",
+            "detail": "finish an active objective before proposing another",
+        },
+    ),
+    MessageType.PROMOTION_REQUEST: (
+        AgentId.FORGE,
+        AgentId.LEDGER,
+        {
+            "task_id": str(TASK),
+            "workspace_path": "data\\workspaces\\task-1",
+            "artifacts": ["data\\artifacts\\changes.patch"],
+            "verification_evidence": [{"suite": "unit", "passed": 12}],
+        },
+    ),
     MessageType.IMPLEMENTATION_PLAN: (
         AgentId.FORGE,
         AgentId.ORCHESTR,
@@ -531,6 +563,16 @@ def test_payloads_are_immutable() -> None:
         (MessageType.SECURITY_DECISION, {"input_hash": "not-a-hash"}),
         (MessageType.AUTHORIZATION_REQUEST, {"expires_at": "2026-01-01T00:00:00"}),
         (MessageType.USER_RESPONSE, {"authorization_request_id": None}),
+        (MessageType.RESOURCE_RESPONSE, {"decision": "maybe"}),
+        (MessageType.RESOURCE_RESPONSE, {"retry_after": -1}),
+        (MessageType.RESOURCE_RESPONSE, {"decision": "granted"}),
+        (MessageType.RESOURCE_RESPONSE, {"reason": " "}),
+        (MessageType.OBJECTIVE_REJECTED, {"reason": "unknown"}),
+        (MessageType.OBJECTIVE_REJECTED, {"detail": ""}),
+        (MessageType.PROMOTION_REQUEST, {"workspace_path": " "}),
+        (MessageType.PROMOTION_REQUEST, {"artifacts": []}),
+        (MessageType.PROMOTION_REQUEST, {"verification_evidence": []}),
+        (MessageType.PROMOTION_REQUEST, {"auto_deploy": True}),
         (MessageType.IMPLEMENTATION_PLAN, {"steps": []}),
         (MessageType.IMPLEMENTATION_PLAN, {"acceptance_criteria": []}),
         (MessageType.EXECUTION_REQUEST, {"requirement_id": None}),
@@ -710,7 +752,7 @@ def test_samples_follow_the_routes(message_type: MessageType) -> None:
         (MessageType.OBJECTIVE_CREATE, {AgentId.ORCHESTR}),
         (
             MessageType.BLOCKER,
-            {AgentId.ORCHESTR, AgentId.SCOUT, AgentId.ROGUE, AgentId.FORGE},
+            {AgentId.ORCHESTR, AgentId.SCOUT, AgentId.ROGUE, AgentId.FORGE, AgentId.WARDEN},
         ),
     ],
 )
@@ -752,6 +794,9 @@ def test_receivable_and_sendable_types_follow_the_tables() -> None:
         MessageType.SECURITY_EVALUATE,
         MessageType.USER_RESPONSE,
         MessageType.IMPLEMENTATION_PLAN,
+        MessageType.BLOCKER,
+        MessageType.RESOURCE_RESPONSE,
+        MessageType.OBJECTIVE_REJECTED,
     }
     for agent_id in AgentId:
         for message_type in receivable_types(agent_id):
@@ -759,6 +804,64 @@ def test_receivable_and_sendable_types_follow_the_tables() -> None:
         for message_type in sendable_types(agent_id):
             assert agent_id in SENDERS[message_type]
     assert MessageType.SECURITY_DECISION in sendable_types(AgentId.WARDEN)
+
+
+@pytest.mark.parametrize("agent", [agent for agent in AgentId if agent is not AgentId.ORCHESTR])
+@pytest.mark.parametrize("decision", ["granted", "deferred", "denied"])
+def test_resource_responses_return_to_each_requester(agent, decision):
+    payload = contracts.ResourceResponsePayload(
+        request_message_id=uuid4(), requested_by=agent, decision=decision, reason="capacity"
+    )
+    message = build_message(AgentId.ORCHESTR, agent, payload)
+    assert validate_message(message) == payload
+    wrong_target = AgentId.FORGE if agent is not AgentId.FORGE else AgentId.SCOUT
+    with pytest.raises(InvalidPayload, match="requester"):
+        validate_message(message.model_copy(update={"target_agent": wrong_target}))
+    with pytest.raises(RouteViolation):
+        build_message(AgentId.LEDGER, agent, payload)
+
+
+@pytest.mark.parametrize("reason", list(contracts.ObjectiveRejectionReason))
+@pytest.mark.parametrize("agent", list(AgentId))
+def test_objective_rejections_return_to_the_generating_agent(agent, reason):
+    payload = contracts.ObjectiveRejectedPayload(
+        request_message_id=uuid4(), generating_agent=agent, reason=reason, detail="queue limit"
+    )
+    message = build_message(AgentId.ORCHESTR, agent, payload)
+    assert validate_message(message) == payload
+    wrong_target = AgentId.FORGE if agent is not AgentId.FORGE else AgentId.SCOUT
+    with pytest.raises(InvalidPayload, match="generating agent"):
+        validate_message(message.model_copy(update={"target_agent": wrong_target}))
+    with pytest.raises(RouteViolation):
+        build_message(AgentId.LEDGER, agent, payload)
+
+
+@pytest.mark.parametrize("receiver", [AgentId.ORCHESTR, AgentId.LEDGER])
+def test_promotion_requests_only_request_review(receiver):
+    payload = contracts.PromotionRequestPayload.model_validate(
+        SAMPLES[MessageType.PROMOTION_REQUEST][2]
+    )
+    assert (
+        build_message(AgentId.FORGE, receiver, payload).message_type
+        is MessageType.PROMOTION_REQUEST
+    )
+    with pytest.raises(RouteViolation):
+        build_message(AgentId.SCOUT, receiver, payload)
+    with pytest.raises(RouteViolation):
+        build_message(AgentId.FORGE, AgentId.WARDEN, payload)
+
+
+def test_security_blockers_can_reach_warden_but_other_blockers_cannot():
+    payload = BlockerPayload(
+        task_id=TASK, kind="security", description="review needed", route_to=AgentId.WARDEN
+    )
+    assert validate_message(build_message(AgentId.FORGE, AgentId.WARDEN, payload)) == payload
+    assert build_message(AgentId.FORGE, AgentId.ORCHESTR, payload)
+    other = BlockerPayload(
+        task_id=TASK, kind="implementation", description="build failed", route_to=AgentId.FORGE
+    )
+    with pytest.raises(InvalidPayload, match="resolver"):
+        build_message(AgentId.SCOUT, AgentId.WARDEN, other)
 
 
 def test_rogue_may_not_submit_requirements() -> None:
