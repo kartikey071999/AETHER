@@ -47,6 +47,9 @@ class MessageType(StrEnum):
     COMMUNICATION_DELIVERED = "communication.delivered"
     USER_RESPONSE = "user.response"
     OBJECTIVE_COMPLETED = "objective.completed"
+    OBJECTIVE_REJECTED = "objective.rejected"
+    RESOURCE_RESPONSE = "resource.response"
+    PROMOTION_REQUEST = "promotion.request"
 
 
 class MessageStatus(StrEnum):

@@ -1,5 +1,7 @@
 """Reusable, LLM-free routing of blocked operations to WARDEN for review."""
 
+from uuid import UUID
+
 from aether.agents.base import AgentContext, TaskResult, TaskResultStatus
 from aether.communication.messages import AgentId, AgentMessage, MessageType
 from aether.security.errors import BlockReason, OperationBlocked
@@ -30,11 +32,13 @@ async def request_security_review(
     ctx: AgentContext,
     *,
     reason: BlockReason = BlockReason.APPROVAL_MISSING,
+    correlation_id: UUID | None = None,
 ) -> TaskResult:
     """Ask WARDEN to review ``operation`` and report the task as waiting for approval.
 
     The message carries the full ``Operation`` and its ``input_hash`` so WARDEN's decision binds
-    to exactly this input. WARDEN cannot approve its own operations.
+    to exactly this input. WARDEN cannot approve its own operations. A supplied
+    ``correlation_id`` is reused so the review stays in the caller's workflow trace.
     """
     if operation.requested_by is AgentId.WARDEN:
         return TaskResult(
@@ -44,6 +48,7 @@ async def request_security_review(
             error="self-approval is not permitted",
             retryable=False,
         )
+    correlation = {} if correlation_id is None else {"correlation_id": correlation_id}
     message = AgentMessage(
         source_agent=operation.requested_by,
         target_agent=AgentId.WARDEN,
@@ -51,6 +56,7 @@ async def request_security_review(
         objective_id=operation.objective_id,
         task_id=operation.task_id,
         requirement_id=operation.declared_requirement_id,
+        **correlation,
         payload={
             "operation": operation.model_dump(mode="json"),
             "input_hash": operation.input_hash,
@@ -67,11 +73,17 @@ async def request_security_review(
 
 
 async def blocked_result(
-    blocked: OperationBlocked, operation: Operation, ctx: AgentContext
+    blocked: OperationBlocked,
+    operation: Operation,
+    ctx: AgentContext,
+    *,
+    correlation_id: UUID | None = None,
 ) -> TaskResult:
     """Structured result for an `OperationBlocked`: review, wait on the user, or stay blocked."""
     if blocked.reason in REVIEWABLE_REASONS:
-        return await request_security_review(operation, ctx, reason=blocked.reason)
+        return await request_security_review(
+            operation, ctx, reason=blocked.reason, correlation_id=correlation_id
+        )
     outputs = _outputs(operation, blocked.reason)
     if blocked.user_request_id is not None:
         outputs["user_request_id"] = str(blocked.user_request_id)

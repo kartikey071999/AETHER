@@ -17,7 +17,7 @@ from pydantic import (
 )
 
 from aether.communication.messages import AgentId, MessageType
-from aether.storage.models import TaskStatus
+from aether.storage.models import ResultOutcome, TaskStatus, TestVerdict
 
 
 class EventCategory(StrEnum):
@@ -66,6 +66,10 @@ class ObjectivePriorityChangedPayload(EventPayload):
     reason: str
 
 
+class ObjectiveBasePriorityChangedPayload(ObjectivePriorityChangedPayload):
+    pass
+
+
 class ObjectiveStatusChangedPayload(EventPayload):
     from_status: str | None = None
     to_status: str
@@ -80,6 +84,17 @@ class TaskCreatedPayload(EventPayload):
     objective_id: UUID | None = None
     parent_task_id: UUID | None = None
     requirement_id: UUID | None = None
+
+
+class TaskPriorityChangedPayload(ObjectivePriorityChangedPayload):
+    pass
+
+
+class TaskEstimatesChangedPayload(EventPayload):
+    duration_s: int | None = Field(ge=0)
+    ram_mb: int = Field(ge=0)
+    disk_mb: int = Field(ge=0)
+    cpu_percent: float | None = Field(ge=0, le=100)
 
 
 class TaskTransitionedPayload(EventPayload):
@@ -193,6 +208,25 @@ class TestRunFinishedPayload(EventPayload):
     skipped: int = Field(default=0, ge=0)
     duration_seconds: float = Field(ge=0)
     evidence: list[str] = Field(default_factory=list)
+    errors: int = Field(default=0, ge=0)
+    verdict: TestVerdict | None = None
+
+
+class TestRunCreatedPayload(EventPayload):
+    suite: str = Field(min_length=1, max_length=200)
+    capability_id: UUID | None = None
+    execution_run_id: UUID | None = None
+
+
+class TestResultAddedPayload(EventPayload):
+    result_id: UUID
+    name: str = Field(min_length=1, max_length=500)
+    outcome: ResultOutcome
+    duration_ms: int | None = Field(default=None, ge=0)
+
+
+class TestResultsAddedPayload(EventPayload):
+    results: list[TestResultAddedPayload] = Field(min_length=1)
 
 
 class CapabilityStatusChangedPayload(EventPayload):
@@ -455,8 +489,11 @@ EVENT_TYPES: dict[str, type[BaseModel]] = {
     "objective.created": ObjectiveCreatedPayload,
     "objective.updated": ObjectiveUpdatedPayload,
     "objective.priority_changed": ObjectivePriorityChangedPayload,
+    "objective.base_priority_changed": ObjectiveBasePriorityChangedPayload,
     "objective.status_changed": ObjectiveStatusChangedPayload,
     "task.created": TaskCreatedPayload,
+    "task.priority_changed": TaskPriorityChangedPayload,
+    "task.estimates_changed": TaskEstimatesChangedPayload,
     "task.transitioned": TaskTransitionedPayload,
     "task.assigned": TaskAssignedPayload,
     "task.dependency_added": TaskDependencyPayload,
@@ -482,6 +519,8 @@ EVENT_TYPES: dict[str, type[BaseModel]] = {
     "execution.started": ExecutionStartedPayload,
     "execution.finished": ExecutionFinishedPayload,
     "test.run_finished": TestRunFinishedPayload,
+    "test.run_created": TestRunCreatedPayload,
+    "test.results_added": TestResultsAddedPayload,
     "capability.status_changed": CapabilityStatusChangedPayload,
     "capability.discovered": CapabilityDiscoveredPayload,
     "capability.transitioned": CapabilityTransitionedPayload,

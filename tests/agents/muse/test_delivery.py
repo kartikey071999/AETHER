@@ -196,6 +196,7 @@ async def test_default_policy_cannot_write_muse_outbox(
         workspace_dir=policy.workspace_dir,
         artifact_dir=policy.artifact_dir,
         data_dir=policy.data_dir,
+        agent_permissions={AgentId.MUSE: {OperationKind.LLM_CALL}},
     )
     permissions = PermissionService(database.sessions, EventRecorder(), default, clock=clock)
     registry = build_default_registry(permissions, database.sessions, EventRecorder())

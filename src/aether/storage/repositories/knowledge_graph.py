@@ -1,15 +1,17 @@
 """Relational knowledge graph of entities and typed relations."""
 
+from collections.abc import Collection
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aether.storage.models import (
     EventCategory,
     KnowledgeEntityRecord,
     KnowledgeRelationRecord,
+    PersonRecord,
     utcnow,
 )
 from aether.storage.repositories._events import add_event
@@ -103,6 +105,51 @@ class KnowledgeGraphRepository:
                 correlation_id=correlation_id,
             )
             return relation.id
+
+    async def scoped_entity_names(
+        self,
+        person_id: UUID,
+        *,
+        entity_ids: Collection[UUID],
+        objective_id: UUID | None = None,
+        task_id: UUID | None = None,
+        names: Collection[str] | None = None,
+    ) -> list[str]:
+        """Names of entities a person's personalization may reference; never their attributes.
+
+        Requires an active, full-access owner, an explicit entity-id allowlist (and optional
+        name allowlist) and an objective_id/task_id attribute that matches the caller's context.
+        """
+        if not entity_ids or (names is not None and not names):
+            return []
+        relevance = []
+        if objective_id is not None:
+            relevance.append(
+                KnowledgeEntityRecord.attributes["objective_id"].as_string() == str(objective_id)
+            )
+        if task_id is not None:
+            relevance.append(
+                KnowledgeEntityRecord.attributes["task_id"].as_string() == str(task_id)
+            )
+        if not relevance:
+            return []
+        # Scope ownership and explicit relevance before retrieving anything from the graph.
+        conditions = [
+            PersonRecord.deleted_at.is_(None),
+            PersonRecord.access_level == "full",
+            KnowledgeEntityRecord.person_id == person_id,
+            KnowledgeEntityRecord.id.in_(entity_ids),
+            or_(*relevance),
+        ]
+        if names is not None:
+            conditions.append(KnowledgeEntityRecord.name.in_(names))
+        statement = (
+            select(KnowledgeEntityRecord.name)
+            .join(PersonRecord, PersonRecord.id == KnowledgeEntityRecord.person_id)
+            .where(*conditions)
+        )
+        async with self._sessions() as session:
+            return sorted(await session.scalars(statement))
 
     async def relations_from(self, entity_id: UUID) -> list[KnowledgeRelationRecord]:
         condition = KnowledgeRelationRecord.source_entity_id == entity_id

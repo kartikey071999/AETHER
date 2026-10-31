@@ -53,6 +53,38 @@ def test_session_and_input_hash_migration_round_trips(tmp_path, monkeypatch):
         engine.dispose()
 
 
+def test_test_run_verdict_migration_preserves_existing_rows(tmp_path, monkeypatch):
+    database_path = tmp_path / "test_verdict.db"
+    config = _alembic_config(monkeypatch, database_path)
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        command.upgrade(config, "0003_event_session_and_auth_hash")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO test_runs "
+                    "(id, suite, status, passed, failed, errors, acceptance_results, started_at) "
+                    "VALUES (:id, 'offline', 'running', 0, 0, 0, '[]', CURRENT_TIMESTAMP)"
+                ),
+                {"id": "00000000000040008000000000000001"},
+            )
+        command.upgrade(config, "head")
+        with engine.begin() as connection:
+            assert connection.execute(text("SELECT verdict FROM test_runs")).scalar_one() is None
+            connection.execute(
+                text("UPDATE test_runs SET verdict = 'inconclusive', status = 'failed'")
+            )
+        command.downgrade(config, "0003_event_session_and_auth_hash")
+        assert "verdict" not in {c["name"] for c in inspect(engine).get_columns("test_runs")}
+        with engine.connect() as connection:
+            assert connection.execute(text("SELECT suite FROM test_runs")).scalar_one() == "offline"
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            assert connection.execute(text("SELECT verdict FROM test_runs")).scalar_one() is None
+    finally:
+        engine.dispose()
+
+
 def test_migrations_upgrade_to_models_and_downgrade_cleanly(tmp_path, monkeypatch):
     database_path = tmp_path / "migrations.db"
     config = _alembic_config(monkeypatch, database_path)

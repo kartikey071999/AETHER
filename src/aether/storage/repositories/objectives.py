@@ -1,13 +1,13 @@
 """Objective persistence with audited state changes."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aether.storage.models import EventCategory, ObjectiveRecord, utcnow
-from aether.storage.repositories._events import add_event
+from aether.storage.repositories._events import add_event, to_json
 
 
 class ObjectiveRepository:
@@ -95,6 +95,75 @@ class ObjectiveRepository:
                 aggregate_id=objective.id,
                 actor=actor,
                 payload={"from_priority": old_priority, "to_priority": priority, "reason": reason},
+                category=EventCategory.OBJECTIVE,
+                correlation_id=correlation_id,
+                objective_id=objective.id,
+            )
+
+    async def update_details(
+        self,
+        objective_id: UUID,
+        *,
+        description: str,
+        completion_criteria: list[str],
+        stopping_conditions: list[str],
+        deadline: datetime | None,
+        review_at: datetime | None,
+        actor: str,
+        correlation_id: UUID | None = None,
+    ) -> None:
+        """Replace the editable details; ``None`` explicitly clears a date."""
+        for value in (deadline, review_at):
+            if value is not None and value.utcoffset() is None:
+                raise ValueError("Objective timestamps must include a timezone")
+        changes = {
+            "description": description,
+            "completion_criteria": list(completion_criteria),
+            "stopping_conditions": list(stopping_conditions),
+            "deadline": deadline.astimezone(UTC) if deadline is not None else None,
+            "review_at": review_at.astimezone(UTC) if review_at is not None else None,
+        }
+        async with self._sessions() as session, session.begin():
+            objective = await _lock_objective(session, objective_id)
+            for name, value in changes.items():
+                setattr(objective, name, value)
+            objective.updated_at = utcnow()
+            add_event(
+                session,
+                event_type="objective.updated",
+                aggregate_type="objective",
+                aggregate_id=objective.id,
+                actor=actor,
+                payload={"changes": to_json(changes), "rationale": "Objective details updated"},
+                category=EventCategory.OBJECTIVE,
+                correlation_id=correlation_id,
+                objective_id=objective.id,
+            )
+
+    async def set_base_priority(
+        self,
+        objective_id: UUID,
+        value: int,
+        *,
+        actor: str,
+        reason: str,
+        correlation_id: UUID | None = None,
+    ) -> None:
+        """Change the baseline without overwriting the dynamically scheduled priority."""
+        if not 0 <= value <= 100:
+            raise ValueError("Objective priority must be between 0 and 100")
+        async with self._sessions() as session, session.begin():
+            objective = await _lock_objective(session, objective_id)
+            previous = objective.base_priority
+            objective.base_priority = value
+            objective.updated_at = utcnow()
+            add_event(
+                session,
+                event_type="objective.base_priority_changed",
+                aggregate_type="objective",
+                aggregate_id=objective.id,
+                actor=actor,
+                payload={"from_priority": previous, "to_priority": value, "reason": reason},
                 category=EventCategory.OBJECTIVE,
                 correlation_id=correlation_id,
                 objective_id=objective.id,

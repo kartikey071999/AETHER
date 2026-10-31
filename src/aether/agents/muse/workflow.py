@@ -6,7 +6,7 @@ from datetime import datetime
 from uuid import UUID
 
 from pydantic import ValidationError
-from sqlalchemy import or_, select
+from sqlalchemy import select
 
 from aether.agents.base import AgentContext
 from aether.agents.muse.prompts import OPENING_POLISH
@@ -19,7 +19,7 @@ from aether.models.contracts import CompletionMessage, CompletionRequest, ModelT
 from aether.models.facade import ModelCallContext, ModelUnavailable
 from aether.security.errors import OperationBlocked
 from aether.security.untrusted import UntrustedContent
-from aether.storage.models import KnowledgeEntityRecord, PersonRecord
+from aether.storage.models import PersonRecord
 from aether.storage.repositories.knowledge_graph import KnowledgeGraphRepository
 
 _IDENTIFIERS = re.compile(r"\b[\w.-]*\d[\w.-]*\b", re.UNICODE)
@@ -46,44 +46,6 @@ async def active_person(ctx: AgentContext, person_id: UUID) -> str:
     return access
 
 
-class ScopedKnowledgeGraphRepository(KnowledgeGraphRepository):
-    async def relevant_names(
-        self,
-        person_id: UUID,
-        options: HandoffOptions,
-        objective_id: UUID | None,
-        task_id: UUID | None,
-    ) -> list[str]:
-        if not options.context_entity_ids or not options.context_names:
-            return []
-        # Scope ownership and explicit relevance before retrieving any graph attributes.
-        relevance = []
-        if objective_id is not None:
-            relevance.append(
-                KnowledgeEntityRecord.attributes["objective_id"].as_string() == str(objective_id)
-            )
-        if task_id is not None:
-            relevance.append(
-                KnowledgeEntityRecord.attributes["task_id"].as_string() == str(task_id)
-            )
-        if not relevance:
-            return []
-        statement = (
-            select(KnowledgeEntityRecord.name)
-            .join(PersonRecord, PersonRecord.id == KnowledgeEntityRecord.person_id)
-            .where(
-                PersonRecord.deleted_at.is_(None),
-                PersonRecord.access_level == "full",
-                KnowledgeEntityRecord.person_id == person_id,
-                KnowledgeEntityRecord.id.in_(options.context_entity_ids),
-                KnowledgeEntityRecord.name.in_(options.context_names),
-                or_(*relevance),
-            )
-        )
-        async with self._sessions() as session:
-            return sorted(await session.scalars(statement))
-
-
 async def personalization(
     request: CommunicationRequestPayload, options: HandoffOptions, ctx: AgentContext
 ) -> tuple[CommunicationPreferences, list[str]]:
@@ -107,8 +69,12 @@ async def personalization(
         preferences = CommunicationPreferences()
     names = []
     if access == "full":
-        names = await ScopedKnowledgeGraphRepository(ctx.sessions).relevant_names(
-            request.audience, options, request.objective_id, request.task_id
+        names = await KnowledgeGraphRepository(ctx.sessions).scoped_entity_names(
+            request.audience,
+            entity_ids=options.context_entity_ids,
+            names=options.context_names,
+            objective_id=request.objective_id,
+            task_id=request.task_id,
         )
     return preferences, names
 
