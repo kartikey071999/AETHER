@@ -1,7 +1,9 @@
+import shutil
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import create_engine
 
 from aether.agents.base import AgentContext
 from aether.agents.muse import MuseAgent, MuseSettings
@@ -32,12 +34,24 @@ class Clock:
 
 
 @pytest.fixture
-async def database(tmp_path) -> AsyncIterator[Database]:
-    database = Database(f"sqlite+aiosqlite:///{(tmp_path / 'muse.db').as_posix()}")
-    async with database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+async def database(tmp_path, muse_schema) -> AsyncIterator[Database]:
+    path = tmp_path / "muse.db"
+    shutil.copyfile(muse_schema, path)
+    database = Database(f"sqlite+aiosqlite:///{path.as_posix()}")
     yield database
     await database.close()
+
+
+@pytest.fixture(scope="session")
+def muse_schema(tmp_path_factory):
+    path = tmp_path_factory.mktemp("muse-schema") / "empty.db"
+    engine = create_engine(f"sqlite:///{path.as_posix()}")
+    try:
+        with engine.begin() as connection:
+            Base.metadata.create_all(connection)
+    finally:
+        engine.dispose()
+    return path
 
 
 @pytest.fixture
