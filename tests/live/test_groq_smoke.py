@@ -52,10 +52,11 @@ async def test_one_tiny_groq_completion(tmp_path):
             CompletionRequest(
                 messages=[{"role": "user", "content": "Say OK."}],
                 tier=ModelTier.LIGHT,
-                max_tokens=5,
+                max_tokens=200,  # gpt-oss spends early tokens on reasoning
             )
         )
-        assert result.provider == "groq" and result.output_tokens <= 5
+        assert result.provider == "groq" and result.output_tokens <= 200
+        assert result.text.strip()
     finally:
         if provider is not None:
             await provider.aclose()

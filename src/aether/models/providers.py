@@ -81,7 +81,7 @@ def _chat_response(request: CompletionRequest, provider: str, data: Any) -> Comp
 
 class GroqProvider(RemoteProvider):
     name = "groq"
-    endpoint = "https://api.groq.com/openai/v1"
+    endpoint = "https://api.groq.com"  # the SDK appends /openai/v1/... itself
 
     def __init__(
         self,

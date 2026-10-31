@@ -462,3 +462,10 @@ async def test_secrets_and_prompts_absent_from_logs_and_events(
 def test_cost_table(provider, model, expected, unknown):
     cost, flag = estimate_cost(provider, model, 1_000_000, 1_000_000)
     assert float(cost) == pytest.approx(expected) and flag is unknown
+
+
+def test_groq_base_url_is_not_doubled() -> None:
+    # The groq SDK appends /openai/v1/... itself; a base URL ending in /openai/v1 yields HTTP 404.
+    from aether.models.providers import GroqProvider
+
+    assert GroqProvider.endpoint == "https://api.groq.com"
