@@ -739,3 +739,32 @@ class RuntimeModelsInitializedPayload(EventPayload):
 
 EVENT_TYPES["runtime.models_initialized"] = RuntimeModelsInitializedPayload
 EVENT_CATEGORIES["runtime.models_initialized"] = EventCategory.RUNTIME
+
+
+# --- per-objective LLM governance (T-045) ---
+
+
+class ProviderBudgetExhaustedPayload(EventPayload):
+    """An agent's per-objective LLM allowance is spent; it must use deterministic fallbacks."""
+
+    agent: str
+    reason: str
+    requests: int = Field(ge=0)
+    tokens: int = Field(ge=0)
+    max_requests: int | None = Field(default=None, ge=0)
+    max_tokens: int | None = Field(default=None, ge=0)
+
+
+class ProviderCircuitOpenedPayload(EventPayload):
+    """Too many consecutive LLM failures for one agent and objective; LLM use is stopped."""
+
+    agent: str
+    consecutive_failures: int = Field(ge=1)
+    threshold: int = Field(ge=1)
+    last_error: str | None = None
+
+
+EVENT_TYPES["provider.budget_exhausted"] = ProviderBudgetExhaustedPayload
+EVENT_TYPES["provider.circuit_opened"] = ProviderCircuitOpenedPayload
+EVENT_CATEGORIES["provider.budget_exhausted"] = EventCategory.PROVIDER
+EVENT_CATEGORIES["provider.circuit_opened"] = EventCategory.PROVIDER

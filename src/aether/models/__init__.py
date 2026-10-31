@@ -1,11 +1,17 @@
 """Protected model providers; inject one shared router into agent workflows."""
 
-from aether.models.base import EmptyCompletion, ModelProvider, ProviderError
+from aether.models.base import (
+    EmptyCompletion,
+    ModelProvider,
+    ProviderError,
+    TruncatedCompletion,
+)
 from aether.models.budgets import (
     BudgetExceeded,
     BudgetGuard,
     BudgetPolicy,
     ReconciliationSummary,
+    RouteSpend,
     reconcile_stale_reservations,
 )
 from aether.models.contracts import (
@@ -25,9 +31,10 @@ from aether.models.providers import (
     OllamaProvider,
 )
 from aether.models.router import ModelRouter, NoModelAvailable
-from aether.models.settings import ModelPrice, ProviderSettings
+from aether.models.settings import AgentBudgetPolicy, ModelPrice, ProviderSettings
 
 __all__ = [
+    "AgentBudgetPolicy",
     "AzureAnthropicProvider",
     "AzureOpenAIProvider",
     "BudgetExceeded",
@@ -50,6 +57,8 @@ __all__ = [
     "ProviderHealth",
     "ProviderSettings",
     "ReconciliationSummary",
+    "RouteSpend",
+    "TruncatedCompletion",
     "provider_hosts",
     "reconcile_stale_reservations",
 ]

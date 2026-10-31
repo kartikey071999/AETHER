@@ -24,6 +24,43 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
+@dataclass
+class RouteSpend:
+    """Provider calls and tokens one routed completion consumed, with optional hard limits.
+
+    The router refuses any provider call (including fallbacks and retries) that could push the
+    totals past the limits; ``refusal`` then names the limit that stopped it.
+    """
+
+    max_requests: int | None = None
+    max_tokens: int | None = None
+    requests: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    refusal: str | None = None
+
+    @property
+    def tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    def check(self, request: CompletionRequest) -> None:
+        if self.max_requests is not None and self.requests + 1 > self.max_requests:
+            self.refusal = "objective request budget"
+        elif (
+            self.max_tokens is not None
+            and self.tokens + request.input_token_estimate() + request.max_tokens > self.max_tokens
+        ):
+            self.refusal = "objective token budget"
+        else:
+            return
+        raise BudgetExceeded(f"exceeded {self.refusal}")
+
+    def add(self, input_tokens: int, output_tokens: int) -> None:
+        self.requests += 1
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+
+
 @dataclass(frozen=True)
 class Reservation:
     id: UUID
@@ -172,8 +209,11 @@ class BudgetGuard:
         error: BaseException | None,
         latency_ms: float,
         attempt: int,
-    ) -> None:
-        """Finalize usage and both events atomically; write errors propagate, never fall back."""
+    ) -> tuple[int, int]:
+        """Finalize usage and both events atomically; write errors propagate, never fall back.
+
+        Returns the (input, output) tokens charged for the attempt.
+        """
         blocked = isinstance(error, OperationBlocked)
         measured = (
             response
@@ -263,6 +303,7 @@ class BudgetGuard:
                         payload=payload,
                     ),
                 )
+        return input_tokens, output_tokens
 
 
 @dataclass(frozen=True)

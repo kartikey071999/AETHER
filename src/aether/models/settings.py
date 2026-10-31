@@ -46,6 +46,29 @@ def default_budgets() -> dict[str, BudgetPolicy]:
     }
 
 
+class AgentBudgetPolicy(BaseModel):
+    """Per-objective LLM allowance for one agent (``None`` = unlimited)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+
+    max_tokens_per_objective: int | None = Field(default=150_000, ge=0)
+    max_requests_per_objective: int | None = Field(default=50, ge=0)
+
+
+DEFAULT_AGENT_BUDGET = "default"
+
+
+def default_agent_budgets() -> dict[str, AgentBudgetPolicy]:
+    """Keys are agent ids (e.g. ``FORGE``); ``default`` applies to every other agent."""
+    return {
+        DEFAULT_AGENT_BUDGET: AgentBudgetPolicy(),
+        "FORGE": AgentBudgetPolicy(max_tokens_per_objective=20_000, max_requests_per_objective=8),
+        "ORCHESTR": AgentBudgetPolicy(
+            max_tokens_per_objective=40_000, max_requests_per_objective=20
+        ),
+    }
+
+
 class ProviderSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="AETHER_PROVIDER_",
@@ -82,6 +105,14 @@ class ProviderSettings(BaseSettings):
     budgets: dict[str, BudgetPolicy] = Field(default_factory=default_budgets)
     # Keys are "provider/model"; these caps apply in addition to provider-wide caps.
     model_budgets: dict[str, BudgetPolicy] = Field(default_factory=dict)
+    # Per-objective, per-agent LLM allowances; exhaustion forces deterministic fallbacks.
+    agent_budgets: dict[str, AgentBudgetPolicy] = Field(default_factory=default_agent_budgets)
+    # Distinct models one request may reach before giving up (bounds fallback fan-out).
+    max_models_per_request: int = Field(default=2, ge=1, le=10)
+    # A length-truncated completion is retried once with doubled max_tokens up to this cap.
+    length_retry_max_tokens: int = Field(default=8192, ge=1)
+    # Consecutive failures per objective and agent before LLM use is stopped (0 disables).
+    circuit_breaker_failures: int = Field(default=5, ge=0)
     prices: dict[str, ModelPrice] = Field(default_factory=dict)
     # Explicit suitability declaration; do not infer reasoning ability from a model's name.
     ollama_models: dict[str, list[ModelTier]] = Field(default_factory=dict)
@@ -146,3 +177,24 @@ class ProviderSettings(BaseSettings):
                 for name, policy in value.items()
             },
         }
+
+    @field_validator("agent_budgets", mode="before")
+    @classmethod
+    def _merge_default_agent_budgets(cls, value: dict) -> dict:
+        defaults = default_agent_budgets()
+        return {
+            **defaults,
+            **{
+                name: (
+                    {**defaults[name].model_dump(), **policy}
+                    if name in defaults and isinstance(policy, dict)
+                    else policy
+                )
+                for name, policy in value.items()
+            },
+        }
+
+    def agent_budget(self, agent: str) -> AgentBudgetPolicy:
+        return self.agent_budgets.get(agent) or self.agent_budgets.get(
+            DEFAULT_AGENT_BUDGET, AgentBudgetPolicy()
+        )

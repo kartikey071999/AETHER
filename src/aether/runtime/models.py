@@ -24,7 +24,8 @@ from aether.models import (
     ProviderSettings,
     provider_hosts,
 )
-from aether.models.facade import AgentModels, ModelUnavailable
+from aether.models.facade import AgentModels, ModelCallContext, ModelUnavailable
+from aether.models.governor import ModelGovernor
 from aether.observability.recorder import EventRecorder
 from aether.security import PermissionService
 from aether.storage.repositories.provider_usage import ProviderUsageRepository
@@ -84,18 +85,29 @@ class ModelServices:
     router: ModelRouter
     usage: ProviderUsageRepository
     max_concurrent_llm_requests: int
+    governor: ModelGovernor
     closed: bool = field(default=False)
 
     def context_for(self, agent_id: AgentId, base: AgentContext) -> AgentContext:
         """``base`` plus a completion facade bound to ``agent_id``."""
-        return replace(base, models=AgentModels(agent_id, self._complete))
+        return replace(
+            base,
+            models=AgentModels(agent_id, self._complete, report_unusable=self._report_unusable),
+        )
 
     async def _complete(self, request: CompletionRequest) -> CompletionResponse:
         # Agents may not import the router, so its failure is re-raised as a facade type.
         try:
-            return await self.router.complete(request)
+            return await self.governor.complete(
+                request, lambda routed, spend: self.router.complete(routed, spend=spend)
+            )
         except NoModelAvailable as error:
             raise ModelUnavailable(error.reasons) from None
+
+    async def _report_unusable(
+        self, agent_id: AgentId, ctx: ModelCallContext, reason: str
+    ) -> None:
+        await self.governor.report_unusable(agent_id, ctx, reason)
 
     def contexts_for(
         self, agent_ids: Sequence[AgentId], base: AgentContext
@@ -200,4 +212,5 @@ def build_model_services(
         router=router,
         usage=usage,
         max_concurrent_llm_requests=settings.max_concurrent_llm_requests,
+        governor=ModelGovernor(provider_settings, sessions=usage.sessions, recorder=recorder),
     )
