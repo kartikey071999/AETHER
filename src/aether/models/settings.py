@@ -36,14 +36,13 @@ class BudgetPolicy(BaseModel):
 
 
 def default_budgets() -> dict[str, BudgetPolicy]:
-    # Azure prices are not built in, so their spend is bounded by request/token caps; the USD
-    # ceilings apply once AETHER_PROVIDER_PRICES declares a price.
+    # Azure prices are not built in; their daily request/token caps are the safety net.
     return {
         "groq": BudgetPolicy(),
         "azure_openai": BudgetPolicy(
             max_requests_per_day=1000,
             max_tokens_per_day=3_000_000,
-            max_cost_usd_per_day=25,
+            max_cost_usd_per_day=1,
             max_tokens_per_request=8192,
             max_concurrent_requests=4,
             allow_unpriced=True,
@@ -51,7 +50,7 @@ def default_budgets() -> dict[str, BudgetPolicy]:
         "azure_anthropic": BudgetPolicy(
             max_requests_per_day=300,
             max_tokens_per_day=1_500_000,
-            max_cost_usd_per_day=50,
+            max_cost_usd_per_day=5,
             max_tokens_per_request=16_384,
             max_concurrent_requests=2,
             allow_unpriced=True,

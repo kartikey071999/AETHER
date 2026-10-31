@@ -401,9 +401,10 @@ def test_models_status_reports_usage_and_no_key_material(
     assert "azure_anthropic: configured=no available=no models=-" in out.out
     assert "ollama: configured=no available=no models=-" in out.out
     assert "today: requests 0/2000, tokens 0/2000000, cost $0.000000/$10.00" in out.out
-    assert "requests 0/1000, tokens 0/3000000, cost $0.000000/$25.00" in out.out
-    # Only the configured Azure deployment lacks a price; Groq has built-in prices.
-    assert out.out.count("cost unknown - set AETHER_PROVIDER_PRICES") == 1
+    # Groq keeps its budget line; Azure caps are a silent safety net with no usage display.
+    assert out.out.count("  today: requests ") == 2
+    assert "requests 0/1000" not in out.out and "tokens 0/3000000" not in out.out
+    assert "cost unknown" not in out.out and "AETHER_PROVIDER_PRICES" not in out.out
     assert (
         "ORCHESTR: 1. azure_openai/gpt-6-astra, 2. azure_anthropic/claude-opus-4-8 (unavailable),"
         " 3. groq/openai/gpt-oss-120b" in out.out
@@ -458,9 +459,12 @@ def test_models_status_reports_todays_usage_per_agent(
 
     lines = out.splitlines()
     orchestr = lines.index(next(line for line in lines if line.startswith("ORCHESTR: ")))
-    assert lines[orchestr + 1] == "  today: azure_openai/gpt-6-astra requests 2, tokens 240"
+    assert lines[orchestr + 1] == "  today: azure_openai/gpt-6-astra requests 2"
     ledger = lines.index(next(line for line in lines if line.startswith("LEDGER: ")))
-    assert lines[ledger + 1] == "  today: groq/openai/gpt-oss-20b requests 1, tokens 5"
+    assert lines[ledger + 1] == "  today: groq/openai/gpt-oss-20b requests 1"
+    assert not any(line.startswith("azure_openai: ") and "tokens" in line for line in lines)
+    azure = lines.index(next(line for line in lines if line.startswith("azure_openai: ")))
+    assert not lines[azure + 1].startswith("  today:")
     assert "SCOUT: 1. groq/openai/gpt-oss-120b (unavailable)" in out
     assert "default: no assignment (final fallback only)" in out
 

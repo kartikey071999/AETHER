@@ -339,10 +339,6 @@ def _format_provider(status: ProviderStatus) -> list[str]:
             f"tokens {usage.tokens}/{_limit(usage.max_tokens)}, "
             f"cost ${float(usage.cost_usd):.6f}/{_limit(usage.max_cost_usd, money=True)}"
         )
-    if status.cost_unknown:
-        lines.append(
-            "  cost unknown - set AETHER_PROVIDER_PRICES (spend is limited by request/token caps)"
-        )
     return lines
 
 
@@ -354,8 +350,7 @@ def _format_agent(status: AgentModelStatus) -> list[str]:
     lines = [f"{status.agent}: {ranked or 'no assignment (final fallback only)'}"]
     if status.usage:
         used = "; ".join(
-            f"{row.provider}/{row.model} requests {row.requests}, tokens {row.tokens}"
-            for row in status.usage
+            f"{row.provider}/{row.model} requests {row.requests}" for row in status.usage
         )
         lines.append(f"  today: {used}")
     else:

@@ -253,8 +253,8 @@ the request bypasses the assignment. After `AETHER_PROVIDER_MODEL_CIRCUIT_FAILUR
 every agent for `AETHER_PROVIDER_MODEL_CIRCUIT_COOLDOWN_SECONDS` (default 300). This
 circuit is in-process and is not persisted. `provider.request_completed` records
 `assignment` (`assigned`/`fallback`), `assignment_rank` and the `skipped` entries.
-`aether models status` lists each agent's assignment and today's per-agent
-requests and tokens. `aether models test --agent SCOUT` routes the probe as that agent.
+`aether models status` lists each agent's assignment and the provider/model its calls
+used today. `aether models test --agent SCOUT` routes the probe as that agent.
 
 Explicitly declare local-model suitability with, for example,
 `AETHER_PROVIDER_OLLAMA_MODELS={"qwen-local:latest":["light","standard"]}`.
@@ -312,12 +312,14 @@ apply additionally. Defaults are:
 | Provider | Requests/day | Tokens/day | Estimated USD/day | Tokens/request | Concurrent |
 |---|---:|---:|---:|---:|---:|
 | Groq | 2,000 | 2,000,000 | 10 | 32,768 | 2 |
-| Azure Astra | 1,000 | 3,000,000 | 25 (once priced) | 8,192 | 4 |
-| Azure Anthropic | 300 | 1,500,000 | 50 (once priced) | 16,384 | 2 |
+| Azure Astra | 1,000 | 3,000,000 | - | 8,192 | 4 |
+| Azure Anthropic | 300 | 1,500,000 | - | 16,384 | 2 |
 | Ollama | unlimited | unlimited | no API cost | 32,768 | 2 |
 
 Override caps with `AETHER_PROVIDER_BUDGETS` (JSON); unspecified fields retain
 their provider defaults. `AETHER_PROVIDER_MODEL_BUDGETS` adds per-model limits.
+The Azure caps are an internal safety net: they are enforced but `aether models status`
+does not display Azure usage or budgets.
 PostgreSQL advisory transaction locks serialize admission across processes;
 SQLite uses immediate transactions for offline tests. Successful calls replace
 reservations with measured usage; failed calls retain conservative estimates
@@ -343,12 +345,10 @@ prices return zero **with `cost_estimate_unknown=True`**, not an assertion of fr
 inference. Override any model using `AETHER_PROVIDER_PRICES` JSON, for example
 `{"groq/openai/gpt-oss-20b":{"input_per_mtok":0.075,"output_per_mtok":0.30}}`.
 Both rates must be finite and nonnegative, in USD per million tokens; overrides
-apply to routing, reservations, responses, and final accounting. Azure prices
-are unknown by default, not guessed. A provider or model USD ceiling refuses
-unknown-price models unless the provider's budget sets `allow_unpriced=true`. Both Azure
-providers set it by default. `allow_unpriced` is only accepted together with daily
-request and token caps, because it cannot enforce actual dollar usage. `aether models
-status` flags such providers with "cost unknown - set AETHER_PROVIDER_PRICES". Byte-based
+apply to routing, reservations, responses, and final accounting. A provider or model
+USD ceiling refuses unknown-price models unless the provider's budget sets
+`allow_unpriced=true` (both Azure providers do). `allow_unpriced` is only accepted together
+with daily request and token caps. Byte-based
 input reservations are conservative estimates, not model-specific tokenizers.
 Timeouts/unknown failure consumption remain estimates, not billing reports.
 

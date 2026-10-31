@@ -25,7 +25,6 @@ from aether.models import (
     provider_hosts,
 )
 from aether.models.assignment import DEFAULT_ASSIGNMENT
-from aether.models.costs import estimate_cost
 from aether.models.facade import AgentModels, ModelCallContext, ModelUnavailable
 from aether.models.governor import ModelGovernor
 from aether.observability.recorder import EventRecorder
@@ -33,6 +32,8 @@ from aether.security import PermissionService
 from aether.storage.repositories.provider_usage import AgentModelUsage, ProviderUsageRepository
 
 OLLAMA = "ollama"
+# Their daily request/token caps are an internal safety net, so status shows no usage or budget.
+UNDISPLAYED_BUDGETS = frozenset({"azure_openai", "azure_anthropic"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,8 +57,6 @@ class ProviderStatus:
     available: bool
     models: tuple[str, ...]
     usage: ProviderUsage | None = None
-    # A configured model has no known price: spend is bounded only by request/token caps.
-    cost_unknown: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +68,7 @@ class AssignedModel:
 
 @dataclass(frozen=True, slots=True)
 class AgentModelStatus:
-    """One agent's ranked model assignment and today's recorded usage per provider/model."""
+    """One agent's ranked model assignment and today's calls per provider/model."""
 
     agent: str
     assignments: tuple[AssignedModel, ...]
@@ -148,11 +147,6 @@ class ModelServices:
                     configured=configured,
                     available=configured and bool(names),
                     models=names,
-                    cost_unknown=configured
-                    and any(
-                        estimate_cost(provider.name, name, 1, 1, prices=self.settings.prices)[1]
-                        for name in names
-                    ),
                 )
             )
         return statuses
@@ -178,7 +172,7 @@ class ModelServices:
         ]
 
     async def agent_status(self, *, now: datetime | None = None) -> list[AgentModelStatus]:
-        """``assignments`` plus today's recorded usage per agent and provider/model."""
+        """``assignments`` plus today's recorded calls per agent and provider/model."""
         current = (now or datetime.now(UTC)).astimezone(UTC)
         day = current.replace(hour=0, minute=0, second=0, microsecond=0)
         rows = await self.usage.usage_by_agent(since=day, until=day + timedelta(days=1))
@@ -192,11 +186,14 @@ class ModelServices:
         ]
 
     async def status(self, *, now: datetime | None = None) -> list[ProviderStatus]:
-        """``describe`` plus today's recorded usage against each provider's budget."""
+        """``describe`` plus today's recorded usage against each displayed provider budget."""
         current = (now or datetime.now(UTC)).astimezone(UTC)
         day = current.replace(hour=0, minute=0, second=0, microsecond=0)
         statuses = []
         for status in await self.describe():
+            if status.name in UNDISPLAYED_BUDGETS:
+                statuses.append(status)
+                continue
             policy = self.settings.budgets.get(status.name)
             async with self.usage.transaction() as session:
                 totals = await self.usage.totals_in(
