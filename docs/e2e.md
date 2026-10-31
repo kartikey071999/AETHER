@@ -100,11 +100,26 @@ addition applies to the demo process only.
 
 ## Known limitations
 
-- ORCHESTR plans FORGE's task before SCOUT adopts an approach. FORGE therefore resolves the
-  objective's approved capability requirement at execution time. If FORGE runs before the
-  requirement is approved, no verification is requested. The WARDEN review dependency prevents
-  this in the planned flow.
-- `tasks.started_at` / `completed_at` are not populated by the runtime, so the trace derives
-  run windows from `task.transitioned` events.
-- LEDGER's test-run store does not fill `test_runs.verdict`. The verdict is read from LEDGER's
-  `test.report` to ORCHESTR.
+- A consolidated objective's FORGE tasks are held until the objective has an approved
+  requirement. If no requirement is ever approved, the build stays held.
+- LEDGER's verification task waits for the real test run. It reuses `WAITING_FOR_APPROVAL` as its
+  waiting state and waits indefinitely if FORGE never requests verification.
+- An inconclusive verdict is stored as a `CANCELLED` test run.
+- A ROGUE LLM budget of one or less leaves no critique call; critique then uses the curated
+  alternatives.
+
+## Workflow guarantees
+
+- **Requirement linking:** when SCOUT's requirement is approved, ORCHESTR sets
+  `tasks.requirement_id` on the objective's FORGE and LEDGER tasks and emits
+  `task.requirement_linked`. FORGE's "latest approved requirement" guess remains only for
+  legacy tasks and logs `forge.legacy_requirement_fallback`. FORGE refuses a linked requirement
+  that is not approved (`requirement_not_approved`), and ORCHESTR does not release it before then.
+- **LEDGER verification task:** it waits for the FORGE test run and is completed by it.
+- **Verdicts and timestamps:** `test_runs.verdict` holds the verdict, and the task repository
+  sets `tasks.started_at` / `completed_at`.
+- **Escalation:** with `max_replans=0`, ORCHESTR escalates a failed report instead of creating
+  a resolution task.
+- **ROGUE research budget:** the per-objective LLM allowance is split between generation and
+  critique by `ResearchLimits.llm_critique_share` (default 0.5), so repeated work cannot use up
+  the critique calls.
