@@ -124,6 +124,7 @@ class WardenAgent(BaseAgent):
     """Security reviewer. The decision rule is code; the model only summarizes risks."""
 
     agent_id = AgentId.WARDEN
+    guard_terminal_objectives = True
     accepted_message_types = receivable_types(AgentId.WARDEN)
 
     def __init__(self, *, summarize_risks: bool = True) -> None:

@@ -53,6 +53,7 @@ from aether.storage.repositories.security import SecurityDecisionRepository
 
 class ScoutAgent(BaseAgent):
     agent_id = AgentId.SCOUT
+    guard_terminal_objectives = True
     accepted_message_types = receivable_types(AgentId.SCOUT) & frozenset(
         {
             MessageType.RESEARCH_REQUEST,

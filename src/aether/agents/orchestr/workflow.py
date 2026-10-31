@@ -16,6 +16,7 @@ from aether.agents.orchestr.planner import plan_idempotency_key
 from aether.agents.orchestr.planning import plan_objective
 from aether.agents.orchestr.priority import format_boost_reason, format_set_reason
 from aether.agents.orchestr.store import ACTOR
+from aether.agents.terminal import IGNORED_DECISION, terminal_objective
 from aether.communication.contracts import (
     ContractViolation,
     HealthState,
@@ -71,7 +72,44 @@ async def dispatch(env: Env, message: AgentMessage) -> None:
         )
         raise
     handler = _HANDLERS.get(message.message_type, _observe)
+    if message.message_type in _TERMINAL_GUARDED and await _ignore_terminal(env, message):
+        return
     await handler(env, message, payload)
+
+
+# Work/progress messages that must not act on a cancelled, completed or failed objective.
+_TERMINAL_GUARDED = frozenset(
+    {
+        MessageType.BLOCKER,
+        MessageType.TASK_RESULT,
+        MessageType.TEST_REPORT,
+        MessageType.PROGRESS_UPDATE,
+        MessageType.RESEARCH_CONSOLIDATED,
+        MessageType.REQUIREMENT_EVALUATED,
+        MessageType.AUTHORIZATION_REQUEST,
+        MessageType.IMPLEMENTATION_PLAN,
+        MessageType.EXECUTION_RESULT,
+        MessageType.RESOURCE_REQUEST,
+    }
+)
+
+
+async def _ignore_terminal(env: Env, message: AgentMessage) -> bool:
+    """Acknowledge a message for a finished objective: no escalation, replan or user update."""
+    objective = await terminal_objective(env.store.sessions, message)
+    if objective is None:
+        return False
+    await env.store.record_decision(
+        IGNORED_DECISION,
+        f"objective is {objective.status}; {message.message_type.value} from "
+        f"{message.source_agent.value} acknowledged without action",
+        key=f"orchestr:ignored-terminal:{message.message_id}",
+        evidence=[message.message_type.value, message.source_agent.value, objective.status],
+        objective_id=objective.id,
+        task_id=message.task_id,
+        correlation_id=message.correlation_id,
+    )
+    return True
 
 
 # --- objectives ----------------------------------------------------------------------------

@@ -27,6 +27,7 @@ logger = logging.getLogger("aether.agent.forge")
 
 class ForgeAgent(BaseAgent):
     agent_id: ClassVar[AgentId] = AgentId.FORGE
+    guard_terminal_objectives = True
     accepted_message_types = receivable_types(AgentId.FORGE)
 
     def __init__(self, config: ForgeConfig | None = None, sleep: Sleep = asyncio.sleep) -> None:
