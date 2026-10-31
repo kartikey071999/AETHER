@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from uuid import UUID
 
 from aether.agents.orchestr.env import Env
+from aether.agents.orchestr.linking import LINKED_AGENTS, objective_requirement
 from aether.agents.orchestr.planner import (
     ObjectiveKind,
     PlanDocument,
@@ -151,12 +152,18 @@ async def materialize(
     """Create missing tasks and dependency edges. Existing tasks are reused by idempotency key."""
     ordered = validate_plan(specs, env.limits)
     ids: dict[str, UUID] = {}
+    linked_requirement: UUID | None = None
+    looked_up = False
     for spec in ordered:
         key = plan_idempotency_key(objective.id, spec.key)
         existing = await env.store.task_by_key(key)
         if existing is not None:
             ids[spec.key] = existing.id
             continue
+        if not looked_up and spec.agent.value in LINKED_AGENTS:
+            # Tasks planned after approval (rework, re-verification) inherit the objective's link.
+            linked_requirement = await objective_requirement(env, objective.id)
+            looked_up = True
         ids[spec.key] = await env.store.tasks.create(
             objective_id=objective.id,
             title=spec.title,
@@ -166,6 +173,7 @@ async def materialize(
             estimated_ram_mb=spec.ram_mb,
             estimated_disk_mb=spec.disk_mb,
             max_attempts=env.limits.max_task_attempts,
+            requirement_id=linked_requirement if spec.agent.value in LINKED_AGENTS else None,
             deadline=objective.deadline,
             interruptible=spec.interruptible,
             estimated_cpu_percent=spec.cpu_percent,

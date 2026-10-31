@@ -834,11 +834,13 @@ async def test_adopted_requirement_uses_objective_criteria_and_is_approved_for_l
         for item in await records(context, MessageRecord)
         if item.message_type == MessageType.REQUIREMENT_EVALUATED.value
     ]
-    assert len(evaluated) == 1
-    assert evaluated[0].source_agent == "SCOUT" and evaluated[0].target_agent == "LEDGER"
-    assert evaluated[0].payload["outcome"] == "approved"
-    assert evaluated[0].payload["requirement_id"] == str(requirement.id)
-    assert evaluated[0].payload["acceptance_criteria"] == criteria
+    assert len(evaluated) == 2
+    assert {item.target_agent for item in evaluated} == {"LEDGER", "ORCHESTR"}
+    assert all(item.source_agent == "SCOUT" for item in evaluated)
+    for item in evaluated:
+        assert item.payload["outcome"] == "approved"
+        assert item.payload["requirement_id"] == str(requirement.id)
+        assert item.payload["acceptance_criteria"] == criteria
 
 
 async def test_second_adoption_for_the_same_objective_is_rejected_with_rationale(

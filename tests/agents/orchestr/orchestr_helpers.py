@@ -12,15 +12,19 @@ from aether.agents.orchestr import OrchestrAgent
 from aether.agents.orchestr.limits import LIMITS_SERVICE, OrchestrLimits
 from aether.agents.orchestr.store import OrchestrStore
 from aether.communication.contracts import (
+    EvaluationOutcome,
     ObjectiveCreatePayload,
     Payload,
+    RequirementEvaluatedPayload,
+    RequirementType,
     TaskResultPayload,
     build_message,
 )
 from aether.communication.messages import AgentId, AgentMessage, MessageType
 from aether.runtime.resource_monitor import HostResources
 from aether.storage.database import Database
-from aether.storage.models import ObjectiveRecord, TaskRecord, TaskStatus
+from aether.storage.models import ObjectiveRecord, RequirementStatus, TaskRecord, TaskStatus
+from aether.storage.repositories import RequirementRepository
 
 GIB = 1024**3
 ALL_STATUSES = ["active", "deferred", "paused", "blocked", "completed", "cancelled"]
@@ -143,6 +147,47 @@ class Harness:
 
     async def tick(self) -> None:
         await self.agent.tick(self.ctx)
+
+    async def propose_requirement(
+        self, objective_id: UUID, *, approved: bool = False, title: str = "PDF parsing"
+    ) -> UUID:
+        """SCOUT's requirement record; ``approved`` mirrors LEDGER having flipped its status."""
+        requirements = RequirementRepository(self.database.sessions)
+        requirement_id = await requirements.create(
+            objective_id=objective_id,
+            title=title,
+            requirement_type="capability",
+            created_by="SCOUT",
+            acceptance_criteria=["PDF text is extracted correctly"],
+        )
+        if approved:
+            await requirements.set_status(
+                requirement_id, RequirementStatus.APPROVED, actor="LEDGER"
+            )
+        return requirement_id
+
+    async def evaluate_requirement(
+        self, objective_id: UUID, requirement_id: UUID, *, title: str = "PDF parsing"
+    ) -> AgentMessage:
+        return await self.send(
+            AgentId.SCOUT,
+            RequirementEvaluatedPayload(
+                requirement_id=requirement_id,
+                objective_id=objective_id,
+                title=title,
+                requirement_type=RequirementType.CAPABILITY,
+                acceptance_criteria=["PDF text is extracted correctly"],
+                outcome=EvaluationOutcome.APPROVED,
+                rationale="Meets the objective",
+            ),
+            objective_id=objective_id,
+        )
+
+    async def approve_requirement(self, objective_id: UUID) -> UUID:
+        """An approved requirement, announced to ORCHESTR so it links the implementation tasks."""
+        requirement_id = await self.propose_requirement(objective_id, approved=True)
+        await self.evaluate_requirement(objective_id, requirement_id)
+        return requirement_id
 
     def result_message(self, task: TaskRecord, payload: TaskResultPayload) -> AgentMessage:
         return build_message(

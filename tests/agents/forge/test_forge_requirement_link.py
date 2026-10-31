@@ -1,7 +1,9 @@
 """FORGE links its work to the structured requirement and names a real suite (T-040)."""
 
 import json
+import logging
 
+import pytest
 from forge_support import ForgeEnv
 
 from aether.agents.base import TaskResultStatus
@@ -63,6 +65,23 @@ async def test_unlinked_task_uses_the_objectives_approved_requirement(env: Forge
     # The suite is the test file the plan wrote, runnable in the task workspace.
     assert request.payload["suite"] == "tests/test_stats.py"
     assert {"workspace": str(task.id)} in request.payload["evidence"]
+
+
+async def test_legacy_fallback_is_logged_and_linked_tasks_do_not_use_it(
+    env: ForgeEnv, caplog: pytest.LogCaptureFixture
+) -> None:
+    legacy = await env.make_task(with_requirement=False, criteria=None)
+    requirement_id = await _objective_requirement(env, legacy)
+    with caplog.at_level(logging.WARNING, logger="aether.agent"):
+        requirement = await load_requirement(env.ctx, legacy)
+    assert requirement is not None and requirement.id == requirement_id
+    assert "forge.legacy_requirement_fallback" in caplog.text
+
+    caplog.clear()
+    linked = await env.make_task()
+    with caplog.at_level(logging.WARNING, logger="aether.agent"):
+        assert await load_requirement(env.ctx, linked) is not None
+    assert "forge.legacy_requirement_fallback" not in caplog.text
 
 
 async def test_proposed_requirement_is_not_picked_up(env: ForgeEnv) -> None:

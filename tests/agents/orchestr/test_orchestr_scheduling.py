@@ -89,6 +89,8 @@ async def test_only_one_build_task_runs_at_a_time(harness: Harness) -> None:
     tasks = await harness.tasks(objective_id)
     await harness.finish(tasks["consolidation"].id)
     await harness.finish(tasks["security_review"].id)
+    await harness.approve_requirement(objective_id)
+    await harness.tick()
     assert await harness.state(tasks["implementation"].id) is TaskStatus.READY
     assert await harness.state(tasks["verification"].id) is TaskStatus.PENDING
 
