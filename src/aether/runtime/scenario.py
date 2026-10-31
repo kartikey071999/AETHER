@@ -270,6 +270,9 @@ class ScenarioTiming:
     poll_seconds: float = 0.05
     recovery_seconds: float = 1.0
     shutdown_seconds: float = 10.0
+    # How long FORGE may wait for an approved requirement before ORCHESTR escalates (demo speed;
+    # production defaults to OrchestrLimits.requirement_wait_minutes).
+    requirement_wait_seconds: float = 30.0
 
 
 def scenario_settings(root: Path, *, database_url: str | None = None) -> AetherSettings:
@@ -308,7 +311,11 @@ def scenario_runtime_settings(
             "agent_tick_overrides": {},
             "task_control_poll_seconds": timing.tick_seconds,
             "task_interrupt_grace_seconds": 1.0,
-            "orchestr": OrchestrLimits(llm_refinement=False, max_replans_per_objective=max_replans),
+            "orchestr": OrchestrLimits(
+                llm_refinement=False,
+                max_replans_per_objective=max_replans,
+                requirement_wait_minutes=timing.requirement_wait_seconds / 60,
+            ),
             "research": ResearchLimits(
                 default_sources=(
                     SourceSpec(
