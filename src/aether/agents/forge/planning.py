@@ -25,7 +25,13 @@ from aether.agents.forge.schemas import (
     PlanDefect,
     RuntimeScopeDefect,
 )
-from aether.communication.contracts import PlanStep, ResourceEstimate
+from aether.communication.contracts import (
+    PlanStep,
+    ProgressUpdatePayload,
+    ResourceEstimate,
+    build_message,
+)
+from aether.communication.messages import AgentId
 from aether.models.contracts import CompletionMessage, CompletionRequest, ModelTier
 from aether.models.facade import ModelCallContext
 from aether.storage.models import TaskRecord
@@ -289,6 +295,32 @@ def _json_text(raw: str) -> str:
     return fenced.group(1) if fenced else text
 
 
+DRAFT_ATTEMPT_KEY = "forge_draft_attempt"
+
+
+def draft_attempt_id(task_id: UUID) -> UUID:
+    return forge_id("draft-attempt", task_id)
+
+
+async def _claim_draft_attempt(ctx: AgentContext, task: TaskRecord) -> bool:
+    """Record the task's single LLM draft attempt; ``False`` when it was already made."""
+    message = build_message(
+        AgentId.FORGE,
+        AgentId.ORCHESTR,
+        ProgressUpdatePayload(
+            task_id=task.id,
+            objective_id=task.objective_id,
+            summary="FORGE is drafting an implementation plan with an LLM (one attempt per task)",
+            details={DRAFT_ATTEMPT_KEY: True},
+        ),
+        message_id=draft_attempt_id(task.id),
+        task_id=task.id,
+        objective_id=task.objective_id,
+        requirement_id=task.requirement_id,
+    )
+    return await ctx.bus.publish(message)
+
+
 async def draft_with_llm(
     ctx: AgentContext,
     task: TaskRecord,
@@ -298,9 +330,17 @@ async def draft_with_llm(
     registered_tools: Mapping[str, tuple[str, object]],
     config: ForgeConfig,
 ) -> ForgePlan | None:
-    """A `standard`-tier draft, accepted only as validated JSON; any failure yields ``None``."""
+    """A `standard`-tier draft, accepted only as validated JSON; any failure yields ``None``.
+
+    FORGE asks at most once per task: a durable marker message records the attempt, so a
+    redelivered assignment, a re-run after approval or a resolution attempt never re-drafts.
+    """
     if ctx.models is None or not config.llm_drafting or not registered_tools:
         return None
+    if not await _claim_draft_attempt(ctx, task):
+        logger.info("forge LLM draft skipped: this task already had its one draft attempt")
+        return None
+    call = ModelCallContext(task_id=task.id, objective_id=task.objective_id)
     prompt = draft_user_prompt(
         title=task.title,
         description=task.description,
@@ -319,9 +359,11 @@ async def draft_with_llm(
         tier=ModelTier.STANDARD,
     )
     try:
-        response = await ctx.models.complete(
-            request, ModelCallContext(task_id=task.id, objective_id=task.objective_id)
-        )
+        response = await ctx.models.complete(request, call)
+    except Exception as error:  # noqa: BLE001 - unavailable, over budget or blocked: no draft
+        logger.warning("forge LLM draft unavailable: %s", type(error).__name__)
+        return None
+    try:
         text = _json_text(response.text)
         draft = DraftPlan.model_validate_json(text)
         steps = tuple(
@@ -332,11 +374,13 @@ async def draft_with_llm(
             PlanStep(tool=s.tool, arguments=json.loads(json.dumps(s.arguments)), purpose=s.purpose)
             for s in draft.rollback_steps
         )
-    except Exception as error:  # noqa: BLE001 - any model/parse failure means "no draft"
+    except Exception as error:  # noqa: BLE001 - any parse failure means "no draft"
         logger.warning("forge LLM draft discarded: %s", type(error).__name__)
+        await ctx.models.report_unusable(call, reason="invalid_plan_json")
         return None
     if any(step.tool not in registered_tools for step in (*steps, *rollback)):
         logger.warning("forge LLM draft discarded: it used an unregistered tool")
+        await ctx.models.report_unusable(call, reason="unregistered_tool")
         return None
     return ForgePlan(
         plan_id=forge_id("plan", task.id, "llm", _digest(text)),

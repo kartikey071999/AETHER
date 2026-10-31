@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Sequence
+from dataclasses import replace
 from uuid import UUID
 
 from sqlalchemy import select
@@ -10,6 +11,7 @@ from aether.agents.base import AgentContext
 from aether.agents.forge.planning import build_template_plan, draft_with_llm, extract_spec
 from aether.agents.forge.schemas import ForgeConfig, ForgePlan, PlanDefect, Refusal, RefusalCode
 from aether.agents.forge.store import latest_plan, save_plan
+from aether.agents.forge.templates import match_template
 from aether.storage.models import RequirementRecord, RequirementStatus, TaskRecord
 
 _ACTIONABLE = (RequirementStatus.APPROVED.value, RequirementStatus.IN_PROGRESS.value)
@@ -97,7 +99,9 @@ async def resolve_plan(
                 spec, task, requirement_id=requirement_id, criteria=criteria, config=config
             )
         else:
-            plan = await _draft(ctx, task, requirement_id, criteria, config)
+            plan = await _capability_or_draft(
+                ctx, task, requirement, requirement_id, criteria, config
+            )
     except PlanDefect as error:
         return None, Refusal(RefusalCode.PLAN_INVALID, str(error))
     if plan is None:
@@ -107,6 +111,39 @@ async def resolve_plan(
         )
     await save_plan(ctx, task, plan)
     return plan, None
+
+
+async def _capability_or_draft(
+    ctx: AgentContext,
+    task: TaskRecord,
+    requirement: RequirementRecord | None,
+    requirement_id: UUID | None,
+    criteria: tuple[str, ...],
+    config: ForgeConfig,
+) -> ForgePlan | None:
+    """A known capability uses its template; the LLM is only an optional refinement of it."""
+    known = (
+        match_template(
+            task.title,
+            task.description,
+            requirement.title if requirement else None,
+            requirement.description if requirement else None,
+        )
+        if config.capability_templates
+        else None
+    )
+    if known is None:
+        return await _draft(ctx, task, requirement_id, criteria, config)
+    name, spec = known
+    if config.llm_refine_templates:
+        drafted = await _draft(ctx, task, requirement_id, criteria, config)
+        if drafted is not None:
+            return drafted
+        ctx.logger.info("forge.template_fallback: using the %s template", name)
+    plan = build_template_plan(
+        spec, task, requirement_id=requirement_id, criteria=criteria, config=config
+    )
+    return replace(plan, source=f"template:{name}")
 
 
 async def _draft(
