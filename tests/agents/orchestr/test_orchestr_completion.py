@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 import pytest
 from orchestr_helpers import Harness
 
+from aether.agents.orchestr.limits import OrchestrLimits
 from aether.communication.contracts import (
     AcceptanceResult,
     ContractViolation,
@@ -155,6 +156,23 @@ async def test_failed_report_appends_rework_then_escalates(harness: Harness) -> 
     assert (await harness.get_objective(objective_id)).status == "blocked"
     escalations = harness.bus.of_type(MessageType.COMMUNICATION_REQUEST, target=AgentId.MUSE)
     assert len(escalations) == 1
+
+
+async def test_rework_that_would_exceed_the_task_limit_escalates(harness: Harness) -> None:
+    objective_id = await harness.objective()
+    await complete_all(harness, objective_id)
+    before = len(await harness.tasks(objective_id))
+    # Room for one more task, but rework adds two (rework + re-verification).
+    harness.use_limits(OrchestrLimits(llm_refinement=False, max_tasks_per_objective=before + 1))
+
+    await harness.send(
+        AgentId.LEDGER, report(VerificationVerdict.FAILED), objective_id=objective_id
+    )
+
+    assert len(await harness.tasks(objective_id)) == before
+    assert (await harness.get_objective(objective_id)).status == "blocked"
+    [escalation] = await harness.store.keyed_decisions("orchestr:escalated:")
+    assert "could not be extended" in escalation.rationale
 
 
 async def test_generated_objective_completion_is_silent_to_the_user(harness: Harness) -> None:

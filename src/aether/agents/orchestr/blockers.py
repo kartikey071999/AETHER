@@ -1,11 +1,16 @@
 """Blocker handling, escalation, and the user's authorization answers."""
 
+import re
 from uuid import UUID
 
 from aether.agents.orchestr.assignment import publish_assignment
 from aether.agents.orchestr.communication import UpdateEvent, UpdateKind
 from aether.agents.orchestr.env import Env
-from aether.agents.orchestr.planner import blocker_idempotency_key
+from aether.agents.orchestr.planner import (
+    StepKind,
+    blocker_idempotency_key,
+    kind_of_idempotency_key,
+)
 from aether.agents.orchestr.routing import DEFAULT_ASSIGNEE, infer_kind, route_blocker
 from aether.agents.orchestr.store import ACTOR, stable_id
 from aether.communication.contracts import (
@@ -35,6 +40,7 @@ _CANCELLABLE = (
     TaskStatus.FAILED,
 )
 _MAX_TEXT = 2000
+_RESOLVE_PREFIX = re.compile(r"^(?:Resolve [a-z_]+ blocker: )+")
 
 
 async def escalate_objective(
@@ -97,16 +103,19 @@ async def handle_blocker(env: Env, payload: BlockerPayload, message: AgentMessag
         route_to=payload.route_to,
     )
     description = payload.description[:_MAX_TEXT]
-    # A resolution task is a replan; with replans disabled the user decides instead.
-    replans_disabled = route.creates_task and env.limits.max_replans_per_objective <= 0
+    # A resolution task is a replan, bounded per objective; past a bound the user decides.
+    limit_reason = (
+        await _resolution_limit(env, objective, task, payload) if route.creates_task else None
+    )
+    to_user = route.escalate or limit_reason is not None
 
-    if route.escalate or replans_disabled:
+    if to_user:
         await _block_task(env, task)
         reason = (
             f"{payload.kind.value} blocker persisted after {attempts} attempts: {description[:200]}"
             if route.escalate
-            else f"{payload.kind.value} blocker needs a decision (automatic replanning is "
-            f"disabled): {description[:200]}"
+            else f"{payload.kind.value} blocker needs a decision ({limit_reason}): "
+            f"{description[:200]}"
         )
         await escalate_objective(
             env,
@@ -125,7 +134,7 @@ async def handle_blocker(env: Env, payload: BlockerPayload, message: AgentMessag
     await env.store.record_decision(
         "blocker",
         f"{payload.kind.value} blocker routed to "
-        f"{route.assignee.value if route.assignee and not replans_disabled else 'user'}: "
+        f"{route.assignee.value if route.assignee and not to_user else 'user'}: "
         f"{description[:200]}",
         key=marker,
         evidence=[payload.kind.value, str(attempts), str(payload.route_to.value)],
@@ -136,6 +145,34 @@ async def handle_blocker(env: Env, payload: BlockerPayload, message: AgentMessag
 
 def _marker(blocker_id: UUID) -> str:
     return f"orchestr:blocker:{blocker_id}"
+
+
+def _replan_marker(objective_id: UUID, blocker_id: UUID) -> str:
+    return f"orchestr:replan:{objective_id}:blocker:{blocker_id}"
+
+
+async def _resolution_limit(
+    env: Env, objective: ObjectiveRecord, task: TaskRecord, payload: BlockerPayload
+) -> str | None:
+    """Why no resolution task may be planned for this blocker, or ``None`` when one may.
+
+    A resolution task is never itself resolved by another task (that nesting re-planned
+    without bound); it also counts as a replan and as a task of the objective.
+    """
+    key = blocker_idempotency_key(payload.blocker_id, "resolve")
+    if await env.store.task_by_key(key) is not None:
+        return None  # redelivered after the task was created: reuse it
+    limits = env.limits
+    if limits.max_replans_per_objective <= 0:
+        return "automatic replanning is disabled"
+    if kind_of_idempotency_key(task.idempotency_key) is StepKind.BLOCKER:
+        return "the blocker resolution task is itself blocked"
+    replans = await env.store.decisions(objective_id=objective.id, decision="replan")
+    if len(replans) >= limits.max_replans_per_objective:
+        return f"automatic replanning limit of {limits.max_replans_per_objective} reached"
+    if await env.store.count_tasks(objective.id) >= limits.max_tasks_per_objective:
+        return f"objective task limit of {limits.max_tasks_per_objective} reached"
+    return None
 
 
 async def _block_task(env: Env, task: TaskRecord) -> None:
@@ -168,9 +205,16 @@ async def _create_resolution_task(
     key = blocker_idempotency_key(payload.blocker_id, "resolve")
     existing = await env.store.task_by_key(key)
     if existing is None:
+        await env.store.record_decision(
+            "replan",
+            f"{payload.kind.value} blocker resolution task planned for '{task.title[:120]}'",
+            key=_replan_marker(objective.id, payload.blocker_id),
+            objective_id=objective.id,
+            task_id=task.id,
+        )
         resolution_id = await env.store.tasks.create(
             objective_id=objective.id,
-            title=f"Resolve {payload.kind.value} blocker: {task.title}"[:200],
+            title=f"Resolve {payload.kind.value} blocker: {_base_title(task.title)}"[:200],
             description=description,
             assigned_agent=assignee.value,
             priority=min(100, task.priority + 10),
@@ -187,6 +231,11 @@ async def _create_resolution_task(
         resolution_id = existing.id
     await env.store.dependencies.add(task.id, resolution_id, actor=ACTOR)
     await _block_task(env, task)
+
+
+def _base_title(title: str) -> str:
+    """The title without any earlier ``Resolve <kind> blocker:`` prefixes (titles never nest)."""
+    return _RESOLVE_PREFIX.sub("", title) or title
 
 
 async def _ask_for_authorization(

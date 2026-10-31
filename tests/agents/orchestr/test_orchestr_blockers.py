@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from orchestr_helpers import Harness
 
+from aether.agents.orchestr.blockers import _base_title
 from aether.agents.orchestr.limits import OrchestrLimits
 from aether.communication.contracts import (
     AuthorizationRequestPayload,
@@ -243,3 +244,91 @@ async def test_task_completion_does_not_message_the_user(harness: Harness) -> No
     )
     await harness.agent.dispatch_message(message, harness.ctx)
     assert harness.bus.of_type(MessageType.COMMUNICATION_REQUEST) == []
+
+
+def _forge_blocker(task, **extra) -> BlockerPayload:
+    return _blocker(task, BlockerKind.IMPLEMENTATION, AgentId.FORGE, **extra)
+
+
+async def _resolutions(harness: Harness, objective_id) -> list:
+    return [item for item in await harness.store.tasks_of(objective_id) if "Resolve" in item.title]
+
+
+async def test_blocked_resolution_task_escalates_instead_of_nesting(harness: Harness) -> None:
+    objective_id, task, _ = await _ready_task(harness)
+    await harness.send(AgentId.FORGE, _forge_blocker(task), task_id=task.id)
+    [resolution] = await _resolutions(harness, objective_id)
+    assert resolution.title.startswith("Resolve implementation blocker: ")
+
+    await harness.send(AgentId.FORGE, _forge_blocker(resolution), task_id=resolution.id)
+
+    assert [item.id for item in await _resolutions(harness, objective_id)] == [resolution.id]
+    assert (await harness.get_objective(objective_id)).status == "blocked"
+    [escalation] = await harness.store.keyed_decisions("orchestr:escalated:")
+    assert "resolution task is itself blocked" in escalation.rationale
+    assert harness.bus.of_type(MessageType.COMMUNICATION_REQUEST, target=AgentId.MUSE)
+
+
+async def test_blocker_resolutions_count_against_the_replan_limit(harness: Harness) -> None:
+    harness.use_limits(OrchestrLimits(llm_refinement=False, max_replans_per_objective=1))
+    objective_id, first, tasks = await _ready_task(harness)
+    second = tasks["research.rogue"]
+
+    await harness.send(AgentId.SCOUT, _blocker(first), task_id=first.id)
+    await harness.send(AgentId.ROGUE, _blocker(second, route_to=AgentId.ROGUE), task_id=second.id)
+
+    assert len(await _resolutions(harness, objective_id)) == 1
+    replans = await harness.store.decisions(objective_id=objective_id, decision="replan")
+    assert len(replans) == 1
+    assert (await harness.get_objective(objective_id)).status == "blocked"
+    [escalation] = await harness.store.keyed_decisions("orchestr:escalated:")
+    assert "replanning limit of 1 reached" in escalation.rationale
+
+
+async def test_blocker_resolution_respects_the_objective_task_limit(harness: Harness) -> None:
+    objective_id, task, tasks = await _ready_task(harness)
+    harness.use_limits(OrchestrLimits(llm_refinement=False, max_tasks_per_objective=len(tasks)))
+
+    await harness.send(AgentId.SCOUT, _blocker(task), task_id=task.id)
+
+    assert await _resolutions(harness, objective_id) == []
+    assert len(await harness.store.tasks_of(objective_id)) == len(tasks)
+    [escalation] = await harness.store.keyed_decisions("orchestr:escalated:")
+    assert "task limit" in escalation.rationale
+
+
+def test_resolution_titles_never_nest() -> None:
+    nested = "Resolve implementation blocker: Resolve research blocker: Implement X"
+    assert _base_title(nested) == "Implement X"
+    assert _base_title("Implement X") == "Implement X"
+
+
+async def test_always_failing_forge_is_bounded_and_escalated(harness: Harness) -> None:
+    """Regression for the runaway: every FORGE task (including resolutions) reports blocked."""
+    objective_id = await harness.objective()
+    initial = len(await harness.store.tasks_of(objective_id))
+    for _ in range(50):
+        if (await harness.get_objective(objective_id)).status != "active":
+            break
+        candidates = [
+            item
+            for item in await harness.store.tasks_of(objective_id)
+            if item.assigned_agent == AgentId.FORGE.value
+            and TaskStatus(item.state) not in (TaskStatus.BLOCKED, TaskStatus.CANCELLED)
+        ]
+        assert candidates, "FORGE work should remain until the objective is escalated"
+        for item in candidates:
+            message = harness.result_message(
+                item,
+                TaskResultPayload(
+                    task_id=item.id, status=TaskOutcome.BLOCKED, error="no implementation plan"
+                ),
+            )
+            await harness.agent.dispatch_message(message, harness.ctx)
+
+    tasks = await harness.store.tasks_of(objective_id)
+    limits = OrchestrLimits()
+    assert len(tasks) <= initial + limits.max_replans_per_objective
+    assert not [item for item in tasks if item.title.count("blocker:") > 1]
+    assert (await harness.get_objective(objective_id)).status == "blocked"
+    assert harness.bus.of_type(MessageType.COMMUNICATION_REQUEST, target=AgentId.MUSE)

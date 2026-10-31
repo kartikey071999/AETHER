@@ -143,7 +143,16 @@ async def plan_objective(env: Env, objective: ObjectiveRecord) -> dict[str, UUID
             evidence=[plan.model_dump_json()],
             objective_id=objective.id,
         )
-    return await materialize(env, objective, plan.tasks)
+    try:
+        return await materialize(env, objective, plan.tasks)
+    except PlanError as error:
+        # Imported here: blockers -> assignment -> planning would otherwise be a cycle.
+        from aether.agents.orchestr.blockers import escalate_objective
+
+        await escalate_objective(
+            env, objective, key=f"plan-limit:{objective.id}", reason=f"plan not created: {error}"
+        )
+        return {}
 
 
 async def materialize(
@@ -151,6 +160,17 @@ async def materialize(
 ) -> dict[str, UUID]:
     """Create missing tasks and dependency edges. Existing tasks are reused by idempotency key."""
     ordered = validate_plan(specs, env.limits)
+    missing = [
+        spec
+        for spec in ordered
+        if await env.store.task_by_key(plan_idempotency_key(objective.id, spec.key)) is None
+    ]
+    if missing:
+        total = await env.store.count_tasks(objective.id) + len(missing)
+        if total > env.limits.max_tasks_per_objective:
+            raise PlanError(
+                f"objective would have {total} tasks; limit is {env.limits.max_tasks_per_objective}"
+            )
     ids: dict[str, UUID] = {}
     linked_requirement: UUID | None = None
     looked_up = False
