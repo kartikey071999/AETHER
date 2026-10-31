@@ -46,7 +46,10 @@ because the module is buggy (AC2 and AC3 fail):
   `create_schema=False`.
 - `ScriptedCapabilityProvider`: a `MockProvider` that answers each request by its shape. It
   covers research drafts, the FORGE plan (good or `buggy=True` module) and the WARDEN risk
-  summary. It never uses the network.
+  summary. It never uses the network. By default FORGE builds `text_statistics` from its
+  deterministic capability template and never asks a model; pass
+  `forge_config=ForgeConfig(llm_refine_templates=True)` to make FORGE try the LLM plan first
+  (the failing-verification test does this to get the buggy module).
 - `collect_trace` / `ScenarioTrace` / `format_trace`: read everything the run persisted and
   render it step by step.
 - `scenario_settings(root)`: self-contained SQLite settings for tests.
@@ -63,10 +66,14 @@ Tests (temporary SQLite, mock models; about 60 s for the whole directory):
 uv run pytest tests/e2e -q
 ```
 
-They cover three paths:
+They cover these paths:
 
 - **Happy path:** all 12 steps.
 - **Failing verification.**
+- **LLM runaway (`test_llm_runaway.py`):** three mock models return FORGE plans cut off at
+  `max_tokens`, as in the 2026-10-31 incident. With template fallback the objective is still
+  verified. Without a template it is escalated. Either way FORGE's LLM calls stay within its
+  per-objective budget and the task count stays bounded.
 - **Restart:** the engine is stopped after WARDEN's first FORGE approval. A new engine on the
   same database finishes the workflow without duplicate requirements, runs, test runs, verified
   capabilities or outbox files.
@@ -107,6 +114,10 @@ addition applies to the demo process only.
 - An inconclusive verdict is stored as a `CANCELLED` test run.
 - A ROGUE LLM budget of one or less leaves no critique call; critique then uses the curated
   alternatives.
+- Per-objective LLM budgets and the circuit breaker are kept in memory. A restart resets them,
+  and only the durable daily provider budgets still apply. The circuit never half-opens.
+- A task with neither a capability template nor a `forge-spec`, whose single LLM draft fails,
+  still blocks. ORCHESTR then bounds and escalates it; there is no generic deterministic plan.
 
 ## Workflow guarantees
 
@@ -120,6 +131,18 @@ addition applies to the demo process only.
   sets `tasks.started_at` / `completed_at`.
 - **Escalation:** with `max_replans=0`, ORCHESTR escalates a failed report instead of creating
   a resolution task.
+- **Bounded re-planning:** each blocker-resolution task counts as a replan, against
+  `max_replans_per_objective` (shared with verification rework) and `max_tasks_per_objective`.
+  Every task-creating path checks both limits, including plan materialisation and rework.
+  A blocker raised by a resolution task escalates the objective (blocked, plus a MUSE update)
+  instead of creating another task. Resolution titles never nest ("Resolve … blocker: Resolve …").
+- **FORGE planning:** known capabilities (`text_statistics`) use a deterministic template with no
+  LLM call. Otherwise FORGE makes one JSON-mode LLM draft per task (`llm_max_tokens=4096`),
+  recorded by a durable marker message. Unusable output is reported to the model governor, and
+  with `llm_refine_templates` a failed draft falls back to the template instead of a blocker.
+- **LLM spend:** per objective and agent budgets, at most two models per request, one
+  same-model retry for length-truncated output, and a consecutive-failure circuit breaker
+  (see the README's model-provider section).
 - **ROGUE research budget:** the per-objective LLM allowance is split between generation and
   critique by `ResearchLimits.llm_critique_share` (default 0.5), so repeated work cannot use up
   the critique calls.
