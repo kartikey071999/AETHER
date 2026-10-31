@@ -1,5 +1,6 @@
 """Process-wide security services built once at startup and injected into every agent context."""
 
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import Any
@@ -21,6 +22,18 @@ from aether.tools.facade import AgentTools
 from aether.tools.registry import ToolRegistry
 
 APPROVALS_SERVICE = "approvals"
+SECURITY_POLICY_SERVICE = "security_policy"
+# Services only WARDEN may hold: recording decisions, and the policy it evaluates against.
+WARDEN_ONLY_SERVICES = (APPROVALS_SERVICE, SECURITY_POLICY_SERVICE)
+
+
+def default_extra_executables() -> tuple[str, ...]:
+    """The running interpreter, so LEDGER/FORGE verification runs (``python -m pytest``) work.
+
+    Executables remain usable only by agents granted SUBPROCESS and, by default, only after a
+    WARDEN approval bound to the exact argv; nothing else about the policy is relaxed.
+    """
+    return (sys.executable,) if sys.executable else ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,8 +69,10 @@ class SecurityServices:
         services = dict(base.services)
         if agent_id is AgentId.WARDEN:
             services[APPROVALS_SERVICE] = self.approvals
+            services[SECURITY_POLICY_SERVICE] = self.policy
         else:
-            services.pop(APPROVALS_SERVICE, None)
+            for name in WARDEN_ONLY_SERVICES:
+                services.pop(name, None)
         return replace(
             base,
             permission_service=PermissionView(self.permissions),
@@ -78,16 +93,24 @@ def build_security_services(
     *,
     security_settings: SecuritySettings | None = None,
     extra_hosts: Iterable[str] = (),
+    extra_executables: Iterable[str] | None = None,
     http_transport: httpx.AsyncBaseTransport | None = None,
 ) -> SecurityServices:
     """Build the default-deny policy from settings and the services that enforce it.
 
-    ``extra_hosts`` (e.g. configured model providers) join the allowlist before the policy is
-    frozen; nothing can be added afterwards.
+    ``extra_hosts`` (e.g. configured model providers) and ``extra_executables`` (by default the
+    running interpreter, see ``default_extra_executables``) join the allowlists before the
+    policy is frozen; nothing can be added afterwards.
     """
     base = security_settings or SecuritySettings()
-    merged = list(dict.fromkeys([*base.allowed_hosts, *extra_hosts]))
-    policy = load_security_policy(settings, base.model_copy(update={"allowed_hosts": merged}))
+    if extra_executables is None:
+        extra_executables = default_extra_executables()
+    hosts = list(dict.fromkeys([*base.allowed_hosts, *extra_hosts]))
+    executables = list(dict.fromkeys([*base.allowed_executables, *extra_executables]))
+    policy = load_security_policy(
+        settings,
+        base.model_copy(update={"allowed_hosts": hosts, "allowed_executables": executables}),
+    )
     # Adapters refuse to run in or write to roots that do not exist yet.
     for directory in (policy.workspace_dir, policy.artifact_dir, policy.data_dir):
         directory.mkdir(parents=True, exist_ok=True)
