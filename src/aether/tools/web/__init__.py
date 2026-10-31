@@ -17,6 +17,12 @@ from aether.tools.web.adapter import (
     WebResult,
 )
 from aether.tools.web.extract import ExtractedPage, Link, extract_html
+from aether.tools.web.github import (
+    GitHubStatus,
+    RateBucket,
+    fetch_github_status,
+    github_auth_headers,
+)
 from aether.tools.web.settings import DEFAULT_WEB_ALLOWED_HOSTS, WebSettings
 from aether.tools.web.sources import DocHit
 
@@ -26,7 +32,7 @@ WEB_TOOL_DESCRIPTIONS = {
     "web.links": "Links on an allowlisted page, optionally a bounded same-host crawl.",
     "pypi.package": "Package facts from the PyPI JSON API (version, licence, releases).",
     "github.repo": "Repository facts from the GitHub REST API (stars, licence, activity).",
-    "github.search": "Search GitHub repositories (unauthenticated REST API).",
+    "github.search": "Search GitHub repositories via the REST API (optional read-only token).",
     "docs.search": "Search a Sphinx documentation site via objects.inv or searchindex.js.",
 }
 
@@ -45,11 +51,13 @@ __all__ = [
     "DocHit",
     "DocsSearchInput",
     "ExtractedPage",
+    "GitHubStatus",
     "GithubRepoInput",
     "GithubSearchInput",
     "Link",
     "PageRecord",
     "PypiPackageInput",
+    "RateBucket",
     "RateLimited",
     "SafeWeb",
     "WebExtractInput",
@@ -58,5 +66,7 @@ __all__ = [
     "WebResult",
     "WebSettings",
     "extract_html",
+    "fetch_github_status",
+    "github_auth_headers",
     "register_web_tools",
 ]

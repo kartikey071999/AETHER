@@ -1,6 +1,6 @@
 """Startup configuration for the web research tools (``AETHER_WEB_*``, JSON lists)."""
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from aether import __version__
@@ -36,6 +36,8 @@ class WebSettings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # A malformed token must never be echoed back in a validation error.
+        hide_input_in_errors=True,
     )
 
     allowed_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_WEB_ALLOWED_HOSTS))
@@ -54,6 +56,8 @@ class WebSettings(BaseSettings):
     max_extract_chars: int = Field(default=20_000, ge=256, le=1_000_000)
     max_links: int = Field(default=200, ge=1, le=5000)
     max_search_results: int = Field(default=10, ge=1, le=50)
+    # Optional fine-grained, public-read-only token; only ever sent to api.github.com.
+    github_token: SecretStr | None = Field(default=None, repr=False)
 
     @field_validator("allowed_content_types")
     @classmethod
@@ -64,6 +68,16 @@ class WebSettings(BaseSettings):
     @classmethod
     def _normalize_hosts(cls, value: list[str]) -> list[str]:
         return sorted({item.strip().rstrip(".").lower() for item in value if item.strip()})
+
+    @field_validator("github_token")
+    @classmethod
+    def _clean_token(cls, value: SecretStr | None) -> SecretStr | None:
+        token = value.get_secret_value().strip() if value is not None else ""
+        if not token:
+            return None
+        if not token.isascii() or not token.isprintable() or any(c.isspace() for c in token):
+            raise ValueError("github_token must be a single printable ASCII token")
+        return SecretStr(token)
 
     @field_validator("user_agent")
     @classmethod

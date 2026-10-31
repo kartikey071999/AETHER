@@ -41,8 +41,16 @@ class HostRateLimiter:
             return delay
 
 
+MAX_BLOCK_SECONDS = 3600.0
+SECONDARY_LIMIT_BACKOFF_SECONDS = 60.0
+
+
 class GitHubRateLimit:
-    """Refuse GitHub API calls once ``X-RateLimit-Remaining`` hits zero, until the reset time."""
+    """Refuse GitHub API calls once the quota is exhausted, until the advertised reset time.
+
+    Reads ``X-RateLimit-Remaining``/``-Reset`` and ``Retry-After``; a 429 without a usable
+    reset time (a secondary limit) backs off for a fixed minute.
+    """
 
     def __init__(self, *, clock: Callable[[], float] = time.time) -> None:
         self._clock = clock
@@ -59,13 +67,17 @@ class GitHubRateLimit:
             reset = float(lowered.get("x-ratelimit-reset", "0"))
         except ValueError:
             return
+        now = self._clock()
         retry_after = lowered.get("retry-after")
         if retry_after is not None and status_code in {403, 429}:
             try:
-                reset = max(reset, self._clock() + float(retry_after))
+                reset = max(reset, now + float(retry_after))
             except ValueError:
                 pass
             remaining = 0
-        if remaining <= 0 and reset > self._clock():
+        elif status_code == 429:
+            reset = max(reset, now + SECONDARY_LIMIT_BACKOFF_SECONDS)
+            remaining = 0
+        if remaining <= 0 and reset > now:
             # Never trust a far-future reset from the wire: cap the block at one hour.
-            self._blocked_until[bucket] = min(reset, self._clock() + 3600)
+            self._blocked_until[bucket] = min(reset, now + MAX_BLOCK_SECONDS)
