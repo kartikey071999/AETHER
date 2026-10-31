@@ -3,9 +3,10 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import select
+from sqlite_schema import schema_database
 
 from aether.storage.database import Database
-from aether.storage.models import Base, EventRecord
+from aether.storage.models import EventRecord
 from aether.storage.repositories import ObjectiveRepository
 
 EventLoader = Callable[[UUID], Awaitable[list[EventRecord]]]
@@ -13,9 +14,7 @@ EventLoader = Callable[[UUID], Awaitable[list[EventRecord]]]
 
 @pytest.fixture
 async def database(tmp_path) -> AsyncIterator[Database]:
-    database = Database(f"sqlite+aiosqlite:///{(tmp_path / 'storage.db').as_posix()}")
-    async with database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    database = schema_database(tmp_path / "storage.db")
     yield database
     await database.close()
 

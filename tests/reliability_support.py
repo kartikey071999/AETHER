@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import Session
+from sqlite_schema import schema_database
 
 from aether.agents.base import AgentContext, BaseAgent, TaskResult, TaskResultStatus
 from aether.communication.messages import AgentId, AgentMessage, MessageType
@@ -291,9 +292,8 @@ async def create_schema(database: Database) -> None:
 
 @asynccontextmanager
 async def sqlite_database(path: Path) -> AsyncIterator[Database]:
-    database = Database(f"sqlite+aiosqlite:///{path.as_posix()}")
+    database = schema_database(path)
     try:
-        await create_schema(database)
         yield database
     finally:
         await database.close()

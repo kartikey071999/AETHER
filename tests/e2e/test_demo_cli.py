@@ -3,12 +3,10 @@
 from pathlib import Path
 
 import pytest
-from alembic import command
-from alembic.config import Config
+from sqlite_schema import copy_migrated
 
 from aether import main as cli
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SECRET = "pw-demo-should-never-appear"
 
 
@@ -26,7 +24,7 @@ def test_demo_capability_prints_the_persisted_trace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _configure(monkeypatch, tmp_path, f"sqlite+aiosqlite:///{(tmp_path / 'demo.db').as_posix()}")
-    command.upgrade(Config(str(PROJECT_ROOT / "alembic.ini")), "head")
+    copy_migrated(tmp_path / "demo.db")
 
     cli.main(["demo", "capability", "--timeout", "60"])
 

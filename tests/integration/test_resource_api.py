@@ -5,13 +5,13 @@ from itertools import pairwise
 import httpx
 import pytest
 from sqlalchemy import select
+from sqlite_schema import schema_database
 
 from aether.api import create_app
 from aether.runtime.engine import Engine, EngineLimits
 from aether.runtime.resource_monitor import HostResources
 from aether.runtime.scheduler import Scheduler, SchedulerPolicy
-from aether.storage.database import Database
-from aether.storage.models import Base, ResourceMeasurementRecord
+from aether.storage.models import ResourceMeasurementRecord
 from aether.storage.repositories import ResourceMeasurementRepository
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
@@ -19,9 +19,7 @@ NOW = datetime(2030, 1, 1, tzinfo=UTC)
 
 @pytest.fixture
 async def database(tmp_path):
-    database = Database(f"sqlite+aiosqlite:///{(tmp_path / 'api.db').as_posix()}")
-    async with database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    database = schema_database(tmp_path / "api.db")
     try:
         yield database
     finally:

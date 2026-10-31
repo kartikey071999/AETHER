@@ -1,6 +1,5 @@
 """Model router wiring: one router/guard per process and a bound completion facade per agent."""
 
-import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -9,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
+from sqlite_schema import copy_schema, copy_schema_to
 
 from aether import main as cli
 from aether.agents import AGENT_DEFINITIONS
@@ -28,7 +28,7 @@ from aether.models import (
 from aether.models.facade import AgentModels, ModelCallContext, ModelUnavailable
 from aether.runtime.bootstrap import Runtime, build_runtime
 from aether.security import PolicyMutationError
-from aether.storage.models import Base, EventRecord, ProviderUsageRecord, TaskRecord
+from aether.storage.models import EventRecord, ProviderUsageRecord, TaskRecord
 
 SECRET = "gsk-should-never-appear"
 ALL_AGENTS = [definition.agent_id for definition in AGENT_DEFINITIONS]
@@ -103,8 +103,7 @@ async def _open(
         provider_settings=provider_settings(mock=True),
         model_providers=providers,
     )
-    async with runtime.database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    copy_schema_to(settings.database_url.get_secret_value())
     return runtime
 
 
@@ -286,8 +285,7 @@ async def test_models_initialized_event_has_no_secrets(
         settings,
         provider_settings=provider_settings(GROQ_API_KEY=SECRET),
     )
-    async with runtime.database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    copy_schema_to(settings.database_url.get_secret_value())
     try:
         await runtime.run(once=True)
         async with runtime.database.sessions() as session:
@@ -382,18 +380,7 @@ def _cli_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AETHER_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("AETHER_WORKSPACE_DIR", str(tmp_path / "workspaces"))
     monkeypatch.setenv("AETHER_ARTIFACT_DIR", str(tmp_path / "artifacts"))
-
-    async def create() -> None:
-        from aether.storage.database import Database
-
-        database = Database(f"sqlite+aiosqlite:///{(tmp_path / 'cli.db').as_posix()}")
-        try:
-            async with database.engine.begin() as connection:
-                await connection.run_sync(Base.metadata.create_all)
-        finally:
-            await database.close()
-
-    asyncio.run(create())
+    copy_schema(tmp_path / "cli.db")
 
 
 def test_models_status_reports_usage_and_no_key_material(

@@ -7,18 +7,16 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import select
+from sqlite_schema import copy_migrated, copy_schema_to
 
 from aether import main as cli
 from aether.config import AetherSettings
 from aether.observability.events import build_event
 from aether.observability.spool import EventSpool
 from aether.runtime.bootstrap import build_runtime, spool_path
-from aether.storage.models import Base, EventRecord
+from aether.storage.models import EventRecord
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SECRET = "pw-should-never-appear"
 
 
@@ -68,9 +66,8 @@ async def test_start_replays_spool_before_runtime_started_and_is_idempotent(
 ) -> None:
     settings = _settings(tmp_path)
     runtime = build_runtime(settings)
+    copy_schema_to(settings.database_url.get_secret_value())
     try:
-        async with runtime.database.engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
         assert runtime.recorder.spool is not None
         assert runtime.recorder.spool.path == spool_path(settings).resolve()
         spooled = _spooled_event()
@@ -118,9 +115,8 @@ async def test_start_configures_logging_and_applies_retention(
     monkeypatch.setattr(bootstrap, "apply_retention", fake_retention)
     settings = _settings(tmp_path)
     runtime = build_runtime(settings)
+    copy_schema_to(settings.database_url.get_secret_value())
     try:
-        async with runtime.database.engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
         await runtime.run(once=True)
     finally:
         await runtime.close()
@@ -137,8 +133,7 @@ def _migrate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("AETHER_DATABASE_URL", f"sqlite+aiosqlite:///{database_path.as_posix()}")
     monkeypatch.setenv("AETHER_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("AETHER_LOG_DIR", str(tmp_path / "logs"))
-    command.upgrade(Config(str(PROJECT_ROOT / "alembic.ini")), "head")
-    return database_path
+    return copy_migrated(database_path)
 
 
 def test_cli_run_once_starts_records_events_and_exits_cleanly(

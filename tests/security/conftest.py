@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 from sqlalchemy import select
+from sqlite_schema import schema_database
 
 from aether.communication.messages import AgentId
 from aether.observability.recorder import EventRecorder
@@ -21,7 +22,7 @@ from aether.security import (
     SecurityPolicy,
 )
 from aether.storage.database import Database
-from aether.storage.models import Base, EventRecord
+from aether.storage.models import EventRecord
 from aether.tools import ToolRegistry
 from aether.tools.adapters import build_default_registry
 
@@ -46,9 +47,7 @@ class FakeClock:
 
 @pytest.fixture
 async def database(tmp_path: Path) -> AsyncIterator[Database]:
-    database = Database(f"sqlite+aiosqlite:///{(tmp_path / 'security.db').as_posix()}")
-    async with database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    database = schema_database(tmp_path / "security.db")
     yield database
     await database.close()
 

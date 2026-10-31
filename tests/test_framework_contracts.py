@@ -4,6 +4,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import select
+from sqlite_schema import copy_schema_to
 
 from aether.agents import AGENT_DEFINITIONS, get_agent
 from aether.communication.messages import AgentId, AgentMessage, MessageType
@@ -16,7 +17,7 @@ from aether.runtime.scheduler import (
     SchedulingCandidate,
 )
 from aether.storage.database import Database
-from aether.storage.models import Base, EventRecord, TaskRecord, TaskStatus
+from aether.storage.models import EventRecord, TaskRecord, TaskStatus
 from aether.storage.repositories import (
     InvalidTaskTransition,
     ObjectiveRepository,
@@ -94,9 +95,8 @@ def test_scheduler_limits_are_validated() -> None:
 @pytest.mark.asyncio
 async def test_task_state_and_audit_event_survive_database_reopen(tmp_path) -> None:
     database_url = f"sqlite+aiosqlite:///{(tmp_path / 'aether.db').as_posix()}"
+    copy_schema_to(database_url)
     database = Database(database_url)
-    async with database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
 
     objective_id = await ObjectiveRepository(database.sessions).create(title="Test objective")
     task_id = await TaskRepository(database.sessions).create(
@@ -126,9 +126,8 @@ async def test_task_state_and_audit_event_survive_database_reopen(tmp_path) -> N
 @pytest.mark.asyncio
 async def test_invalid_task_transition_does_not_change_persisted_state(tmp_path) -> None:
     database_url = f"sqlite+aiosqlite:///{(tmp_path / 'aether-invalid.db').as_posix()}"
+    copy_schema_to(database_url)
     database = Database(database_url)
-    async with database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
     objective_id = await ObjectiveRepository(database.sessions).create(title="Test objective")
     task_id = await TaskRepository(database.sessions).create(
         objective_id=objective_id,
@@ -221,9 +220,8 @@ def test_scheduler_ages_waiting_work_and_prioritizes_deadlines() -> None:
 @pytest.mark.asyncio
 async def test_scheduler_records_decision_as_durable_event(tmp_path) -> None:
     database_url = f"sqlite+aiosqlite:///{(tmp_path / 'aether-scheduler.db').as_posix()}"
+    copy_schema_to(database_url)
     database = Database(database_url)
-    async with database.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
     scheduler = Scheduler(SchedulerPolicy(), database.sessions)
     decision = scheduler.choose_next(
         [],
