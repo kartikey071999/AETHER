@@ -2,7 +2,7 @@
 
 The router walks the requesting agent's list first, skipping entries whose provider is
 unavailable, whose model is over budget or whose circuit is open. Only when every assigned
-entry is unusable does it fall back to any other eligible model (local first, cheapest first).
+entry is unusable does it fall back to any other eligible model (Azure first, Groq last).
 Defaults favour the Azure deployments; Groq's small daily quota is kept for the agents that
 list it and for the final fallback.
 
@@ -80,6 +80,7 @@ def default_model_assignments() -> Assignments:
         ),
         AgentId.SCOUT.value: (
             _ASTRA,
+            _OPUS,
             ModelAssignment(provider="groq", model="openai/gpt-oss-120b"),
         ),
         AgentId.ROGUE.value: (
@@ -89,13 +90,14 @@ def default_model_assignments() -> Assignments:
         ),
         AgentId.FORGE.value: (_OPUS, _ASTRA),
         AgentId.WARDEN.value: (_OPUS, _ASTRA),
-        AgentId.LEDGER.value: (
-            ModelAssignment(
-                provider="groq", model="openai/gpt-oss-20b", tiers=frozenset({ModelTier.LIGHT})
-            ),
+        # LEDGER makes no model calls today; Azure only if one is ever added.
+        AgentId.LEDGER.value: (_ASTRA,),
+        # Opus writes the most natural user-facing text.
+        AgentId.MUSE.value: (
+            _OPUS,
             _ASTRA,
+            ModelAssignment(provider="groq", model="openai/gpt-oss-20b"),
         ),
-        AgentId.MUSE.value: (_ASTRA, ModelAssignment(provider="groq", model="openai/gpt-oss-20b")),
     }
 
 

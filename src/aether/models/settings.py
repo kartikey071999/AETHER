@@ -23,6 +23,9 @@ class BudgetPolicy(BaseModel):
     max_cost_usd_per_day: float | None = Field(default=10, ge=0)
     max_tokens_per_request: int = Field(default=32_768, ge=1)
     max_concurrent_requests: int = Field(default=2, ge=1)
+    # Rolling 60-second limits (``None`` = unlimited), e.g. a provider's per-minute quota.
+    max_requests_per_minute: int | None = Field(default=None, ge=1)
+    max_tokens_per_minute: int | None = Field(default=None, ge=1)
     # Unknown prices are admitted only when daily request and token caps bound the spend.
     allow_unpriced: bool = False
 
@@ -40,7 +43,9 @@ def default_budgets() -> dict[str, BudgetPolicy]:
     # size and concurrency apply. Daily Groq caps are real and stay.
     unlimited = {"max_requests_per_day": None, "max_tokens_per_day": None}
     return {
-        "groq": BudgetPolicy(),
+        # Groq quotas are per model (see default_model_budgets); the provider keeps a cost
+        # ceiling and a concurrency bound only.
+        "groq": BudgetPolicy(**unlimited, max_concurrent_requests=4),
         "azure_openai": BudgetPolicy(
             **unlimited,
             max_cost_usd_per_day=None,
@@ -59,6 +64,35 @@ def default_budgets() -> dict[str, BudgetPolicy]:
         "mock": BudgetPolicy(
             max_requests_per_day=None, max_tokens_per_day=None, max_cost_usd_per_day=None
         ),
+    }
+
+
+# The user's Groq account limits for chat completions (2026-10-31):
+# model: (requests/minute, requests/day, tokens/minute, tokens/day).
+GROQ_CHAT_LIMITS: dict[str, tuple[int, int, int, int]] = {
+    "allam-2-7b": (30, 7_000, 6_000, 500_000),
+    "meta-llama/llama-prompt-guard-2-22m": (30, 14_400, 15_000, 500_000),
+    "meta-llama/llama-prompt-guard-2-86m": (30, 14_400, 15_000, 500_000),
+    "openai/gpt-oss-120b": (30, 1_000, 8_000, 200_000),
+    "openai/gpt-oss-20b": (30, 1_000, 8_000, 200_000),
+    "openai/gpt-oss-safeguard-20b": (3, 1_000, 2_000, 200_000),
+    "qwen/qwen3.8-27b": (30, 1_000, 8_000, 200_000),
+}
+
+
+def default_model_budgets() -> dict[str, BudgetPolicy]:
+    return {
+        f"groq/{model}": BudgetPolicy(
+            max_requests_per_minute=rpm,
+            max_requests_per_day=rpd,
+            max_tokens_per_minute=tpm,
+            max_tokens_per_day=tpd,
+            max_cost_usd_per_day=None,
+            # A request can never exceed the model's per-minute token quota.
+            max_tokens_per_request=tpm,
+            max_concurrent_requests=4,
+        )
+        for model, (rpm, rpd, tpm, tpd) in GROQ_CHAT_LIMITS.items()
     }
 
 
@@ -119,8 +153,9 @@ class ProviderSettings(BaseSettings):
     retry_backoff_seconds: float = Field(default=0.5, ge=0, le=30)
     retry_max_delay_seconds: float = Field(default=8, ge=0, le=60)
     budgets: dict[str, BudgetPolicy] = Field(default_factory=default_budgets)
-    # Keys are "provider/model"; these caps apply in addition to provider-wide caps.
-    model_budgets: dict[str, BudgetPolicy] = Field(default_factory=dict)
+    # Keys are "provider/model"; these caps apply in addition to provider-wide caps. Defaults
+    # carry the real Groq per-model quotas; an override replaces only the keys it names.
+    model_budgets: dict[str, BudgetPolicy] = Field(default_factory=default_model_budgets)
     # Per-objective, per-agent LLM allowances; exhaustion forces deterministic fallbacks.
     agent_budgets: dict[str, AgentBudgetPolicy] = Field(default_factory=default_agent_budgets)
     # Providers whose tokens do not count towards the per-objective token allowance (their
@@ -147,6 +182,13 @@ class ProviderSettings(BaseSettings):
     prices: dict[str, ModelPrice] = Field(default_factory=dict)
     # Explicit suitability declaration; do not infer reasoning ability from a model's name.
     ollama_models: dict[str, list[ModelTier]] = Field(default_factory=dict)
+
+    @field_validator("model_budgets", mode="before")
+    @classmethod
+    def _keep_default_model_budgets(cls, value):
+        if isinstance(value, dict):
+            return {**default_model_budgets(), **value}
+        return value
 
     @field_validator("prices", "model_budgets")
     @classmethod

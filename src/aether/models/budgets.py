@@ -147,6 +147,7 @@ class BudgetGuard:
                 session, provider=provider, since=day, until=day + timedelta(days=1)
             )
             self._check(provider, policy, totals, tokens, cost)
+            await self._check_minute(session, provider, None, policy, now, tokens)
             if model_policy is not None:
                 model_totals = await self.usage.totals_in(
                     session,
@@ -156,6 +157,9 @@ class BudgetGuard:
                     until=day + timedelta(days=1),
                 )
                 self._check(provider, model_policy, model_totals, tokens, cost)
+                await self._check_minute(
+                    session, provider, request.model, model_policy, now, tokens
+                )
             reservation_id = self.usage.stage_reservation(
                 session,
                 provider=provider,
@@ -178,6 +182,37 @@ class BudgetGuard:
                 unknown,
             )
         return reservation
+
+    async def _check_minute(
+        self,
+        session: AsyncSession,
+        provider: str,
+        model: str | None,
+        policy: BudgetPolicy,
+        now: datetime,
+        tokens: int,
+    ) -> None:
+        """Rolling 60-second request/token quotas (reservations count until finalized)."""
+        if policy.max_requests_per_minute is None and policy.max_tokens_per_minute is None:
+            return
+        window = await self.usage.totals_in(
+            session,
+            provider=provider,
+            model=model,
+            since=now - timedelta(seconds=60),
+            until=now + timedelta(seconds=1),
+        )
+        label = f"{provider}/{model}" if model else provider
+        if (
+            policy.max_requests_per_minute is not None
+            and window.requests + 1 > policy.max_requests_per_minute
+        ):
+            raise BudgetExceeded(f"{label}: exceeded requests per minute")
+        if (
+            policy.max_tokens_per_minute is not None
+            and window.tokens + tokens > policy.max_tokens_per_minute
+        ):
+            raise BudgetExceeded(f"{label}: exceeded tokens per minute")
 
     @staticmethod
     def _check(

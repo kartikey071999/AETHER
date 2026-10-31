@@ -21,7 +21,9 @@ from aether.models.costs import estimate_cost
 from aether.models.settings import ProviderSettings
 from aether.security import OperationBlocked
 
-_ORDER = {"ollama": 0, "groq": 1, "mock": 1, "azure_anthropic": 2, "azure_openai": 3}
+# Final-fallback order once an agent's assigned models are exhausted: the unlimited Azure
+# deployments first, Groq (small per-model daily quotas) last.
+_ORDER = {"mock": 0, "azure_openai": 1, "azure_anthropic": 2, "ollama": 3, "groq": 4}
 
 
 class NoModelAvailable(RuntimeError):
@@ -86,6 +88,10 @@ class ModelCircuits:
         self._failures[key] = failures
         if failures >= threshold:
             self._opened[key] = self.clock()
+
+    def cool_down(self, key: str) -> None:
+        """Open the circuit at once (e.g. HTTP 429): the provider asked us to slow down."""
+        self._opened[key] = self.clock()
 
     def succeeded(self, key: str) -> None:
         self._failures.pop(key, None)
@@ -152,7 +158,11 @@ class ModelRouter:
                     walk.skip(provider.name, model.name, candidate.rank, f"budget: {error}")
                 except (ProviderError, OperationBlocked) as error:
                     if isinstance(error, ProviderError):
-                        self.circuits.failed(candidate.key)
+                        if error.code == "http_429":
+                            # Rate-limited: skip this model for the cool-down, use the next one.
+                            self.circuits.cool_down(candidate.key)
+                        else:
+                            self.circuits.failed(candidate.key)
                     # Only safe classification is retained; never propagate SDK text into events.
                     walk.skip(
                         provider.name, model.name, candidate.rank, f"failed: {type(error).__name__}"
