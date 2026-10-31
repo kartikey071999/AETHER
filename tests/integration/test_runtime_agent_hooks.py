@@ -483,6 +483,33 @@ async def test_waiting_for_approval_wakes_the_warden_sweep(sessions, objective_i
     assert warden.sweeps == [[], [task_id]]
 
 
+class TickingLedger(TickingAgent):
+    agent_id = AgentId.LEDGER
+
+
+async def test_waiting_for_verification_wakes_the_ledger_tick_not_the_warden_sweep(
+    sessions, objective_id
+) -> None:
+    async def wait_for_verification(_agent: BaseAgent, _task: TaskRecord) -> TaskResult:
+        return TaskResult(status=TaskResultStatus.WAITING_FOR_VERIFICATION, summary="needs a run")
+
+    warden, ledger = SweepingWarden(), TickingLedger()
+    engine = build_engine(
+        sessions,
+        [warden, ledger, WorkAgent(wait_for_verification)],
+        agent_tick_seconds=3600.0,
+    )
+    await engine.start()
+    try:
+        await wait_until(lambda: _true(len(ledger.calls) == 1))
+        task_id = await make_task(sessions, objective_id)  # picked up by the scheduler
+        await wait_until(lambda: _true(len(ledger.calls) == 2))
+        assert (await get_task(sessions, task_id)).state == TaskStatus.WAITING_FOR_VERIFICATION
+    finally:
+        await engine.stop()
+    assert warden.sweeps == [[]]
+
+
 # --- cooperative pause / cancel -----------------------------------------------------------
 
 

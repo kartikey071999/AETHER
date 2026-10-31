@@ -61,4 +61,4 @@ async def verification_progress(
 
 async def waiting_verification_tasks(work: AgentWorkQueue) -> list[WorkItem]:
     """LEDGER's own tasks parked until their independent test run has a verdict."""
-    return await work.open_tasks(states={TaskStatus.WAITING_FOR_APPROVAL}, limit=MAX_LIMIT)
+    return await work.open_tasks(states={TaskStatus.WAITING_FOR_VERIFICATION}, limit=MAX_LIMIT)

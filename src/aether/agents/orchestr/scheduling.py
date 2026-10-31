@@ -1,11 +1,19 @@
 """The scheduling tick: promote, re-prioritize, reconcile, release, detect completion."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from uuid import UUID
 
 from aether.agents.orchestr.assignment import release_task
-from aether.agents.orchestr.blockers import REQUIREMENT, TASK_FAILURE, escalate_objective
+from aether.agents.orchestr.blockers import (
+    APPROVAL_WAIT,
+    REQUIREMENT,
+    RESOURCE_DEFERRAL,
+    TASK_FAILURE,
+    VERIFICATION_WAIT,
+    escalate_objective,
+)
 from aether.agents.orchestr.communication import UpdateEvent, UpdateKind
 from aether.agents.orchestr.completion import evaluate_completion
 from aether.agents.orchestr.env import Env, as_utc
@@ -15,7 +23,7 @@ from aether.agents.orchestr.planning import plan_objective
 from aether.agents.orchestr.pressure import is_build, manage_pressure
 from aether.agents.orchestr.priorities import refresh_all, task_rank
 from aether.agents.orchestr.store import ACTOR
-from aether.runtime.scheduler import SchedulerResources, SchedulingCandidate
+from aether.runtime.scheduler import DeferredTask, SchedulerResources, SchedulingCandidate
 from aether.storage.models import ObjectiveRecord, TaskRecord, TaskStatus
 from aether.storage.repositories import InvalidTaskTransition
 
@@ -43,6 +51,7 @@ async def tick(env: Env) -> TickReport:
         await _reconcile(env, objective, report)
     active = await env.store.list_objectives(["active"])
     await _release(env, active, report)
+    await _escalate_stuck_waits(env, active)
     await manage_pressure(env)
     for objective in active:
         fresh = await env.store.get_objective(objective.id)
@@ -159,6 +168,137 @@ async def _escalate_requirement_waits(
         )
 
 
+async def _wait_started(
+    env: Env, episode: str, task: TaskRecord, what: str, now: datetime
+) -> datetime | None:
+    """When this wait episode began, recording it on first sight (``None`` on that first sight).
+
+    The start is stored in the decision rather than read from the task row: decision rows and
+    task rows are stamped by the database layer's own clock, while ORCHESTR's ``env.now`` is the
+    clock its timeouts are measured with.
+    """
+    marker = f"orchestr:{episode}"
+    started = await env.store.get_decision(marker)
+    if started is None:
+        await env.store.record_decision(
+            "wait_started",
+            f"task '{task.title[:120]}' {what}",
+            key=marker,
+            evidence=[now.isoformat()],
+            objective_id=task.objective_id,
+            task_id=task.id,
+        )
+        return None
+    try:
+        return as_utc(datetime.fromisoformat(started.evidence[0]))
+    except (IndexError, ValueError):
+        return None
+
+
+async def _escalate_waits(
+    env: Env,
+    objectives: dict[UUID, ObjectiveRecord],
+    tasks: list[TaskRecord],
+    *,
+    label: str,
+    kind: str,
+    minutes: float,
+    what: str,
+    decision: str,
+) -> None:
+    """Escalate each task once per wait episode when it waited longer than ``minutes``.
+
+    An episode is one attempt of one task; leaving the wait and waiting again later (a new
+    attempt) starts a new episode. The escalation is also deduplicated per (objective, kind)
+    window and never blocks the objective: these waits resolve on their own or by a reply.
+    """
+    now = env.now()
+    timeout = timedelta(minutes=minutes)
+    for task in tasks:
+        episode = f"{label}:{task.id}:{task.attempt}"
+        if await env.store.get_decision(f"orchestr:escalation-trigger:{episode}") is not None:
+            continue
+        since = await _wait_started(env, episode, task, what, now)
+        if since is None or now - since < timeout:
+            continue
+        await escalate_objective(
+            env,
+            objectives[task.objective_id],
+            key=episode,
+            reason=f"task '{task.title[:120]}' {what} for more than {minutes:g} minutes",
+            kind=kind,
+            task_id=task.id,
+            block=False,
+            decision=decision,
+        )
+
+
+async def _escalate_stuck_waits(env: Env, active: list[ObjectiveRecord]) -> None:
+    """Tasks waiting for verification or an approval do not wait forever."""
+    objectives = {objective.id: objective for objective in active}
+    verification: list[TaskRecord] = []
+    approval: list[TaskRecord] = []
+    for objective in active:
+        verification.extend(
+            await env.store.tasks_of(objective.id, [TaskStatus.WAITING_FOR_VERIFICATION])
+        )
+        approval.extend(await env.store.tasks_of(objective.id, [TaskStatus.WAITING_FOR_APPROVAL]))
+    await _escalate_waits(
+        env,
+        objectives,
+        verification,
+        label="verification-wait",
+        kind=VERIFICATION_WAIT,
+        minutes=env.limits.verification_wait_minutes,
+        what="is waiting for its independent test run",
+        decision="Check why verification has not finished, or cancel the task",
+    )
+    await _escalate_waits(
+        env,
+        objectives,
+        approval,
+        label="approval-wait",
+        kind=APPROVAL_WAIT,
+        minutes=env.limits.approval_wait_minutes,
+        what="is waiting for an approval",
+        decision="Approve or deny the pending request, or cancel the task",
+    )
+
+
+async def _escalate_resource_deferrals(
+    env: Env,
+    objectives: dict[UUID, ObjectiveRecord],
+    by_id: dict[UUID, TaskRecord],
+    deferred: Sequence[DeferredTask],
+) -> None:
+    """A ready task the scheduler keeps deferring for resources escalates with the reason."""
+    now = env.now()
+    timeout = timedelta(minutes=env.limits.resource_deferral_minutes)
+    for item in deferred:
+        task = by_id.get(item.task_id)
+        if task is None:
+            continue
+        episode = f"resource-deferral:{task.id}:{task.attempt}"
+        if await env.store.get_decision(f"orchestr:escalation-trigger:{episode}") is not None:
+            continue
+        since = await _wait_started(
+            env, episode, task, f"is deferred for resources: {item.reason}", now
+        )
+        if since is None or now - since < timeout:
+            continue
+        await escalate_objective(
+            env,
+            objectives[task.objective_id],
+            key=episode,
+            reason=f"task '{task.title[:120]}' has been deferred for resources for more than "
+            f"{env.limits.resource_deferral_minutes:g} minutes: {item.reason}",
+            kind=RESOURCE_DEFERRAL,
+            task_id=task.id,
+            block=False,
+            decision="Free up resources on the host, or cancel the task",
+        )
+
+
 async def _requeue_resource_block(env: Env, task: TaskRecord) -> bool:
     """A resource blocker has no resolver task; the task re-enters the queue exactly once."""
     for view in await env.store.decisions(task_id=task.id, decision="blocker"):
@@ -246,6 +386,7 @@ async def _release(env: Env, active: list[ObjectiveRecord], report: TickReport) 
                 await env.scheduler.record_decision(decision)
         selected = decision.selected_task_id
         if selected is None:
+            await _escalate_resource_deferrals(env, objectives, by_id, decision.deferred)
             return
         candidate = candidates.pop(selected)
         task = by_id[selected]

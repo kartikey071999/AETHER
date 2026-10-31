@@ -32,6 +32,7 @@ OPEN_TASK_STATES: tuple[TaskStatus, ...] = (
     TaskStatus.SCHEDULED,
     TaskStatus.RUNNING,
     TaskStatus.WAITING_FOR_APPROVAL,
+    TaskStatus.WAITING_FOR_VERIFICATION,
     TaskStatus.BLOCKED,
     TaskStatus.PAUSED,
     TaskStatus.RETRYING,

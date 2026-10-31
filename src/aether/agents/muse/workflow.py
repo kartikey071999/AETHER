@@ -3,6 +3,7 @@
 import json
 import re
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -103,6 +104,44 @@ def opening_for(preferences: CommunicationPreferences) -> str:
     return ""
 
 
+def result_lines(result: dict[str, Any]) -> list[str]:
+    """Render supplied fields without promoting reported results to verified facts."""
+    lines = []
+    count = result.get("tasks_completed")
+    objective = result.get("objective")
+    summarized = isinstance(count, int) and not isinstance(count, bool) and count >= 0
+    if summarized:
+        task_label = "task" if count == 1 else "tasks"
+        summary = f"{count} {task_label} completed"
+        if isinstance(objective, str) and objective.strip():
+            summary += f" for '{objective}'"
+        lines.append(summary)
+
+    def field(label: str, value: Any) -> None:
+        if isinstance(value, dict):
+            if not value:
+                lines.append(f"{label}: (empty mapping)")
+            for key, item in value.items():
+                field(f"{label}: {key}", item)
+        elif isinstance(value, list):
+            if not value:
+                lines.append(f"{label}: (empty list)")
+            for item in value:
+                field(label, item)
+        else:
+            text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+            lines.append(f"{label}: {text}")
+
+    for key, value in result.items():
+        if summarized and (
+            key == "tasks_completed"
+            or (key == "objective" and isinstance(objective, str) and objective.strip())
+        ):
+            continue
+        field(key, value)
+    return lines or ["No result fields supplied."]
+
+
 def render_message(
     request: CommunicationRequestPayload,
     preferences: CommunicationPreferences,
@@ -124,10 +163,7 @@ def render_message(
             parts.append(f"## {title}\n" + "\n".join(f"- {line}" for line in content))
 
     section("What happened", [request.what_happened])
-    results = [
-        json.dumps(result, ensure_ascii=True, sort_keys=True, indent=2 if detailed else None)
-        for result in request.results
-    ]
+    results = [line for result in request.results for line in result_lines(result)]
     section("Reported results (not independently verified by MUSE)", results)
     section("Verified", request.verified)
     section("Uncertain", request.uncertain)
@@ -168,24 +204,32 @@ def render_message(
             ],
         )
     text = "\n\n".join(part for part in parts if part) + "\n"
-    source = json.dumps(
-        {
-            "handoff": request.model_dump(mode="json"),
-            "options": options.model_dump(mode="json"),
-            "deadlines": [
-                value.isoformat()
-                for value in [
-                    deadline,
-                    options.authorization_expires_at,
-                    *options.decision_deadlines.values(),
-                ]
-                if value is not None
-            ],
-        },
-        ensure_ascii=True,
-        sort_keys=True,
-    )
-    if not set(_IDENTIFIERS.findall(text)).issubset(set(_IDENTIFIERS.findall(source))):
+    source = {
+        "handoff": request.model_dump(mode="json"),
+        "options": options.model_dump(mode="json"),
+        "deadlines": [
+            value.isoformat()
+            for value in [
+                deadline,
+                options.authorization_expires_at,
+                *options.decision_deadlines.values(),
+            ]
+            if value is not None
+        ],
+    }
+
+    def source_identifiers(value: Any) -> set[str]:
+        # Inspect decoded strings so JSON escapes cannot alter supplied identifiers.
+        if isinstance(value, dict):
+            return set().union(
+                *(source_identifiers(item) for pair in value.items() for item in pair)
+            )
+        if isinstance(value, list):
+            return set().union(*(source_identifiers(item) for item in value))
+        literal = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        return set(_IDENTIFIERS.findall(literal))
+
+    if not set(_IDENTIFIERS.findall(text)).issubset(source_identifiers(source)):
         raise ValueError("Rendered communication contains an unsupported number or identifier")
     return text
 

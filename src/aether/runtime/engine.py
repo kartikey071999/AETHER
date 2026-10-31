@@ -23,7 +23,7 @@ from aether.agents.base import (
     UnsupportedMessageType,
 )
 from aether.agents.work_queue import AgentWorkQueue, WorkQueueService
-from aether.communication.bus import MessageBus
+from aether.communication.bus import InvalidMessageTransition, MessageBus
 from aether.communication.messages import AgentId, AgentMessage
 from aether.config import AetherSettings
 from aether.observability.events import build_event
@@ -62,6 +62,8 @@ class EngineLimits(BaseModel):
     max_tasks_per_agent: int | None = Field(default=None, ge=1)
     task_timeout_seconds: float = Field(default=1800.0, gt=0)
     lease_ttl_seconds: float = Field(default=60.0, gt=0)
+    # A consumer's claim on a message; heartbeats renew it every third of this interval.
+    message_claim_ttl_seconds: float = Field(default=60.0, gt=0)
     lease_renew_seconds: float | None = Field(default=None, gt=0)
     scheduler_interval_seconds: float = Field(default=1.0, gt=0)
     recovery_interval_seconds: float = Field(default=15.0, gt=0)
@@ -150,7 +152,10 @@ class Engine:
         self._run_id = uuid4()
         self._owner = f"engine-{self._run_id.hex[:8]}"
         self._bus = bus or MessageBus(
-            database_sessions, clock=clock, poll_interval=self._limits.message_poll_seconds
+            database_sessions,
+            clock=clock,
+            poll_interval=self._limits.message_poll_seconds,
+            claim_ttl=timedelta(seconds=self._limits.message_claim_ttl_seconds),
         )
         self._leases = LeaseManager(database_sessions, clock=clock)
         self._context = AgentContext(
@@ -311,9 +316,9 @@ class Engine:
         if status is TaskStatus.WAITING_FOR_APPROVAL:
             # Apply WARDEN decisions recorded while the task was still running.
             self.request_tick(AgentId.WARDEN)
-            if agent_id is AgentId.LEDGER:
-                # The test run it waits for may have finished before the task started waiting.
-                self.request_tick(AgentId.LEDGER)
+        elif status is TaskStatus.WAITING_FOR_VERIFICATION:
+            # The test run it waits for may have finished before the task started waiting.
+            self.request_tick(AgentId.LEDGER)
 
     async def start(self) -> None:
         self._lifecycle.transition(LifecycleState.STARTING)
@@ -338,6 +343,7 @@ class Engine:
                 self._spawn(self._tick_loop(agent_id), f"agent-tick-{agent_id.value}")
             self._spawn(self._scheduler_loop(), "scheduler-loop")
             self._spawn(self._recovery_loop(), "recovery-loop")
+            self._spawn(self._claim_heartbeat_loop(), "claim-heartbeat-loop")
             self._spawn(self._resource_loop(), "resource-loop")
             self._lifecycle.transition(LifecycleState.RUNNING)
             await self._emit(
@@ -502,6 +508,11 @@ class Engine:
     async def _teardown(self, grace: float) -> int:
         await self._stop_loops(grace)
         await self._pool.shutdown(grace)
+        # Hand this engine's unfinished messages back now instead of waiting for claim expiry.
+        try:
+            await self._bus.release_claims(self._owner)
+        except Exception:
+            self._logger.exception("failed to release message claims")
         released = 0
         for task_id, owner in await self._leases.owned_by(self._owner):
             if await self._leases.release(
@@ -545,17 +556,49 @@ class Engine:
                 await self._pause(min(self._limits.message_poll_seconds, 1.0))
 
     async def _process_message(self, agent: BaseAgent, message: AgentMessage) -> None:
-        await self._bus.mark_processing(message.message_id, consumer=self._owner)
+        try:
+            await self._bus.mark_processing(message.message_id, consumer=self._owner)
+        except InvalidMessageTransition:
+            self._logger.warning(
+                "%s lost its claim on %s before processing; skipping",
+                agent.agent_id,
+                message.message_id,
+            )
+            return
         try:
             async with self._agent_locks[agent.agent_id]:
                 await agent.dispatch_message(message, self.context_for(agent.agent_id))
         except UnsupportedMessageType as exc:
-            await self._bus.mark_failed(message.message_id, json.dumps(exc.to_dict()))
+            await self._finish_message(message, self._bus.mark_failed, json.dumps(exc.to_dict()))
         except Exception as exc:
             self._logger.exception("%s failed to handle %s", agent.agent_id, message.message_id)
-            await self._bus.mark_failed(message.message_id, f"{type(exc).__name__}: {exc}")
+            await self._finish_message(
+                message, self._bus.mark_failed, f"{type(exc).__name__}: {exc}"
+            )
         else:
-            await self._bus.mark_processed(message.message_id)
+            await self._finish_message(message, self._bus.mark_processed)
+
+    async def _finish_message(self, message: AgentMessage, mark: Any, *args: str) -> None:
+        try:
+            await mark(message.message_id, *args, consumer=self._owner)
+        except InvalidMessageTransition:
+            # The claim expired and another engine took the message over; it is that engine's now.
+            self._logger.warning(
+                "claim on message %s was lost while it was being processed", message.message_id
+            )
+
+    async def _claim_heartbeat_loop(self) -> None:
+        interval = self._bus.claim_ttl.total_seconds() / 3
+        while True:
+            await self._pause(interval)
+            if self._loops_stopping.is_set():
+                return
+            try:
+                await self._bus.renew_claims(self._owner)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._logger.exception("message claim heartbeat failed")
 
     async def _tick_loop(self, agent_id: AgentId) -> None:
         """Tick once on start, then every interval or when woken; never dies on a failure."""
@@ -615,10 +658,11 @@ class Engine:
                 return
             try:
                 await self._leases.recover_expired()
+                await self._bus.requeue_in_flight(list(self._agents))
             except asyncio.CancelledError:
                 raise
             except Exception:
-                self._logger.exception("lease recovery sweep failed")
+                self._logger.exception("recovery sweep failed")
 
     async def _resource_loop(self) -> None:
         while True:

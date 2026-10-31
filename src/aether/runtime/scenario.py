@@ -835,6 +835,11 @@ def pending_reasons(trace: ScenarioTrace) -> dict[UUID, str]:
                 except ValueError:
                     continue
     requirements = {requirement.id: requirement for requirement in trace.requirements}
+    escalated = {
+        event.task_id
+        for event in getattr(trace, "orchestr_decisions", [])
+        if _data(event).get("decision") == "escalated" and event.task_id is not None
+    }
     states = {task.id: task.state for task in trace.tasks}
     dependencies: dict[UUID, list[UUID]] = {}
     for dependency in trace.dependencies:
@@ -857,6 +862,8 @@ def pending_reasons(trace: ScenarioTrace) -> dict[UUID, str]:
             reasons[task.id] = latest[task.id]
         else:
             reasons[task.id] = "no scheduler decision recorded yet"
+        if task.id in escalated:
+            reasons[task.id] += " [escalated to the user]"
     return reasons
 
 

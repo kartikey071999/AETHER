@@ -820,32 +820,31 @@ async def consolidate(
         for item in finding.candidate_approaches[: limits.top_k]:
             candidate = CandidateApproach.model_validate(item)
             adopted = bool(requirement_ids) and candidate.name == finding.recommendation
-            # Finding-scoped names preserve evidence/requirement ownership across research rounds.
-            name = f"{candidate.name[:150]} [{finding.id}]"
-            if await capabilities.get_by_name(name) is None:
-                capability_id = await capabilities.register(
-                    name=name,
+            capability = await capabilities.record_discovery(
+                name=candidate.name,
+                actor=AgentId.SCOUT.value,
+                finding_id=finding.id,
+                evidence_ids=[row.id for row in rows],
+                description=candidate.description,
+                dependencies=candidate.dependencies,
+                resource_estimates=(
+                    candidate.resource_needs.model_dump(mode="json")
+                    if candidate.resource_needs
+                    else {}
+                ),
+                known_limitations=candidate.cons + candidate.risks,
+                required_permissions=["security.review"],
+                requirement_id=requirement_ids[0] if adopted else None,
+                objective_id=finding.objective_id,
+                correlation_id=message.correlation_id,
+            )
+            if adopted and capability.lifecycle_status == CapabilityStatus.DISCOVERED:
+                await capabilities.transition(
+                    capability.id,
+                    CapabilityStatus.PROPOSED,
                     actor=AgentId.SCOUT.value,
-                    description=candidate.description,
-                    dependencies=candidate.dependencies,
-                    resource_estimates=(
-                        candidate.resource_needs.model_dump(mode="json")
-                        if candidate.resource_needs
-                        else {}
-                    ),
-                    known_limitations=candidate.cons + candidate.risks,
-                    required_permissions=["security.review"],
-                    requirement_id=requirement_ids[0] if adopted else None,
-                    objective_id=finding.objective_id,
                     correlation_id=message.correlation_id,
                 )
-                if adopted:
-                    await capabilities.transition(
-                        capability_id,
-                        CapabilityStatus.PROPOSED,
-                        actor=AgentId.SCOUT.value,
-                        correlation_id=message.correlation_id,
-                    )
         if requirement_ids:
             # SCOUT evaluated the evidence and adopted the approach: the requirement is approved
             # for implementation (operations still need WARDEN; completion needs LEDGER).

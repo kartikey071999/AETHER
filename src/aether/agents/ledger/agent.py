@@ -208,7 +208,7 @@ class LedgerAgent(BaseAgent):
         progress = await verification_progress(ctx.sessions, self.work_queue(ctx), task.id)
         if progress is not None and not progress.finished and task.requirement_id is not None:
             return TaskResult(
-                status=TaskResultStatus.WAITING_FOR_APPROVAL,
+                status=TaskResultStatus.WAITING_FOR_VERIFICATION,
                 summary="waiting for the independent test run of the implementation",
                 outputs={"awaiting_test_run_for": [str(item) for item in progress.forge_task_ids]},
             )
@@ -1005,7 +1005,7 @@ class LedgerAgent(BaseAgent):
         finished = await TestRunStore(ctx.sessions).finished_for_capability(run.capability_id)
         streak = 0
         for item in reversed(finished):
-            if item.status == RunStatus.CANCELLED.value:
+            if item.status in (RunStatus.CANCELLED.value, RunStatus.INCONCLUSIVE.value):
                 continue
             if item.status != RunStatus.FAILED.value:
                 break

@@ -63,7 +63,7 @@ _ACCEPTANCE_RESULTS = TypeAdapter(list[_AcceptanceResult])
 _STATUS_FOR_VERDICT = {
     TestVerdict.VERIFIED: RunStatus.SUCCEEDED,
     TestVerdict.FAILED: RunStatus.FAILED,
-    TestVerdict.INCONCLUSIVE: RunStatus.CANCELLED,
+    TestVerdict.INCONCLUSIVE: RunStatus.INCONCLUSIVE,
 }
 
 

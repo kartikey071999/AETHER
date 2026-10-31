@@ -3,9 +3,10 @@
 import asyncio
 import time
 from collections.abc import Collection
+from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import ColumnElement, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -23,6 +24,7 @@ _ALLOWED_MESSAGE_TRANSITIONS: dict[MessageStatus, frozenset[MessageStatus]] = {
 
 _IN_FLIGHT = (MessageStatus.DELIVERED.value, MessageStatus.PROCESSING.value)
 _SOURCE = "communication.bus"
+DEFAULT_CLAIM_TTL = timedelta(seconds=60)
 
 
 class InvalidMessageTransition(ValueError):
@@ -30,17 +32,33 @@ class InvalidMessageTransition(ValueError):
 
 
 class MessageBus:
+    """Durable bus. A claimed message belongs to its consumer until the claim expires.
+
+    ``claim`` stamps the consumer and an expiry; a live consumer keeps its claims alive with
+    :meth:`renew_claims`. Only claims that are expired (or that predate claims and have no
+    expiry) are requeued by :meth:`requeue_in_flight`, so a second engine starting against the
+    same database never takes messages a running engine is still working on.
+    """
+
     def __init__(
         self,
         sessions: async_sessionmaker[AsyncSession],
         *,
         clock: Clock = utc_now,
         poll_interval: float = 1.0,
+        claim_ttl: timedelta = DEFAULT_CLAIM_TTL,
     ) -> None:
+        if claim_ttl <= timedelta(0):
+            raise ValueError("claim_ttl must be positive")
         self._sessions = sessions
         self._clock = clock
         self._poll_interval = poll_interval
+        self._claim_ttl = claim_ttl
         self._wakeups: dict[str, asyncio.Event] = {}
+
+    @property
+    def claim_ttl(self) -> timedelta:
+        return self._claim_ttl
 
     async def publish(self, message: AgentMessage) -> bool:
         """Persist a message; returns False when this message_id was already published."""
@@ -85,6 +103,8 @@ class MessageBus:
         if limit < 1:
             return []
         claimed: list[AgentMessage] = []
+        now = self._clock()
+        expires_at = now + self._claim_ttl
         async with self._sessions() as session, session.begin():
             statement = (
                 select(MessageRecord)
@@ -105,7 +125,12 @@ class MessageBus:
                         MessageRecord.id == row.id,
                         MessageRecord.status == MessageStatus.PENDING.value,
                     )
-                    .values(status=MessageStatus.DELIVERED.value)
+                    .values(
+                        status=MessageStatus.DELIVERED.value,
+                        claimed_by=consumer,
+                        claimed_at=now,
+                        claim_expires_at=expires_at,
+                    )
                     .execution_options(synchronize_session=False)
                 )
                 if result.rowcount != 1:
@@ -120,18 +145,45 @@ class MessageBus:
         return claimed
 
     async def mark_processing(self, message_id: UUID, *, consumer: str | None = None) -> None:
+        """Start processing; with ``consumer`` the claim must still be that consumer's."""
         await self._advance(
             message_id,
             MessageStatus.PROCESSING,
             "message.processing",
             {"consumer": consumer},
+            consumer=consumer,
+            renew=True,
         )
 
-    async def mark_processed(self, message_id: UUID) -> None:
-        await self._advance(message_id, MessageStatus.PROCESSED, "message.processed", {})
+    async def mark_processed(self, message_id: UUID, *, consumer: str | None = None) -> None:
+        await self._advance(
+            message_id, MessageStatus.PROCESSED, "message.processed", {}, consumer=consumer
+        )
 
-    async def mark_failed(self, message_id: UUID, error: str) -> None:
-        await self._advance(message_id, MessageStatus.FAILED, "message.failed", {"error": error})
+    async def mark_failed(
+        self, message_id: UUID, error: str, *, consumer: str | None = None
+    ) -> None:
+        await self._advance(
+            message_id,
+            MessageStatus.FAILED,
+            "message.failed",
+            {"error": error},
+            consumer=consumer,
+        )
+
+    async def renew_claims(self, consumer: str) -> int:
+        """Heartbeat: push out the expiry of the consumer's in-flight messages."""
+        async with self._sessions() as session, session.begin():
+            result = await session.execute(
+                update(MessageRecord)
+                .where(
+                    MessageRecord.claimed_by == consumer,
+                    MessageRecord.status.in_(_IN_FLIGHT),
+                )
+                .values(claim_expires_at=self._clock() + self._claim_ttl)
+                .execution_options(synchronize_session=False)
+            )
+        return int(result.rowcount or 0)
 
     async def pending_count(self, agent_id: AgentId) -> int:
         async with self._sessions() as session:
@@ -170,21 +222,53 @@ class MessageBus:
             except TimeoutError:
                 pass
 
-    async def requeue_in_flight(self, agent_ids: Collection[AgentId] | None = None) -> int:
-        """Return delivered/processing messages to pending (their consumer is gone)."""
+    async def requeue_in_flight(
+        self, agent_ids: Collection[AgentId] | None = None, *, now: datetime | None = None
+    ) -> int:
+        """Return delivered/processing messages whose claim has expired to pending.
+
+        A message without a claim expiry predates claims and counts as expired. A claim that a
+        heartbeat renews while the sweep runs is left alone.
+        """
+        current = now if now is not None else self._clock()
+        expired = or_(
+            MessageRecord.claim_expires_at.is_(None), MessageRecord.claim_expires_at <= current
+        )
+        return await self._requeue(agent_ids, expired, "claim_expired")
+
+    async def release_claims(self, consumer: str) -> int:
+        """Requeue the consumer's own in-flight messages (graceful shutdown)."""
+        return await self._requeue(None, MessageRecord.claimed_by == consumer, "released")
+
+    async def _requeue(
+        self,
+        agent_ids: Collection[AgentId] | None,
+        condition: ColumnElement[bool],
+        reason: str,
+    ) -> int:
         requeued: list[str] = []
         async with self._sessions() as session, session.begin():
-            statement = select(MessageRecord).where(MessageRecord.status.in_(_IN_FLIGHT))
+            statement = select(MessageRecord).where(MessageRecord.status.in_(_IN_FLIGHT), condition)
             if agent_ids is not None:
                 statement = statement.where(
                     MessageRecord.target_agent.in_([agent.value for agent in agent_ids])
                 )
             for row in (await session.scalars(statement)).all():
                 previous = row.status
+                previous_consumer = row.claimed_by
                 result = await session.execute(
                     update(MessageRecord)
-                    .where(MessageRecord.id == row.id, MessageRecord.status == previous)
-                    .values(status=MessageStatus.PENDING.value)
+                    .where(
+                        MessageRecord.id == row.id,
+                        MessageRecord.status == previous,
+                        condition,
+                    )
+                    .values(
+                        status=MessageStatus.PENDING.value,
+                        claimed_by=None,
+                        claimed_at=None,
+                        claim_expires_at=None,
+                    )
                     .execution_options(synchronize_session=False)
                 )
                 if result.rowcount != 1:
@@ -193,7 +277,11 @@ class MessageBus:
                     session,
                     row,
                     "message.requeued",
-                    {"previous_status": previous},
+                    {
+                        "previous_status": previous,
+                        "consumer": previous_consumer,
+                        "reason": reason,
+                    },
                     actor=row.target_agent,
                 )
                 requeued.append(row.target_agent)
@@ -224,17 +312,26 @@ class MessageBus:
         new_status: MessageStatus,
         event_type: str,
         payload: dict[str, object],
+        *,
+        consumer: str | None = None,
+        renew: bool = False,
     ) -> None:
         expected = [
             old.value
             for old, allowed in _ALLOWED_MESSAGE_TRANSITIONS.items()
             if new_status in allowed
         ]
+        conditions = [MessageRecord.id == message_id, MessageRecord.status.in_(expected)]
+        values: dict[str, object] = {"status": new_status.value}
+        if consumer is not None:
+            conditions.append(MessageRecord.claimed_by == consumer)
+        if renew:
+            values["claim_expires_at"] = self._clock() + self._claim_ttl
         async with self._sessions() as session, session.begin():
             result = await session.execute(
                 update(MessageRecord)
-                .where(MessageRecord.id == message_id, MessageRecord.status.in_(expected))
-                .values(status=new_status.value)
+                .where(*conditions)
+                .values(**values)
                 .execution_options(synchronize_session=False)
             )
             row = await session.get(MessageRecord, message_id, populate_existing=True)
@@ -243,6 +340,7 @@ class MessageBus:
             if result.rowcount != 1:
                 raise InvalidMessageTransition(
                     f"Cannot move message {message_id} from {row.status} to {new_status.value}"
+                    + (f" as {consumer}" if consumer is not None else "")
                 )
             self._stage_status_event(session, row, event_type, payload, actor=row.target_agent)
 

@@ -370,8 +370,8 @@ retention once, replays the spool, then starts the engine, which emits
 is implemented. `aether events tail [--limit N]` prints the latest redacted
 events from the database. `aether demo capability [--live]` runs the end-to-end
 capability workflow against the configured database and prints its persisted
-trace; see [docs/e2e.md](docs/e2e.md).
-
+trace; see [docs/e2e.md](docs/e2e.md). Running more than one engine against one
+PostgreSQL database is covered in [docs/deployment.md](docs/deployment.md).
 `configure_logging(log_dir, max_bytes=..., backup_count=..., level=...,
 console=False)` configures delayed, rotating JSON-lines files.
 `get_logger(category)` and `log_event(event)` route the nine operational
@@ -927,6 +927,14 @@ ORCHESTR decides whether a user-facing response is needed and supplies MUSE with
 - Relevant personalization context.
 
 MUSE then prepares the final message.
+
+Structured reported results are rendered as readable bullet lines, not raw JSON.
+For example, an objective title and `tasks_completed: 9` become
+"9 tasks completed for 'Add a text_statistics capability'". Other fields retain
+their supplied keys and values, including nested results. Reported results stay
+separate from verified and uncertain facts; a deterministic post-check rejects
+unsupported numbers or identifiers. Short communication preferences retain the
+same facts in compact inline sections.
 
 My response must be recorded as an event and associated with the relevant objective, task, or authorization request.
 
