@@ -20,6 +20,10 @@ TOKEN_PRICES = MappingProxyType(
         ("groq", "openai/gpt-oss-20b"): (Decimal("0.075"), Decimal("0.30")),
         ("groq", "openai/gpt-oss-120b"): (Decimal("0.15"), Decimal("0.60")),
         ("groq", "qwen/qwen3.8-27b"): (Decimal("0.80"), Decimal("4.00")),
+        # Published by Groq's models API (per 1M tokens). allam-2-7b publishes no price.
+        ("groq", "openai/gpt-oss-safeguard-20b"): (Decimal("0.075"), Decimal("0.30")),
+        ("groq", "meta-llama/llama-prompt-guard-2-22m"): (Decimal("0.03"), Decimal("0.03")),
+        ("groq", "meta-llama/llama-prompt-guard-2-86m"): (Decimal("0.04"), Decimal("0.04")),
     }
 )
 

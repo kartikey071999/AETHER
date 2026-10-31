@@ -51,7 +51,9 @@ def test_partial_budget_env_preserves_azure_defaults(monkeypatch):
     assert settings.budgets["azure_openai"].max_requests_per_day == 3
     assert settings.budgets["azure_openai"].max_tokens_per_day is None
     assert settings.budgets["azure_openai"].max_concurrent_requests == 8
-    assert settings.budgets["groq"].max_requests_per_day == 2000
+    # Groq quotas are per model; the provider-wide policy has no daily caps of its own.
+    assert settings.budgets["groq"].max_requests_per_day is None
+    assert settings.model_budgets["groq/openai/gpt-oss-120b"].max_requests_per_day == 1000
 
 
 def test_azure_has_no_usage_limits_but_groq_keeps_its_budget():
@@ -61,8 +63,40 @@ def test_azure_has_no_usage_limits_but_groq_keeps_its_budget():
         assert azure.max_cost_usd_per_day is None and not azure.allow_unpriced
         assert (azure.max_concurrent_requests, azure.max_tokens_per_request) == (8, 32_768)
     groq = budgets["groq"]
-    assert (groq.max_requests_per_day, groq.max_tokens_per_day) == (2000, 2_000_000)
+    assert (groq.max_requests_per_day, groq.max_tokens_per_day) == (None, None)
     assert groq.max_cost_usd_per_day == 10 and not groq.allow_unpriced
+
+
+# The user's Groq account limits: (requests/minute, requests/day, tokens/minute, tokens/day).
+GROQ_LIMITS = {
+    "allam-2-7b": (30, 7_000, 6_000, 500_000),
+    "meta-llama/llama-prompt-guard-2-22m": (30, 14_400, 15_000, 500_000),
+    "meta-llama/llama-prompt-guard-2-86m": (30, 14_400, 15_000, 500_000),
+    "openai/gpt-oss-120b": (30, 1_000, 8_000, 200_000),
+    "openai/gpt-oss-20b": (30, 1_000, 8_000, 200_000),
+    "openai/gpt-oss-safeguard-20b": (3, 1_000, 2_000, 200_000),
+    "qwen/qwen3.8-27b": (30, 1_000, 8_000, 200_000),
+}
+
+
+@pytest.mark.parametrize(("model", "limits"), GROQ_LIMITS.items())
+def test_groq_model_budgets_match_the_account_limits(model, limits):
+    policy = ProviderSettings(_env_file=None).model_budgets[f"groq/{model}"]
+    assert (
+        policy.max_requests_per_minute,
+        policy.max_requests_per_day,
+        policy.max_tokens_per_minute,
+        policy.max_tokens_per_day,
+    ) == limits
+    assert policy.max_tokens_per_request == limits[2]
+
+
+def test_model_budget_override_keeps_the_other_groq_defaults():
+    settings = ProviderSettings(
+        _env_file=None, model_budgets={"groq/openai/gpt-oss-20b": {"max_requests_per_day": 5}}
+    )
+    assert settings.model_budgets["groq/openai/gpt-oss-20b"].max_requests_per_day == 5
+    assert settings.model_budgets["groq/openai/gpt-oss-120b"].max_requests_per_day == 1000
 
 
 @pytest.mark.parametrize("cap", ["max_requests_per_day", "max_tokens_per_day"])

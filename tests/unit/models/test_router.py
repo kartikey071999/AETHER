@@ -58,7 +58,8 @@ async def test_azure_serves_nonpremium_tiers_when_nothing_cheaper_exists(guard, 
     astra = provider("azure_openai", [tier])
     opus = provider("azure_anthropic", [tier])
     result = await ModelRouter([astra, opus], guard).complete(request(tier))
-    assert result.provider == "azure_anthropic" and not astra.requests
+    # The final fallback prefers the unlimited Azure deployments, Azure OpenAI first.
+    assert result.provider == "azure_openai" and not opus.requests
 
 
 async def test_none_rejects_without_usage(guard, database):
@@ -69,15 +70,17 @@ async def test_none_rejects_without_usage(guard, database):
     assert not mock.requests
 
 
-async def test_astra_only_after_other_premium_options_fail(usage, settings, database):
-    groq = provider("groq", [ModelTier.PREMIUM], responses=[ProviderError("groq")])
+async def test_groq_only_after_both_azure_fallbacks_fail(usage, settings, database):
+    # Groq's small per-model quotas make it the last resort of the final fallback.
+    groq = provider("groq", [ModelTier.PREMIUM])
     opus = provider(
         "azure_anthropic", [ModelTier.PREMIUM], responses=[ProviderError("azure_anthropic")]
     )
-    astra = provider("azure_openai", [ModelTier.PREMIUM])
+    astra = provider("azure_openai", [ModelTier.PREMIUM], responses=[ProviderError("azure_openai")])
     guard = BudgetGuard(usage, settings.model_copy(update={"max_models_per_request": 3}))
-    result = await ModelRouter([astra, opus, groq], guard).complete(request(ModelTier.PREMIUM))
-    assert result.provider == "azure_openai"
+    result = await ModelRouter([groq, opus, astra], guard).complete(request(ModelTier.PREMIUM))
+    assert result.provider == "groq"
+    assert len(astra.requests) == len(opus.requests) == len(groq.requests) == 1
     rows, events = await records(database)
     assert len(rows) == len(events) == 3
     assert sorted(row.status for row in rows) == ["failed", "failed", "succeeded"]

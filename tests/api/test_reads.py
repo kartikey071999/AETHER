@@ -209,9 +209,10 @@ def test_provider_usage_utc_day_provider_and_model_budgets(seeded):
     assert Decimal(str(groq["today"]["cost_usd"])) == Decimal("0.012")
     # Outstanding pre-midnight reservations still count toward global concurrency.
     assert groq["today"]["active"] == 1
-    assert groq["budget"]["max_requests_per_day"] == 2000
-    model = groq["model_budgets"][0]
-    assert model["model"] == "model-a"
+    # Groq quotas are per model now; the provider-wide policy has no daily request cap.
+    assert groq["budget"]["max_requests_per_day"] is None
+    # The default Groq per-model quotas are listed too; select the test model by name.
+    model = next(row for row in groq["model_budgets"] if row["model"] == "model-a")
     assert model["today"]["tokens"] == 140
     assert model["budget"]["max_requests_per_day"] == 7
     ollama = next(row for row in rows if row["provider"] == "ollama")

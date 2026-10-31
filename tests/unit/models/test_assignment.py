@@ -73,6 +73,15 @@ def settings(**overrides) -> ProviderSettings:
     return ProviderSettings(_env_file=None, max_retries=0, **overrides)
 
 
+# Mechanism tests (circuits, caps) pin an explicit Astra -> Groq chain so they do not depend on
+# the default assignment table.
+TWO_STEP = {"MUSE": ["azure_openai/gpt-6-astra", "groq/openai/gpt-oss-20b"]}
+
+
+def two_step(**overrides) -> ProviderSettings:
+    return settings(AETHER_MODEL_ASSIGNMENT=TWO_STEP, **overrides)
+
+
 def served(response) -> tuple[str, str]:
     return response.provider, response.model
 
@@ -93,8 +102,8 @@ class Clock:
         (AgentId.ROGUE, ModelTier.REASONING, OPUS),
         (AgentId.FORGE, ModelTier.REASONING, OPUS),
         (AgentId.WARDEN, ModelTier.STANDARD, OPUS),
-        (AgentId.LEDGER, ModelTier.LIGHT, GROQ_20B),
-        (AgentId.MUSE, ModelTier.STANDARD, ASTRA),
+        (AgentId.LEDGER, ModelTier.LIGHT, ASTRA),
+        (AgentId.MUSE, ModelTier.STANDARD, OPUS),
     ],
 )
 async def test_each_agent_uses_its_first_assigned_model(usage, database, agent, tier, expected):
@@ -108,9 +117,17 @@ async def test_each_agent_uses_its_first_assigned_model(usage, database, agent, 
     assert payload["skipped"] == []
 
 
-async def test_ledger_standard_work_skips_light_only_groq_entry(usage, database):
+async def test_light_only_entry_is_skipped_for_standard_work(usage, database):
+    config = settings(
+        AETHER_MODEL_ASSIGNMENT={
+            "LEDGER": [
+                {"provider": "groq", "model": "openai/gpt-oss-20b", "tiers": ["light"]},
+                "azure_openai/gpt-6-astra",
+            ]
+        }
+    )
     fleet = Fleet()
-    response = await fleet.router(usage, settings()).complete(request(AgentId.LEDGER))
+    response = await fleet.router(usage, config).complete(request(AgentId.LEDGER))
     assert served(response) == ASTRA and not fleet.groq.requests
     _, events = await records(database)
     payload = events[0].payload
@@ -154,8 +171,8 @@ async def test_over_budget_assignment_is_skipped_without_a_call(usage, database)
     assert skip["reason"].startswith("budget:")
 
 
-async def test_unpriced_azure_is_admitted_but_bounded_by_daily_request_cap(usage, database):
-    config = settings(budgets={"azure_openai": {"max_requests_per_day": 1}})
+async def test_configured_daily_request_cap_bounds_azure(usage, database):
+    config = two_step(budgets={"azure_openai": {"max_requests_per_day": 1}})
     fleet = Fleet()
     router = fleet.router(usage, config)
     assert served(await router.complete(request(AgentId.MUSE))) == ASTRA
@@ -201,7 +218,7 @@ async def test_final_fallback_can_be_disabled(usage, database):
 
 async def test_open_model_circuit_is_skipped_until_cooldown(usage, database):
     clock = Clock()
-    config = settings(model_circuit_failures=1, model_circuit_cooldown_seconds=60)
+    config = two_step(model_circuit_failures=1, model_circuit_cooldown_seconds=60)
     fleet = Fleet(responses={"azure_openai": [ProviderError("azure_openai")]})
     router = fleet.router(usage, config, clock=clock)
 
@@ -245,7 +262,7 @@ async def test_model_circuit_can_be_disabled(usage):
     fleet = Fleet(
         responses={"azure_openai": [ProviderError("azure_openai"), ProviderError("azure_openai")]}
     )
-    router = fleet.router(usage, settings(model_circuit_failures=0))
+    router = fleet.router(usage, two_step(model_circuit_failures=0))
     for _ in range(3):
         await router.complete(request(AgentId.MUSE))
     assert len(fleet.astra.requests) == 3
@@ -272,7 +289,11 @@ def test_defaults_match_the_agent_policy():
             "azure_anthropic/claude-opus-4-8",
             "groq/openai/gpt-oss-120b",
         ],
-        "SCOUT": ["azure_openai/gpt-6-astra", "groq/openai/gpt-oss-120b"],
+        "SCOUT": [
+            "azure_openai/gpt-6-astra",
+            "azure_anthropic/claude-opus-4-8",
+            "groq/openai/gpt-oss-120b",
+        ],
         "ROGUE": [
             "azure_anthropic/claude-opus-4-8",
             "azure_openai/gpt-6-astra",
@@ -280,8 +301,12 @@ def test_defaults_match_the_agent_policy():
         ],
         "FORGE": ["azure_anthropic/claude-opus-4-8", "azure_openai/gpt-6-astra"],
         "WARDEN": ["azure_anthropic/claude-opus-4-8", "azure_openai/gpt-6-astra"],
-        "LEDGER": ["groq/openai/gpt-oss-20b [light only]", "azure_openai/gpt-6-astra"],
-        "MUSE": ["azure_openai/gpt-6-astra", "groq/openai/gpt-oss-20b"],
+        "LEDGER": ["azure_openai/gpt-6-astra"],
+        "MUSE": [
+            "azure_anthropic/claude-opus-4-8",
+            "azure_openai/gpt-6-astra",
+            "groq/openai/gpt-oss-20b",
+        ],
     }
 
 
@@ -310,8 +335,9 @@ async def test_default_key_covers_agents_without_an_assignment(usage, monkeypatc
     config = ProviderSettings(_env_file=None, max_retries=0)
     fleet = Fleet()
     response = await fleet.router(usage, config).complete(request(AgentId.MUSE))
-    # An explicit empty list means "no assignment", so MUSE goes straight to the fallback.
-    assert response.provider == "groq"
+    # An explicit empty list means "no assignment", so MUSE goes straight to the final
+    # fallback, which prefers the unlimited Azure deployments over Groq.
+    assert response.provider == "azure_openai"
     assert config.assignments("SCOUT") == default_model_assignments()["SCOUT"]
 
 

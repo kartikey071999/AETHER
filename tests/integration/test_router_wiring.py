@@ -400,7 +400,8 @@ def test_models_status_reports_usage_and_no_key_material(
     assert "azure_openai: configured=yes available=yes models=gpt-6-astra" in out.out
     assert "azure_anthropic: configured=no available=no models=-" in out.out
     assert "ollama: configured=no available=no models=-" in out.out
-    assert "today: requests 0/2000, tokens 0/2000000, cost $0.000000/$10.00" in out.out
+    # Groq quotas are per model; the provider line keeps only its cost ceiling.
+    assert "today: requests 0/unlimited, tokens 0/unlimited, cost $0.000000/$10.00" in out.out
     # Groq keeps its budget line; Azure caps are a silent safety net with no usage display.
     assert out.out.count("  today: requests ") == 2
     assert "requests 0/1000" not in out.out and "tokens 0/3000000" not in out.out
@@ -409,7 +410,7 @@ def test_models_status_reports_usage_and_no_key_material(
         "ORCHESTR: 1. azure_openai/gpt-6-astra, 2. azure_anthropic/claude-opus-4-8 (unavailable),"
         " 3. groq/openai/gpt-oss-120b" in out.out
     )
-    assert "LEDGER: 1. groq/openai/gpt-oss-20b [light only], 2. azure_openai/gpt-6-astra" in out.out
+    assert "LEDGER: 1. azure_openai/gpt-6-astra" in out.out
     assert (
         "FORGE: 1. azure_anthropic/claude-opus-4-8 (unavailable), 2. azure_openai/gpt-6-astra"
         in (out.out)
