@@ -215,9 +215,24 @@ def assign_message(target: AgentId = AgentId.FORGE, **overrides: Any) -> AgentMe
 # -- failure injection -----------------------------------------------------------------------
 
 
+_FLUSHED_EVENT_TYPES = "aether_test_flushed_event_types"
+
+
+def _remember_flushed_events(session: Session, *_args: object) -> None:
+    # Repositories may flush mid-transaction; the identity map only holds weak references, so
+    # record staged event types at every flush instead of scanning the session at commit time.
+    types = session.info.setdefault(_FLUSHED_EVENT_TYPES, set())
+    types.update(item.event_type for item in session.new if isinstance(item, EventRecord))
+
+
+def _forget_flushed_events(session: Session, *_args: object) -> None:
+    session.info.pop(_FLUSHED_EVENT_TYPES, None)
+
+
 def _staged_event_types(session: Session) -> set[str]:
     objects = [*session.new, *session.identity_map.values()]
-    return {item.event_type for item in objects if isinstance(item, EventRecord)}
+    staged = {item.event_type for item in objects if isinstance(item, EventRecord)}
+    return staged | session.info.get(_FLUSHED_EVENT_TYPES, set())
 
 
 class FailingCommits:
@@ -240,6 +255,9 @@ class FailingCommits:
         self.failures = 0
         self._remaining = 0
         self._event_type: str | None = None
+        event.listen(self.session_class, "before_flush", _remember_flushed_events)
+        event.listen(self.session_class, "after_commit", _forget_flushed_events)
+        event.listen(self.session_class, "after_rollback", _forget_flushed_events)
         event.listen(self.session_class, "before_commit", self._before_commit)
 
     def fail_next(self, count: int = 1, *, on_event: str | None = None) -> None:
