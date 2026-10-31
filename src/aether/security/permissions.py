@@ -345,6 +345,7 @@ class PermissionService:
             expires_at=approval.expires_at,
             objective_id=operation.objective_id,
             task_id=operation.task_id,
+            input_hash=operation.input_hash,
         )
         stage_event(
             session,
