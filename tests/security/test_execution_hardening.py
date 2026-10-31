@@ -16,11 +16,13 @@ from aether.observability.events import build_event
 from aether.security import (
     BlockReason,
     InvalidSecurityDecision,
+    Operation,
     OperationBlocked,
+    OperationKind,
     PermissionService,
 )
 from aether.security.permissions import parse_restrictions
-from aether.storage.models import ExecutionRunRecord, RunStatus
+from aether.storage.models import ExecutionRunRecord, RunStatus, SecurityDecisionRecord
 from aether.storage.repositories.security import SecurityDecisionRepository
 from aether.tools.adapters import SafeFiles, SafeHttp, SafeSubprocess
 from aether.tools.adapters._base import ExecutionFailed
@@ -765,3 +767,24 @@ async def test_containment_failure_invokes_psutil_cleanup_and_records_failure(
     await _assert_tree_gone(roots)
     async with database.sessions() as session:
         assert (await session.scalars(select(ExecutionRunRecord))).one().status == RunStatus.FAILED
+
+
+@pytest.mark.parametrize("restriction", ["unknown", "no network", "max_runtime_seconds=0"])
+async def test_unknown_restriction_rejected_when_decision_is_recorded(
+    approvals, database, restriction
+) -> None:
+    operation = Operation(
+        kind=OperationKind.FILE_READ,
+        target="notes.txt",
+        requested_by=AgentId.FORGE,
+    )
+    with pytest.raises(InvalidSecurityDecision):
+        await approvals.record_decision(
+            AgentId.WARDEN,
+            operation,
+            "approved",
+            rationale="reviewed",
+            restrictions=[restriction],
+        )
+    async with database.sessions() as session:
+        assert (await session.scalars(select(SecurityDecisionRecord))).all() == []
