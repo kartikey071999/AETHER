@@ -317,6 +317,42 @@ PAYLOAD_EXAMPLES = {
         "owner": "SCOUT",
         "reason": "task belongs to SCOUT",
     },
+    "skill.completed": {
+        "skill": "text.screen_untrusted",
+        "agent": "SCOUT",
+        "status": "succeeded",
+        "duration_ms": 3.5,
+    },
+    "workflow.definition_registered": {
+        "name": "research.basic",
+        "version": 1,
+        "owner_agent": "SCOUT",
+        "status": "verified",
+        "built_in": True,
+        "steps": 3,
+        "definition_hash": "0" * 64,
+    },
+    "workflow.run_started": {
+        "workflow": "research.basic",
+        "version": 1,
+        "agent": "SCOUT",
+        "steps": 3,
+    },
+    "workflow.step_finished": {
+        "workflow": "research.basic",
+        "step": "screen",
+        "skill": "text.screen_untrusted",
+        "status": "succeeded",
+        "attempts": 1,
+        "duration_ms": 2.0,
+    },
+    "workflow.run_finished": {
+        "workflow": "research.basic",
+        "version": 1,
+        "status": "succeeded",
+        "steps_succeeded": 3,
+        "steps_skipped": 0,
+    },
 }
 
 
@@ -343,6 +379,7 @@ def test_catalogue_covers_all_required_types_and_categories() -> None:
         "personalization",
         "knowledge",
         "provider",
+        "workflow",
     }
 
 
