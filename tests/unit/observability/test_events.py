@@ -179,6 +179,7 @@ PAYLOAD_EXAMPLES = {
     "task.completed": {"result": {"ok": True}},
     "task.blocked": {"reason": "Waiting"},
     "task.waiting_for_approval": {"reason": "Needs approval"},
+    "task.waiting_for_verification": {"reason": "Needs an independent test run"},
     "task.failed": {"error": "boom", "will_retry": False},
     "task.timed_out": {"error": "timeout", "attempt": 1, "max_attempts": 3},
     "task.cancelled": {"reason": "Cancelled"},

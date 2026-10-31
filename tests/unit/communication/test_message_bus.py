@@ -1,5 +1,6 @@
 import asyncio
 from collections import Counter
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -172,10 +173,11 @@ async def test_concurrent_claims_never_deliver_a_message_twice(sessions) -> None
 
 
 async def test_new_bus_instance_reconstructs_pending_work_from_database(sessions) -> None:
+    past = datetime.now(UTC) - timedelta(minutes=5)
     pending = make_message()
     in_flight = make_message()
     done = make_message()
-    first_bus = MessageBus(sessions)
+    first_bus = MessageBus(sessions, clock=lambda: past)
     for message in (pending, in_flight, done):
         await first_bus.publish(message)
     claimed = await first_bus.claim(AgentId.FORGE, 2, consumer="dead")

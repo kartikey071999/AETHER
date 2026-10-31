@@ -52,6 +52,7 @@ class TaskStatus(StrEnum):
     SCHEDULED = "scheduled"
     RUNNING = "running"
     WAITING_FOR_APPROVAL = "waiting_for_approval"
+    WAITING_FOR_VERIFICATION = "waiting_for_verification"
     BLOCKED = "blocked"
     PAUSED = "paused"
     RETRYING = "retrying"
@@ -150,6 +151,8 @@ class RunStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    # A test run that could not reach a verdict either way (not a cancellation).
+    INCONCLUSIVE = "inconclusive"
 
 
 class ResultOutcome(StrEnum):
@@ -325,6 +328,10 @@ class MessageRecord(Base):
     deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     requires_response: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    claimed_by: Mapped[str | None] = mapped_column(String(100))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # A live consumer keeps pushing this forward; once it is past, the claim may be taken over.
+    claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
