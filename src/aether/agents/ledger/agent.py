@@ -179,7 +179,9 @@ class LedgerAgent(BaseAgent):
             raise ValueError(f"message addressed to {message.target_agent.value}, not LEDGER")
         payload = validate_message(message)
         if isinstance(payload, VerificationRequestPayload):
-            await self.verify(await self._spec_from_request(message, payload, ctx), ctx)
+            spec = await self._spec_from_request(message, payload, ctx)
+            await self._mark_installed(ctx, spec.capability_id, payload.execution_run_ids)
+            await self.verify(spec, ctx)
         elif isinstance(payload, ExecutionResultPayload):
             await self._on_execution_result(message, payload, ctx)
         elif isinstance(payload, SecurityDecisionPayload):
@@ -497,6 +499,20 @@ class LedgerAgent(BaseAgent):
         self, message: AgentMessage, payload: ExecutionResultPayload, ctx: AgentContext
     ) -> None:
         if payload.status is RunStatus.SUCCEEDED:
+            if payload.outputs.get("verification_requested") is True:
+                # FORGE follows up with a dedicated verification.request naming the suite;
+                # verifying the bare success claim here would only duplicate that run.
+                capability_id = _as_uuid(
+                    payload.outputs.get("capability_id")
+                ) or await self._capability_for(
+                    ctx, payload.requirement_id or message.requirement_id
+                )
+                await self._mark_installed(ctx, capability_id, payload.execution_run_ids)
+                ctx.logger.info(
+                    "LEDGER recorded execution %s (verification requested separately)",
+                    message.message_id,
+                )
+                return
             spec = await self._spec_from_execution(message, payload, ctx)
             if spec is None:
                 ctx.logger.info(
@@ -672,6 +688,49 @@ class LedgerAgent(BaseAgent):
             return None
         async with ctx.sessions() as session:
             return await session.get(CapabilityRecord, capability_id)
+
+    async def _mark_installed(
+        self, ctx: AgentContext, capability_id: UUID | None, run_ids: Sequence[UUID]
+    ) -> None:
+        """An approved capability FORGE built (recorded execution runs) is installed, unverified."""
+        capability = await self._capability(ctx, capability_id)
+        if (
+            capability is None
+            or not run_ids
+            or CapabilityStatus(capability.lifecycle_status) is not CapabilityStatus.APPROVED
+        ):
+            return
+        await CapabilityRepository(ctx.sessions).transition(
+            capability.id,
+            CapabilityStatus.INSTALLED,
+            actor=_ACTOR,
+            details={"execution_run_ids": [str(run_id) for run_id in run_ids]},
+        )
+
+    async def _approve_capabilities(
+        self, ctx: AgentContext, requirement_id: UUID, reason: str
+    ) -> None:
+        """Approving a requirement approves the capability proposed to satisfy it."""
+        async with ctx.sessions() as session:
+            requirement = await session.get(RequirementRecord, requirement_id)
+            if requirement is None or requirement.status not in (
+                RequirementStatus.APPROVED.value,
+                RequirementStatus.IN_PROGRESS.value,
+            ):
+                return
+        statement = select(CapabilityRecord.id).where(
+            CapabilityRecord.requirement_id == requirement_id,
+            CapabilityRecord.lifecycle_status == CapabilityStatus.PROPOSED.value,
+        )
+        async with ctx.sessions() as session:
+            capability_ids = list(await session.scalars(statement))
+        for capability_id in capability_ids:
+            await CapabilityRepository(ctx.sessions).transition(
+                capability_id,
+                CapabilityStatus.APPROVED,
+                actor=_ACTOR,
+                details={"requirement_id": str(requirement_id), "reason": reason[:500]},
+            )
 
     async def _set_requirement(
         self,
@@ -1049,6 +1108,7 @@ class LedgerAgent(BaseAgent):
                 allowed_from=(RequirementStatus.PROPOSED,),
                 reason=payload.rationale,
             )
+            await self._approve_capabilities(ctx, payload.requirement_id, payload.rationale)
         elif payload.outcome is EvaluationOutcome.REJECTED:
             await self._set_requirement(
                 ctx,

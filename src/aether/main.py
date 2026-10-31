@@ -93,6 +93,23 @@ def build_parser() -> argparse.ArgumentParser:
     database_commands.add_parser("upgrade", help="apply pending database migrations")
     database_commands.add_parser("check", help="verify connectivity to the configured database")
     database_commands.add_parser("create", help="create the configured database if it is missing")
+    demo = commands.add_parser("demo", help="run a scripted end-to-end scenario")
+    demo_commands = demo.add_subparsers(dest="demo_command", required=True)
+    demo_capability = demo_commands.add_parser(
+        "capability",
+        help="run the capability workflow against the configured database and print its trace",
+    )
+    demo_capability.add_argument(
+        "--live",
+        action="store_true",
+        help="use the configured model router instead of the scripted mock provider",
+    )
+    demo_capability.add_argument(
+        "--timeout",
+        type=_positive_seconds,
+        default=180.0,
+        help="give up after this many seconds (default: 180)",
+    )
     return parser
 
 
@@ -319,6 +336,63 @@ def _models_command(command: str, tier: str) -> int:
         return 1
 
 
+async def _demo_capability(live: bool, timeout: float) -> int:
+    from aether.models import ProviderSettings
+    from aether.runtime.scenario import (
+        CapabilityScenario,
+        ScenarioTimeout,
+        ScenarioTrace,
+        ScriptedCapabilityProvider,
+        capability_finished,
+        format_trace,
+        verification_failed,
+    )
+
+    settings = load_settings()
+    print(f"Database URL: {bootstrap.redact_url(settings.database_url_for_alembic)}")
+    if live:
+        print("Models: the configured model router (real providers, budgets apply)")
+    else:
+        print("Models: scripted mock provider (no network)")
+    print(
+        "Note: the Python interpreter running AETHER is added to the executable allowlist "
+        "for this run; WARDEN still decides every operation."
+    )
+
+    def finished(trace: ScenarioTrace) -> bool:
+        return capability_finished(trace) or verification_failed(trace)
+
+    scenario = CapabilityScenario(
+        settings,
+        model_providers=None if live else [ScriptedCapabilityProvider()],
+        provider_settings=ProviderSettings() if live else None,
+        create_schema=False,
+    )
+    async with scenario:
+        objective_id = await scenario.submit_objective(tag="demo")
+        print(f"Objective submitted: {objective_id}")
+        try:
+            trace = await scenario.run_until(objective_id, finished, timeout=timeout)
+        except ScenarioTimeout as error:
+            trace = error.trace
+            print(f"The workflow did not finish within {timeout:g}s.", file=sys.stderr)
+    print()
+    for line in format_trace(trace):
+        print(line)
+    return 0 if capability_finished(trace) else 1
+
+
+def _demo_command(live: bool, timeout: float) -> int:
+    try:
+        return asyncio.run(_demo_capability(live, timeout))
+    except KeyboardInterrupt:
+        print("Interrupted; the demo runtime stopped.")
+        return 1
+    except Exception as error:  # noqa: BLE001 - report any failure without a traceback
+        print(f"Demo failed: {type(error).__name__}", file=sys.stderr)
+        return 1
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = build_parser()
     arguments = parser.parse_args(argv)
@@ -357,6 +431,12 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if arguments.command == "models":
         status = _models_command(arguments.models_command, getattr(arguments, "tier", "light"))
+        if status:
+            raise SystemExit(status)
+        return
+
+    if arguments.command == "demo" and arguments.demo_command == "capability":
+        status = _demo_command(arguments.live, arguments.timeout)
         if status:
             raise SystemExit(status)
         return

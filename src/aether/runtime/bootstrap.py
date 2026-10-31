@@ -138,11 +138,14 @@ def build_runtime(
     security_settings: SecuritySettings | None = None,
     provider_settings: ProviderSettings | None = None,
     model_providers: Sequence[ModelProvider] | None = None,
+    engine_limits: EngineLimits | None = None,
 ) -> Runtime:
     """Construct the runtime; nothing touches the database until `Runtime.start`.
 
     ``model_providers`` replaces the providers built from ``provider_settings`` (used by tests).
     Agent tick intervals, task-control timing and agent limits come from ``settings``.
+    ``engine_limits`` replaces the limits derived from the settings (e.g. faster polling in
+    end-to-end scenarios).
     """
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     provider_settings = provider_settings or ProviderSettings()
@@ -165,7 +168,7 @@ def build_runtime(
         recorder,
         providers=model_providers,
     )
-    limits = EngineLimits.from_settings(settings)
+    limits = engine_limits or EngineLimits.from_settings(settings)
     scheduler_policy = SchedulerPolicy(
         max_concurrent_tasks=settings.max_concurrent_tasks,
         max_concurrent_builds=settings.max_concurrent_builds,
