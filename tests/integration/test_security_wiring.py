@@ -18,9 +18,20 @@ from aether.agents.security_review import request_security_review
 from aether.communication.messages import AgentId, AgentMessage, MessageType
 from aether.config import AetherSettings
 from aether.runtime.bootstrap import Runtime, build_runtime
-from aether.security import Operation, OperationKind, SecuritySettings
+from aether.security import (
+    ApprovalService,
+    BlockReason,
+    Operation,
+    OperationBlocked,
+    OperationKind,
+    PermissionService,
+    SecuritySettings,
+)
+from aether.security.readonly import PermissionView
 from aether.storage.models import Base, EventRecord, MessageRecord, TaskRecord, TaskStatus
 from aether.storage.repositories import ObjectiveRepository
+from aether.tools import AgentTools, Tool, ToolRegistry
+from aether.tools.adapters import SafeFiles, SafeHttp, SafeSubprocess
 
 SECRET = "pw-should-never-appear"
 ALL_AGENTS = [definition.agent_id for definition in AGENT_DEFINITIONS]
@@ -146,10 +157,72 @@ async def test_container_injects_the_same_services_into_all_seven_agents(
     security = runtime.security
     for agent_id in ALL_AGENTS:
         ctx = runtime.engine.context_for(agent_id)
-        assert ctx.permission_service is security.permissions
-        assert ctx.tools is security.tools
+        assert isinstance(ctx.permission_service, PermissionView)
+        assert isinstance(ctx.tools, AgentTools) and ctx.tools.agent_id is agent_id
+        assert {tool.name for tool in ctx.tools.list_tools()} == set(security.tools.tools)
         assert ctx.bus is runtime.engine.bus
     assert set(security.tools.tools) == {"run_process", "http_request", "read_file", "write_file"}
+
+
+def _reachable(root: object) -> list[object]:
+    """Every object reachable through instance attributes, slots and containers of aether code."""
+    seen: dict[int, object] = {}
+    pending = [root]
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen[id(item)] = item
+        if isinstance(item, dict):
+            pending += list(item.keys()) + list(item.values())
+        elif isinstance(item, list | tuple | set | frozenset):
+            pending += list(item)
+        elif type(item).__module__.startswith("aether") and not isinstance(item, type):
+            names = [n for c in type(item).__mro__ for n in getattr(c, "__slots__", ())]
+            names += list(getattr(item, "__dict__", {}))
+            pending += [getattr(item, name, None) for name in names if not name.startswith("__")]
+    return list(seen.values())
+
+
+async def test_agent_contexts_expose_no_registry_adapter_or_authorize(runtime: Runtime) -> None:
+    privileged = (ToolRegistry, Tool, PermissionService, SafeSubprocess, SafeHttp, SafeFiles)
+    for agent_id in ALL_AGENTS:
+        ctx = runtime.engine.context_for(agent_id)
+        assert not hasattr(ctx.permission_service, "authorize")
+        assert not hasattr(ctx.permission_service, "redeem")
+        assert not hasattr(ctx.tools, "registry")
+        reachable = _reachable(ctx)
+        assert not [item for item in reachable if isinstance(item, privileged)], agent_id
+        approvals = [item for item in reachable if isinstance(item, ApprovalService)]
+        assert bool(approvals) is (agent_id is AgentId.WARDEN)
+        with pytest.raises(AttributeError):
+            ctx.tools.agent_id = AgentId.WARDEN  # type: ignore[union-attr,misc]
+
+
+async def test_agent_cannot_invoke_a_tool_as_another_agent(runtime: Runtime) -> None:
+    approvals = runtime.engine.context_for(AgentId.WARDEN).services["approvals"]
+    await approvals.record_decision(
+        AgentId.WARDEN,
+        _forge_operation(runtime, PRINT_ARGV),
+        "approved",
+        rationale="FORGE may run this exact argv",
+        evidence=[{"check": "integration-test"}],
+    )
+    scout_tools = runtime.engine.context_for(AgentId.SCOUT).tools
+    assert scout_tools is not None
+
+    with pytest.raises(TypeError):
+        await scout_tools.invoke("run_process", {"argv": PRINT_ARGV}, agent_id=AgentId.FORGE)  # type: ignore[call-arg]
+    with pytest.raises(OperationBlocked) as blocked:
+        await scout_tools.invoke("run_process", {"argv": PRINT_ARGV})
+
+    assert blocked.value.reason is BlockReason.AGENT_NOT_PERMITTED
+    assert scout_tools.build_operation("run_process", {"argv": PRINT_ARGV}).requested_by is (
+        AgentId.SCOUT
+    )
+    assert await _events(runtime, "execution.started") == []
+    events = await _events(runtime, "security.operation_blocked")
+    assert [event.actor for event in events] == ["SCOUT"]
 
 
 async def test_only_warden_context_holds_the_approval_service(runtime: Runtime) -> None:

@@ -14,8 +14,10 @@ from aether.observability.recorder import EventRecorder
 from aether.security.approvals import ApprovalService
 from aether.security.permissions import PermissionService
 from aether.security.policy import SecurityPolicy, SecuritySettings, load_security_policy
+from aether.security.readonly import PermissionView
 from aether.security.summary import policy_fingerprint
 from aether.tools.adapters import build_default_registry
+from aether.tools.facade import AgentTools
 from aether.tools.registry import ToolRegistry
 
 APPROVALS_SERVICE = "approvals"
@@ -57,7 +59,10 @@ class SecurityServices:
         else:
             services.pop(APPROVALS_SERVICE, None)
         return replace(
-            base, permission_service=self.permissions, tools=self.tools, services=services
+            base,
+            permission_service=PermissionView(self.permissions),
+            tools=AgentTools(agent_id, self.tools),
+            services=services,
         )
 
     def contexts_for(

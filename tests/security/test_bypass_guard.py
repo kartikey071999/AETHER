@@ -15,6 +15,13 @@ FORBIDDEN_MODULES = (
     "asyncssh",
     "paramiko",
     "aether.tools.adapters",
+    "aether.tools.registry",
+    "aether.security.permissions",
+    "aether.security.approvals",
+)
+# Privileged services agents may only reach through their injected context.
+FORBIDDEN_IMPORTED_NAMES = frozenset(
+    {"ToolRegistry", "PermissionService", "ApprovalService", "build_default_registry"}
 )
 FORBIDDEN_CALLS = {
     "os": {"system", "popen", "execv", "execve", "execvp", "startfile", "fork", "forkpty"},
@@ -45,6 +52,7 @@ def _forbidden_uses(code: str) -> list[str]:
                 f"{node.module}.{alias.name}"
                 for alias in node.names
                 if _is_forbidden_call(node.module, alias.name)
+                or (node.module.startswith("aether") and alias.name in FORBIDDEN_IMPORTED_NAMES)
             ]
         elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
             if _is_forbidden_call(node.value.id, node.attr):
@@ -80,6 +88,9 @@ def test_guard_detects_direct_privileged_calls() -> None:
         "import urllib.request\n"
         "from asyncio import create_subprocess_shell\n"
         "from aether.tools.adapters import SafeSubprocess\n"
+        "from aether.security.permissions import Authorization\n"
+        "from aether.security import PermissionService\n"
+        "from aether.tools import ToolRegistry\n"
         "import httpx\n"
         "os.system('x')\n"
         "os.spawnl(0, 'x')\n"
@@ -90,6 +101,9 @@ def test_guard_detects_direct_privileged_calls() -> None:
         "urllib.request",
         "asyncio.create_subprocess_shell",
         "aether.tools.adapters",
+        "aether.security.permissions",
+        "aether.security.PermissionService",
+        "aether.tools.ToolRegistry",
         "httpx",
         "os.system",
         "os.spawnl",

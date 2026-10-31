@@ -18,7 +18,7 @@ from aether.communication.messages import AgentId, AgentMessage, MessageType
 from aether.storage.models import TaskRecord
 
 if TYPE_CHECKING:
-    from aether.tools.registry import ToolRegistry
+    from aether.tools.facade import AgentTools
 
 
 class PermissionService(Protocol):
@@ -35,9 +35,9 @@ class AgentContext:
     bus: MessageBus
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("aether.agent"))
+    # Agents only ever see a read-only permission view and a facade bound to their own identity.
     permission_service: PermissionService | None = None
-    # Privileged actions (shell, HTTP, files) are only reachable through this registry.
-    tools: "ToolRegistry | None" = None
+    tools: "AgentTools | None" = None
     services: dict[str, Any] = field(default_factory=dict)
 
 
@@ -178,9 +178,9 @@ class BaseAgent(ABC):
             correlation_id=correlation_id,
         )
         try:
-            value = await ctx.tools.invoke(self.agent_id, tool, args, call)
+            value = await ctx.tools.invoke(tool, args, call)
         except OperationBlocked as blocked:
-            operation = ctx.tools.build_operation(self.agent_id, tool, args, call)
+            operation = ctx.tools.build_operation(tool, args, call)
             return ToolInvocation(result=await blocked_result(blocked, operation, ctx))
         except (ToolInputError, UnknownTool) as error:
             return ToolInvocation(
