@@ -113,6 +113,8 @@ class ProviderSettings(BaseSettings):
     length_retry_max_tokens: int = Field(default=8192, ge=1)
     # Consecutive failures per objective and agent before LLM use is stopped (0 disables).
     circuit_breaker_failures: int = Field(default=5, ge=0)
+    # An open breaker allows one half-open probe call after this cool-down (default 30 minutes).
+    circuit_breaker_cooldown_seconds: float = Field(default=1800, ge=0, le=604_800)
     prices: dict[str, ModelPrice] = Field(default_factory=dict)
     # Explicit suitability declaration; do not infer reasoning ability from a model's name.
     ollama_models: dict[str, list[ModelTier]] = Field(default_factory=dict)
