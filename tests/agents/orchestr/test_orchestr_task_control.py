@@ -197,6 +197,18 @@ async def test_pressure_below_the_streak_never_pauses(
     assert not await _control_events(harness, scout.id)
 
 
+async def test_busy_but_under_the_ceiling_host_is_not_pressure(
+    harness: Harness, control: TaskControl
+) -> None:
+    objective_id = await harness.objective()
+    scout, _ = await _running(harness, objective_id, "research.scout", "research.rogue")
+
+    harness.monitor.cpu = 60.0  # whole-host percent; the safety ceiling is 85
+    await _ticks(harness, 6)
+
+    assert not await _control_events(harness, scout.id)
+
+
 async def test_low_ram_and_low_disk_count_as_pressure(
     harness: Harness, control: TaskControl
 ) -> None:

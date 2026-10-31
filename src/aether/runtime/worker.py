@@ -29,6 +29,7 @@ from aether.runtime.leases import RUNTIME_ACTOR, Lease, LeaseManager, ReleaseSta
 from aether.storage.models import TaskRecord, TaskStatus
 
 _MAX_ERROR_CHARS = 2000
+CONTROL_UNAVAILABLE = "control_unavailable"
 
 OutcomeCallback = Callable[[UUID, AgentId, TaskStatus], None]
 
@@ -78,12 +79,18 @@ class WorkerPool:
         control: TaskControl | None = None,
         control_poll: float = 5.0,
         interrupt_grace: float = 10.0,
+        control_read_attempts: int = 4,
+        control_read_backoff: float = 0.25,
         on_outcome: OutcomeCallback | None = None,
     ) -> None:
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be at least 1")
         if control_poll <= 0 or interrupt_grace < 0:
             raise ValueError("control_poll must be positive and interrupt_grace non-negative")
+        if control_read_attempts < 1 or control_read_backoff < 0:
+            raise ValueError("control_read_attempts must be positive and backoff non-negative")
+        self._control_read_attempts = control_read_attempts
+        self._control_read_backoff = control_read_backoff
         self._leases = leases
         self._context = context
         self._context_for = context_for or (lambda _agent_id: context)
@@ -237,12 +244,24 @@ class WorkerPool:
         disposition: _Disposition | None = None
         reraise = False
         try:
-            running.control_action = await self._requested_action(task_id)
-            if running.control_action is not None:
-                # Requested before the agent started: do not run it at all.
-                disposition = _control_disposition(lease, running.control_action)
+            try:
+                running.control_action = await self._requested_action(task_id)
+            except Exception:
+                self._logger.exception(
+                    "control state unreadable for task %s; handing the lease back", task_id
+                )
+                disposition = _Disposition(
+                    TaskStatus.READY,
+                    "task.interrupted",
+                    {"attempt": lease.attempt, "reason": CONTROL_UNAVAILABLE},
+                    refund_attempt=True,
+                )
             else:
-                disposition = await self._execute(task_id, running)
+                if running.control_action is not None:
+                    # Requested before the agent started: do not run it at all.
+                    disposition = _control_disposition(lease, running.control_action)
+                else:
+                    disposition = await self._execute(task_id, running)
         except asyncio.CancelledError:
             disposition, reraise = self._cancel_disposition(running)
         finally:
@@ -341,12 +360,31 @@ class WorkerPool:
         lease = running.lease
         stage: ReleaseStage | None = None
         if self._control is not None:
-            requests = await self._pending(task_id)
-            action = strongest([running.control_action, *(item.action for item in requests)])
-            if action is not None and disposition.status is not TaskStatus.COMPLETED:
-                disposition = _control_disposition(lease, action)
-            if requests:
-                stage = _resolver(task_id, requests, disposition.status)
+            try:
+                requests = await self._pending_with_retry(task_id)
+            except Exception:
+                self._logger.exception(
+                    "control state unreadable for task %s; not recording it as completed", task_id
+                )
+                requests = None
+            if requests is None:
+                if disposition.status is TaskStatus.COMPLETED:
+                    # A cancel or pause may be pending: fail safe instead of completing blindly.
+                    disposition = _Disposition(
+                        TaskStatus.BLOCKED,
+                        "task.blocked",
+                        {
+                            **disposition.details,
+                            "reason": CONTROL_UNAVAILABLE,
+                            "error": "task control state could not be read to confirm completion",
+                        },
+                    )
+            else:
+                action = strongest([running.control_action, *(item.action for item in requests)])
+                if action is not None and disposition.status is not TaskStatus.COMPLETED:
+                    disposition = _control_disposition(lease, action)
+                if requests:
+                    stage = _resolver(task_id, requests, disposition.status)
         control_stage = stage
         usage = {"duration_seconds": round(time.monotonic() - running.started_monotonic, 3)}
 
@@ -398,16 +436,31 @@ class WorkerPool:
                 self._logger.exception("outcome callback failed for task %s", task_id)
 
     async def _requested_action(self, task_id: UUID) -> ControlAction | None:
+        """Strongest pending action; raises when the control state cannot be read."""
         return strongest([item.action for item in await self._pending(task_id)])
 
     async def _pending(self, task_id: UUID) -> list[ControlRequest]:
         if self._control is None:
             return []
-        try:
-            return await self._control.pending(task_id)
-        except Exception:
-            self._logger.exception("failed to read control requests for task %s", task_id)
-            return []
+        return await self._control.pending(task_id)
+
+    async def _pending_with_retry(self, task_id: UUID) -> list[ControlRequest]:
+        delay = self._control_read_backoff
+        for attempt in range(1, self._control_read_attempts + 1):
+            try:
+                return await self._pending(task_id)
+            except Exception:
+                self._logger.exception(
+                    "failed to read control requests for task %s (attempt %d/%d)",
+                    task_id,
+                    attempt,
+                    self._control_read_attempts,
+                )
+                if attempt == self._control_read_attempts:
+                    raise
+                await asyncio.sleep(delay)
+                delay *= 2
+        raise AssertionError("unreachable")
 
     async def _control_loop(self, task_id: UUID, running: _Running, signal: asyncio.Event) -> None:
         """Watch for pause/cancel requests; signal the agent, then interrupt after the grace."""
@@ -417,7 +470,13 @@ class WorkerPool:
             except TimeoutError:
                 pass
             signal.clear()
-            action = strongest([running.control_action, await self._requested_action(task_id)])
+            try:
+                requested = await self._requested_action(task_id)
+            except Exception:
+                # Transient: poll again; `_finalize` re-reads before anything is recorded.
+                self._logger.exception("failed to read control requests for task %s", task_id)
+                continue
+            action = strongest([running.control_action, requested])
             if action is None:
                 continue
             running.control_action = action

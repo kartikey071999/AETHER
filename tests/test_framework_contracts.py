@@ -183,6 +183,38 @@ def test_scheduler_defers_work_that_would_breach_disk_reserve() -> None:
     assert "free-disk" in decision.deferred[0].reason
 
 
+def test_scheduler_cpu_estimate_is_a_share_of_one_core() -> None:
+    now = datetime.now(UTC)
+    build = SchedulingCandidate(
+        task_id=uuid4(), priority=50, waiting_since=now, estimated_cpu_percent=60.0
+    )
+    scheduler = Scheduler(SchedulerPolicy())
+
+    def host(cpu_percent: float, cpu_count: int) -> SchedulerResources:
+        return SchedulerResources(
+            host=HostResources(
+                cpu_percent=cpu_percent,
+                available_ram_bytes=8 * 1024**3,
+                free_disk_bytes=20 * 1024**3,
+                cpu_count=cpu_count,
+            )
+        )
+
+    # 8 cores at 30% leave 560 core-percent: a 60% single-core estimate fits.
+    assert scheduler.choose_next([build], host(30, 8), now=now).selected_task_id == build.task_id
+    # 1 core at 70% leaves 30 core-percent: it does not.
+    busy = scheduler.choose_next([build], host(70, 1), now=now)
+    assert busy.selected_task_id is None
+    assert busy.deferred[0].reason.startswith("deferred: host CPU")
+    # The host ceiling is a separate safety limit, whatever the estimate.
+    tiny = SchedulingCandidate(
+        task_id=uuid4(), priority=50, waiting_since=now, estimated_cpu_percent=1.0
+    )
+    hot = scheduler.choose_next([tiny], host(90, 64), now=now)
+    assert hot.selected_task_id is None
+    assert "ceiling" in hot.deferred[0].reason
+
+
 def test_scheduler_ages_waiting_work_and_prioritizes_deadlines() -> None:
     now = datetime.now(UTC)
     older = SchedulingCandidate(
