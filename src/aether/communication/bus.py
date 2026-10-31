@@ -71,6 +71,7 @@ class MessageBus:
                     created = True
         except IntegrityError:
             # A concurrent publisher of the same id may have won; anything else is a real error.
+            created = False
             async with self._sessions() as session:
                 if await session.get(MessageRecord, message.message_id) is None:
                     raise

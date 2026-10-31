@@ -1,5 +1,6 @@
 """Bounded LLM spend: fallback cap, one length retry, per-objective budgets, circuit breaker."""
 
+import asyncio
 from uuid import uuid4
 
 import pytest
@@ -203,6 +204,26 @@ async def test_per_objective_token_budget_stops_llm_use_and_records_an_event(dat
     with pytest.raises(Exception):  # noqa: B017
         await models.complete(request(response_format="json_object"), other)
     assert len(provider.requests) > calls
+
+
+async def test_concurrent_calls_cannot_spend_the_same_allowance_twice(database, usage):
+    class SlowProvider(MockProvider):
+        async def complete(self, request: CompletionRequest) -> CompletionResponse:
+            await asyncio.sleep(0.05)
+            return await super().complete(request)
+
+    provider = SlowProvider(name="mock", models=[ModelInfo(name="m0", tiers=STANDARD)])
+    settings = settings_with(agent_budgets={"FORGE": {"max_requests_per_objective": 1}})
+    models, governor = governed(database, usage, provider, settings)
+    call = ModelCallContext(objective_id=uuid4())
+
+    outcomes = await asyncio.gather(
+        *(models.complete(request(), call) for _ in range(3)), return_exceptions=True
+    )
+
+    assert len(provider.requests) == 1
+    assert sum(isinstance(item, AgentBudgetExceeded) for item in outcomes) == 2
+    assert governor.usage(call.objective_id, AgentId.FORGE)[0] == 1
 
 
 async def test_request_budget_is_enforced_per_agent(database, usage):

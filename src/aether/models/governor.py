@@ -6,14 +6,18 @@ agent facade and the router. For each (objective, agent) it tracks provider call
 tokens and consecutive failures. It refuses further LLM use with ``AgentBudgetExceeded`` once
 the allowance is spent or the breaker opens, so agents fall back to deterministic behaviour.
 
+Calls for one (objective, agent) are serialised, so concurrent work (e.g. a redelivered
+assignment racing the task run) cannot spend the same allowance twice.
+
 State is in memory and per process (bounded LRU). A restart resets it, which is acceptable
 because every completion is still capped by the durable daily provider budgets.
 """
 
+import asyncio
 import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -46,6 +50,7 @@ class _Ledger:
     failures_before_success: int = 0
     exhausted: str | None = None
     circuit_open: bool = False
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class ModelGovernor:
@@ -84,9 +89,17 @@ class ModelGovernor:
             # Unattributed calls (e.g. CLI probes) are bounded only by provider budgets.
             return await route(request, RouteSpend())
         agent = request.agent.value
-        call = _Call(agent, request.objective_id, request.task_id)
-        policy = self.settings.agent_budget(agent)
         ledger = self._ledger(request.objective_id, agent)
+        async with ledger.lock:
+            return await self._governed(
+                request, route, ledger, _Call(agent, request.objective_id, request.task_id)
+            )
+
+    async def _governed(
+        self, request: CompletionRequest, route: Route, ledger: _Ledger, call: _Call
+    ) -> CompletionResponse:
+        agent = call.agent
+        policy = self.settings.agent_budget(agent)
         if ledger.circuit_open:
             raise AgentBudgetExceeded([f"{agent}: circuit breaker open for this objective"])
         if ledger.exhausted is None:
