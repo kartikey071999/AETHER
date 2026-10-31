@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from aether.agents.base import BaseAgent
-from aether.agents.placeholder import build_placeholder_agents
+from aether.agents.factory import build_agents
 from aether.config import AetherSettings
 from aether.observability.logging import configure_logging
 from aether.observability.recorder import EventRecorder
@@ -115,7 +115,7 @@ def build_runtime(
     )
     engine = Engine(
         database.sessions,
-        agents if agents is not None else build_placeholder_agents(),
+        agents if agents is not None else build_agents(),
         scheduler,
         ResourceMonitor(),
         limits,
