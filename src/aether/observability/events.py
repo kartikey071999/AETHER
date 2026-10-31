@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import (
@@ -129,6 +129,23 @@ class TaskLeaseReleasedPayload(EventPayload):
 class TaskLeaseExpiredPayload(EventPayload):
     owner: str | None = None
     expired_at: datetime | None = None
+
+
+class TaskControlRequestedPayload(EventPayload):
+    """A pause, cancel or resume request for one task; ``outcome`` is unset until resolved."""
+
+    task_id: UUID
+    action: Literal["pause", "cancel", "resume"]
+    requested_by: str = Field(min_length=1, max_length=24)
+    reason: str = ""
+    outcome: str | None = None
+
+
+class TaskControlResolvedPayload(TaskControlRequestedPayload):
+    """How one request ended (``paused``, ``cancelled``, ``ready``, ``superseded: ...``)."""
+
+    request_event_id: UUID | None = None
+    outcome: str = Field(min_length=1)
 
 
 class TaskOutcomePayload(EventPayload):
@@ -508,6 +525,8 @@ EVENT_TYPES: dict[str, type[BaseModel]] = {
     "task.timed_out": TaskOutcomePayload,
     "task.cancelled": TaskOutcomePayload,
     "task.interrupted": TaskOutcomePayload,
+    "task.control_requested": TaskControlRequestedPayload,
+    "task.control_resolved": TaskControlResolvedPayload,
     "message.published": MessagePublishedPayload,
     "message.delivered": MessageDeliveredPayload,
     "message.processing": MessageProcessingPayload,

@@ -21,13 +21,18 @@ from aether.agents.orchestr.limits import OrchestrLimits
 from aether.agents.scout.schemas import ResearchLimits
 from aether.communication.messages import AgentId, AgentMessage, MessageType
 from aether.config import AetherSettings
+from aether.observability.recorder import stage_event
 from aether.runtime.bootstrap import Runtime, build_runtime
-from aether.runtime.control import CONTROL_RESOLVED, TaskControl
+from aether.runtime.control import (
+    CONTROL_REQUESTED,
+    CONTROL_RESOLVED,
+    ControlAction,
+    TaskControl,
+)
 from aether.runtime.engine import Engine, EngineLimits
 from aether.runtime.lifecycle import LifecycleState
 from aether.runtime.resource_monitor import HostResources, ResourceMonitor
 from aether.runtime.scheduler import Scheduler, SchedulerPolicy
-from aether.runtime.settings import AgentRuntimeSettings
 from aether.security import ApprovalService, OperationKind, SecuritySettings
 from aether.security.policy import SecurityPolicy
 from aether.storage.database import Database
@@ -288,20 +293,14 @@ def settings(tmp_path: Path) -> AetherSettings:
         log_dir=tmp_path / "logs",
         artifact_dir=tmp_path / "artifacts",
         workspace_dir=tmp_path / "workspaces",
+        orchestr=OrchestrLimits(max_active_objectives=4),
+        research=ResearchLimits(max_sources=2),
     )
 
 
 @pytest_asyncio.fixture
 async def runtime(settings: AetherSettings) -> AsyncIterator[Runtime]:
-    runtime = build_runtime(
-        settings,
-        security_settings=SecuritySettings(_env_file=None),
-        runtime_settings=AgentRuntimeSettings(
-            _env_file=None,
-            orchestr=OrchestrLimits(max_active_objectives=4),
-            research=ResearchLimits(max_sources=2),
-        ),
-    )
+    runtime = build_runtime(settings, security_settings=SecuritySettings(_env_file=None))
     async with runtime.database.engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     yield runtime
@@ -510,16 +509,17 @@ async def test_pause_of_a_running_task_is_cooperative_and_refunds_the_attempt(
         "running>paused",
     ]
     assert await engine.task_control.pending(task_id) == []
-    resolved = [
-        e
-        for e in await events(sessions, "decision.recorded", task_id)
-        if e.payload["decision"] == CONTROL_RESOLVED
-    ]
-    assert [e.payload["rationale"] for e in resolved] == ["paused"]
+    resolved = await events(sessions, CONTROL_RESOLVED, task_id)
+    assert [(e.payload["action"], e.payload["outcome"]) for e in resolved] == [("pause", "paused")]
+    assert resolved[0].payload["requested_by"] == "RUNTIME"
+    assert resolved[0].payload["reason"] == "operator asked"
     assert not agent.is_cancelled(task_id)  # cleared so the task can run again
 
     assert await engine.task_control.resume(task_id)
     assert (await get_task(sessions, task_id)).state == TaskStatus.READY.value
+    requested = await events(sessions, CONTROL_REQUESTED, task_id)
+    assert [e.payload["action"] for e in requested] == ["pause", "resume"]
+    assert await events(sessions, "decision.recorded", task_id) == []
     assert await engine.pool.submit(task_id, WorkAgent())
     await engine.pool.join()
     assert (await get_task(sessions, task_id)).state == TaskStatus.COMPLETED.value
@@ -564,12 +564,8 @@ async def test_completion_wins_over_a_concurrent_cancel(sessions, objective_id) 
 
     assert (await get_task(sessions, task_id)).state == TaskStatus.COMPLETED.value
     assert "running>blocked" not in await transitions(sessions, task_id)
-    resolved = [
-        e
-        for e in await events(sessions, "decision.recorded", task_id)
-        if e.payload["decision"] == CONTROL_RESOLVED
-    ]
-    assert [e.payload["rationale"] for e in resolved] == ["superseded: task completed"]
+    resolved = await events(sessions, CONTROL_RESOLVED, task_id)
+    assert [e.payload["outcome"] for e in resolved] == ["superseded: task completed"]
     assert await engine.task_control.pending(task_id) == []
     # A late request against the finished task is a no-op.
     late = await engine.task_control.request_pause(task_id)
@@ -624,14 +620,49 @@ async def test_orchestr_task_control_records_requests_as_orchestr(sessions, obje
 
     await control.request_cancel(task_id, reason="objective abandoned")
 
-    requests = [
-        e
-        for e in await events(sessions, "decision.recorded", task_id)
-        if e.payload["decision"] == "task.cancel_requested"
+    requests = await events(sessions, CONTROL_REQUESTED, task_id)
+    assert [(e.actor, e.payload["action"], e.payload["reason"]) for e in requests] == [
+        ("ORCHESTR", "cancel", "objective abandoned")
     ]
-    assert [(e.actor, e.payload["rationale"]) for e in requests] == [
-        ("ORCHESTR", "objective abandoned")
+    assert [e.payload["requested_by"] for e in requests] == ["ORCHESTR"]
+    assert await events(sessions, "decision.recorded", task_id) == []
+
+
+async def test_legacy_decision_recorded_requests_are_still_honoured(sessions, objective_id) -> None:
+    control = build_engine(sessions, [WorkAgent()]).task_control
+    task_id = await make_task(sessions, objective_id, state=TaskStatus.WAITING_FOR_APPROVAL)
+    async with sessions() as session, session.begin():
+        stage_event(
+            session,
+            "decision.recorded",
+            source="runtime.control",
+            actor="ORCHESTR",
+            aggregate_type="task",
+            aggregate_id=task_id,
+            payload={"decision": "task.pause_requested", "rationale": "old", "evidence": []},
+            task_id=task_id,
+        )
+
+    pending = await control.pending(task_id)
+    assert [(r.action, r.requested_by, r.reason) for r in pending] == [
+        (ControlAction.PAUSE, "ORCHESTR", "old")
     ]
+    async with sessions() as session, session.begin():
+        stage_event(
+            session,
+            "decision.recorded",
+            source="runtime.control",
+            actor="RUNTIME",
+            aggregate_type="task",
+            aggregate_id=task_id,
+            payload={
+                "decision": "task.control_resolved",
+                "rationale": "paused",
+                "evidence": [str(pending[0].event_id)],
+            },
+            task_id=task_id,
+        )
+    assert await control.pending(task_id) == []
 
 
 async def _true(value: bool) -> bool:
