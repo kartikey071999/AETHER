@@ -231,3 +231,14 @@ async def test_restart_mid_workflow_resumes_without_duplicates(tmp_path: Path) -
     assert len(trace.messages_of(MessageType.VERIFICATION_REQUEST, source=AgentId.FORGE)) == 1
     assert len(trace.outbox_paths) == 1, report
     assert len(trace.decisions("objective_completed")) == 1, report
+
+
+async def test_resubmitting_the_same_tag_tracks_the_new_objective(tmp_path: Path) -> None:
+    # Regression: the demo reused one tag, so the trace followed an older completed objective
+    # and reported success for a run that never executed.
+    async with CapabilityScenario(
+        scenario_settings(tmp_path), model_providers=[ScriptedCapabilityProvider()]
+    ) as scenario:
+        first = await scenario.submit_objective(tag="same")
+        second = await scenario.submit_objective(tag="same")
+    assert first != second
