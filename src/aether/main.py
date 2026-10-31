@@ -89,6 +89,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="light",
         help="model tier to request (default: light)",
     )
+    web = commands.add_parser("web", help="inspect the web research tools")
+    web_commands = web.add_subparsers(dest="web_command", required=True)
+    web_commands.add_parser(
+        "status", help="show whether a GitHub token is configured and the current API rate limit"
+    )
     database = commands.add_parser("db", help="manage the PostgreSQL schema")
     database_commands = database.add_subparsers(dest="database_command", required=True)
     database_commands.add_parser("upgrade", help="apply pending database migrations")
@@ -340,6 +345,34 @@ def _models_command(command: str, tier: str) -> int:
         return 1
 
 
+async def _web_status() -> int:
+    from aether.tools.web import WebSettings, fetch_github_status
+
+    status = await fetch_github_status(WebSettings())
+    print(f"GitHub token configured: {'yes' if status.token_configured else 'no'}")
+    if not status.reachable:
+        print(f"GitHub API: unreachable ({status.error})", file=sys.stderr)
+        return 1
+    if status.status_code != 200 or not status.buckets:
+        detail = status.error or f"HTTP {status.status_code}"
+        print(f"GitHub rate limit: unavailable ({detail})", file=sys.stderr)
+        return 1
+    for name, bucket in status.buckets.items():
+        reset = bucket.reset.strftime("%Y-%m-%d %H:%M:%S UTC") if bucket.reset else "unknown"
+        print(
+            f"GitHub {name} rate limit: {bucket.remaining}/{bucket.limit} remaining, resets {reset}"
+        )
+    return 0
+
+
+def _web_command() -> int:
+    try:
+        return asyncio.run(_web_status())
+    except Exception as error:  # noqa: BLE001 - report any failure without a traceback
+        print(f"Web status failed: {type(error).__name__}", file=sys.stderr)
+        return 1
+
+
 async def _demo_capability(live: bool, timeout: float) -> int:
     from aether.models import ProviderSettings
     from aether.runtime.scenario import (
@@ -449,6 +482,12 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if arguments.command == "models":
         status = _models_command(arguments.models_command, getattr(arguments, "tier", "light"))
+        if status:
+            raise SystemExit(status)
+        return
+
+    if arguments.command == "web" and arguments.web_command == "status":
+        status = _web_command()
         if status:
             raise SystemExit(status)
         return

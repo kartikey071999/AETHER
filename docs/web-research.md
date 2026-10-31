@@ -59,7 +59,7 @@ It is pure Python and auditable, and it runs anywhere AETHER runs.
 | `web.extract` | HTML to readable text, plus title, headings, links and metadata (description, canonical, Open Graph, generator, language). |
 | `web.links` | Breadth-first, same-host link discovery. Depth is 0-3, capped at `max_crawl_pages`. Robots.txt is checked for every page; `nofollow` pages are not expanded. |
 | `pypi.package` | Key facts from `https://pypi.org/pypi/<name>[/<version>]/json`: version, licence, Python requirement, dependencies, latest upload, project URLs. |
-| `github.repo` | Repository metadata, licence and (optionally) the latest release from the unauthenticated GitHub REST API. |
+| `github.repo` | Repository metadata, licence and (optionally) the latest release from the GitHub REST API. |
 | `github.search` | Repository search on GitHub, used by ROGUE to find alternatives. |
 | `docs.search` | Search a Sphinx site on a configured docs host. It tries `objects.inv` first (bounded zlib inflate), then falls back to `searchindex.js`, which is parsed as data and never evaluated. |
 
@@ -115,7 +115,21 @@ Every result is a `WebResult`:
   - A global concurrency cap (`max_concurrency`).
   - GitHub `X-RateLimit-Remaining`, `X-RateLimit-Reset` and `Retry-After` are
     tracked per bucket (core and search). An exhausted bucket refuses calls
-    locally until reset; the wait is capped at 1 h.
+    locally until reset; the wait is capped at 1 h. A 429 without a reset time
+    backs off for 60 s.
+- **GitHub token.** `AETHER_WEB_GITHUB_TOKEN` (optional) raises the API limit
+  from 60 to 5000 requests per hour. Create a fine-grained personal access
+  token with "Public repositories (read-only)" access and no other
+  permissions.
+  - It is sent as `Authorization: Bearer` only on https requests whose host is
+    exactly `api.github.com`. Other hosts, `github.com` pages, PyPI, docs hosts
+    and any redirect to another origin never receive it.
+  - It is held as a secret, never written to execution runs, events, logs or
+    the web cache, and `github_pat_…` values are redacted by the observability
+    layer.
+  - `aether web status` prints whether a token is configured (yes/no) and the
+    current core and search rate limits from `GET /rate_limit`; it never prints
+    the token.
 - **User-Agent** identifies AETHER: `AETHER-research/<version> (+local research agent; read-only; respects robots.txt)`.
 - **Disk cache** lives in `data_dir/web_cache/`. Only 200 responses are
   stored. Entries expire after `cache_ttl_seconds` (0 disables the cache) and
@@ -167,6 +181,7 @@ Research scopes accept the web source kinds alongside `file` and `http`:
 | `AETHER_WEB_MAX_CONCURRENCY` | 4 |
 | `AETHER_WEB_MAX_CRAWL_PAGES` / `_MAX_CRAWL_DEPTH` | 10 / 2 |
 | `AETHER_WEB_MAX_EXTRACT_CHARS` / `_MAX_LINKS` / `_MAX_SEARCH_RESULTS` | 20000 / 200 / 10 |
+| `AETHER_WEB_GITHUB_TOKEN` | unset (unauthenticated) |
 | `AETHER_RESEARCH__WEB_RESEARCH` | `false` |
 | `AETHER_RESEARCH__DOCS_BASE_URL` | `https://docs.python.org/3/` |
 | `AETHER_RESEARCH__WEB_FOLLOW_UPS` | 1 |
@@ -184,8 +199,8 @@ The web allowlist is frozen into the immutable security policy at startup.
 - **Approval.** `web_fetch` is not approval-required by default. It is
   read-only and limited to the web allowlist. Operators can add `web_fetch` to
   `AETHER_SECURITY_APPROVAL_REQUIRED_KINDS` to require WARDEN review.
-- **GitHub.** Calls are unauthenticated: 60 core and 10 search requests per
-  hour per IP. Token support is a follow-up.
+- **GitHub.** Without a token, calls are unauthenticated: 60 core and 10 search
+  requests per hour per IP. See "GitHub token" above to raise this.
 - **readthedocs.io.** The apex `readthedocs.io/robots.txt` redirects off the
   allowlist, so the apex is treated as disallowed. Project subdomains
   (`*.readthedocs.io`) work normally.
