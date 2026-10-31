@@ -928,6 +928,14 @@ ORCHESTR decides whether a user-facing response is needed and supplies MUSE with
 
 MUSE then prepares the final message.
 
+Structured reported results are rendered as readable bullet lines, not raw JSON.
+For example, an objective title and `tasks_completed: 9` become
+"9 tasks completed for 'Add a text_statistics capability'". Other fields retain
+their supplied keys and values, including nested results. Reported results stay
+separate from verified and uncertain facts; a deterministic post-check rejects
+unsupported numbers or identifiers. Short communication preferences retain the
+same facts in compact inline sections.
+
 My response must be recorded as an event and associated with the relevant objective, task, or authorization request.
 
 Silence must never be interpreted as authorization.

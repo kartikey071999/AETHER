@@ -205,6 +205,11 @@ PAYLOAD_EXAMPLES = {
         "previous_status": "processing",
     },
     "capability.discovered": {"name": "pytest"},
+    "capability.evidence_added": {
+        "approach_name": "pytest",
+        "finding_id": str(uuid4()),
+        "evidence_ids": [str(uuid4())],
+    },
     "capability.transitioned": {"from_status": "discovered", "to_status": "researching"},
     "requirement.created": {"title": "Need", "requirement_type": "capability"},
     "requirement.status_changed": {"from_status": "draft", "to_status": "approved"},

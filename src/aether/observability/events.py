@@ -407,6 +407,17 @@ class CapabilityDiscoveredPayload(EventPayload):
     version: str | None = None
 
 
+class CapabilityEvidenceAddedPayload(EventPayload):
+    approach_name: str
+    finding_id: UUID
+    evidence_ids: list[UUID]
+    description: str = ""
+    dependencies: list[str] = Field(default_factory=list)
+    resource_estimates: dict[str, Any] = Field(default_factory=dict)
+    known_limitations: list[str] = Field(default_factory=list)
+    requirement_id: UUID | None = None
+
+
 class CapabilityTransitionedPayload(EventPayload):
     from_status: str
     to_status: str
@@ -552,6 +563,7 @@ EVENT_TYPES: dict[str, type[BaseModel]] = {
     "test.results_added": TestResultsAddedPayload,
     "capability.status_changed": CapabilityStatusChangedPayload,
     "capability.discovered": CapabilityDiscoveredPayload,
+    "capability.evidence_added": CapabilityEvidenceAddedPayload,
     "capability.transitioned": CapabilityTransitionedPayload,
     "requirement.created": RequirementCreatedPayload,
     "requirement.status_changed": RequirementStatusChangedPayload,

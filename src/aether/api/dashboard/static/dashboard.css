@@ -1,0 +1,91 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --fg: #1c2330;
+  --panel: #ffffff;
+  --line: #d9dee7;
+  --muted: #667085;
+  --accent: #2457c5;
+  --ok: #1b7f4b;
+  --warn: #a15c00;
+  --bad: #b42318;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #11151c;
+    --fg: #e6e9ef;
+    --panel: #1a2029;
+    --line: #2d3644;
+    --muted: #98a2b3;
+    --accent: #7aa2f7;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --bad: #f87171;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.6rem 1.25rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+header nav { display: flex; gap: 1rem; flex: 1; flex-wrap: wrap; }
+header nav a { color: var(--muted); text-decoration: none; padding: 0.2rem 0; }
+header nav a[aria-current="page"] { color: var(--fg); border-bottom: 2px solid var(--accent); }
+a { color: var(--accent); }
+
+main, #auth-panel { max-width: 1200px; margin: 0 auto; padding: 1rem 1.25rem; }
+#auth-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; margin-top: 1rem; }
+#auth-panel label { display: inline-block; margin-right: 1rem; }
+
+h1 { font-size: 1.5rem; margin: 0.5rem 0 1rem; }
+h2 { font-size: 1.05rem; margin: 0 0 0.5rem; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 0.9rem 1rem; margin-bottom: 1rem; }
+.count { color: var(--muted); font-weight: normal; font-size: 0.85rem; }
+.muted { color: var(--muted); }
+.empty { color: var(--muted); font-style: italic; margin: 0.25rem 0; }
+.scroll { overflow-x: auto; }
+
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+
+.badge { display: inline-block; padding: 0 0.5rem; border-radius: 999px; border: 1px solid var(--line); font-size: 0.8rem; white-space: nowrap; }
+.s-completed, .s-verified, .s-approved, .s-succeeded, .s-idle, .s-ok, .s-resolved, .s-passed, .s-satisfied, .s-adopted { color: var(--ok); border-color: var(--ok); }
+.s-failed, .s-denied, .s-blocked, .s-stale, .s-open, .s-error, .s-down, .s-rejected, .s-expired, .s-degraded { color: var(--bad); border-color: var(--bad); }
+.s-running, .s-busy, .s-retrying, .s-waiting_for_approval, .s-waiting-for-approval, .s-paused, .s-no-heartbeat { color: var(--warn); border-color: var(--warn); }
+
+.counts { list-style: none; display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; padding: 0; margin: 0; }
+.dag, .dag ul { list-style: none; padding-left: 1.4rem; border-left: 1px dashed var(--line); }
+.dag { border-left: none; padding-left: 0; }
+.dag li { margin: 0.25rem 0; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 0.8rem 1rem; color: var(--accent); }
+.card h3 { margin: 0; color: var(--muted); font-size: 0.85rem; }
+.big { font-size: 1.6rem; margin: 0.2rem 0; color: var(--fg); }
+.spark { width: 100%; height: 50px; }
+
+progress { width: 7rem; height: 0.7rem; vertical-align: middle; }
+pre.message { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 0.6rem; }
+.filters { display: flex; gap: 1rem; align-items: end; margin-bottom: 1rem; flex-wrap: wrap; }
+button { cursor: pointer; border: 1px solid var(--accent); background: transparent; color: var(--accent); padding: 0.2rem 0.7rem; border-radius: 4px; }
+button.deny { border-color: var(--bad); color: var(--bad); }
+button:disabled { opacity: 0.5; cursor: wait; }
+input, select { padding: 0.2rem 0.4rem; background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 4px; }
+#respond-status { margin-top: 0.5rem; min-height: 1.2rem; }
