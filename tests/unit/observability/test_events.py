@@ -220,6 +220,7 @@ PAYLOAD_EXAMPLES = {
     "runtime.started": {"owner": "engine-1", "spool_replayed": 0, "spool_failed": 0},
     "runtime.stopping": {"running_tasks": 0},
     "runtime.stopped": {"released_leases": 0},
+    "runtime.security_initialized": {"policy_fingerprint": "a" * 64, "tool_count": 4},
     "agent.registered": {"agent_id": "LEDGER", "enabled": True},
     "agent.updated": {"agent_id": "LEDGER", "enabled": False},
     "agent.enabled": {"agent_id": "LEDGER"},

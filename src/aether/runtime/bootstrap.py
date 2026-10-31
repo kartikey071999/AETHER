@@ -16,6 +16,8 @@ from aether.observability.spool import EventSpool, ReplayResult
 from aether.runtime.engine import Engine, EngineLimits
 from aether.runtime.resource_monitor import ResourceMonitor
 from aether.runtime.scheduler import Scheduler, SchedulerPolicy
+from aether.runtime.security import SecurityServices, build_security_services
+from aether.security.policy import SecuritySettings
 from aether.storage.database import Database
 
 _LOGGER = logging.getLogger("aether.error.runtime")
@@ -33,6 +35,7 @@ class Runtime:
     database: Database
     recorder: EventRecorder
     engine: Engine
+    security: SecurityServices
     spool_replay: ReplayResult | None = None
     retention: RetentionResult | None = None
     started: bool = field(default=False)
@@ -87,11 +90,20 @@ class Runtime:
         await self.database.close()
 
 
-def build_runtime(settings: AetherSettings, agents: Sequence[BaseAgent] | None = None) -> Runtime:
+def build_runtime(
+    settings: AetherSettings,
+    agents: Sequence[BaseAgent] | None = None,
+    *,
+    security_settings: SecuritySettings | None = None,
+) -> Runtime:
     """Construct the runtime; nothing touches the database until `Runtime.start`."""
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     database = Database.from_settings(settings)
     recorder = EventRecorder(EventSpool(spool_path(settings)))
+    # The only security services of the process; agents receive them through their contexts.
+    security = build_security_services(
+        settings, database.sessions, recorder, security_settings=security_settings
+    )
     limits = EngineLimits.from_settings(settings)
     scheduler = Scheduler(
         SchedulerPolicy(
@@ -107,5 +119,12 @@ def build_runtime(settings: AetherSettings, agents: Sequence[BaseAgent] | None =
         scheduler,
         ResourceMonitor(),
         limits,
+        security=security,
     )
-    return Runtime(settings=settings, database=database, recorder=recorder, engine=engine)
+    return Runtime(
+        settings=settings,
+        database=database,
+        recorder=recorder,
+        engine=engine,
+        security=security,
+    )

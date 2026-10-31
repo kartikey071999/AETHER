@@ -37,6 +37,7 @@ from aether.runtime.scheduler import (
     SchedulerResources,
     SchedulingCandidate,
 )
+from aether.runtime.security import SecurityServices
 from aether.runtime.shutdown import ShutdownSignalHandler
 from aether.runtime.worker import WorkerPool
 from aether.storage.models import TaskRecord, TaskStatus
@@ -85,6 +86,7 @@ class Engine:
         clock: Clock = utc_now,
         logger: logging.Logger | None = None,
         permission_service: PermissionService | None = None,
+        security: SecurityServices | None = None,
     ) -> None:
         self._sessions = database_sessions
         self._agents: dict[AgentId, BaseAgent] = {}
@@ -111,9 +113,14 @@ class Engine:
             permission_service=permission_service,
         )
         lease_ttl = timedelta(seconds=self._limits.lease_ttl_seconds)
+        self._security = security
+        self._contexts = (
+            security.contexts_for(self._agents, self._context) if security is not None else {}
+        )
         self._pool = WorkerPool(
             self._leases,
             self._context,
+            context_for=self.context_for,
             max_concurrent=self._limits.max_concurrent_tasks,
             per_agent_limit=self._limits.max_tasks_per_agent,
             task_timeout=self._limits.task_timeout_seconds,
@@ -150,6 +157,17 @@ class Engine:
     def run_id(self) -> UUID:
         return self._run_id
 
+    @property
+    def security(self) -> SecurityServices | None:
+        return self._security
+
+    def agent(self, agent_id: AgentId) -> BaseAgent:
+        return self._agents[agent_id]
+
+    def context_for(self, agent_id: AgentId) -> AgentContext:
+        """The injected context for one agent: shared services, WARDEN-only approvals."""
+        return self._contexts.get(agent_id, self._context)
+
     async def start(self) -> None:
         self._lifecycle.transition(LifecycleState.STARTING)
         try:
@@ -158,6 +176,10 @@ class Engine:
             )
             for agent in self._agents.values():
                 await agent.start()
+            if self._security is not None:
+                await self._emit(
+                    "runtime.security_initialized", self._security.initialized_payload()
+                )
             for agent in self._agents.values():
                 self._spawn(self._agent_loop(agent), f"agent-loop-{agent.agent_id.value}")
             self._spawn(self._scheduler_loop(), "scheduler-loop")
@@ -338,7 +360,7 @@ class Engine:
     async def _process_message(self, agent: BaseAgent, message: AgentMessage) -> None:
         await self._bus.mark_processing(message.message_id, consumer=self._owner)
         try:
-            await agent.dispatch_message(message, self._context)
+            await agent.dispatch_message(message, self.context_for(agent.agent_id))
         except UnsupportedMessageType as exc:
             await self._bus.mark_failed(message.message_id, json.dumps(exc.to_dict()))
         except Exception as exc:

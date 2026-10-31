@@ -1,7 +1,7 @@
 """Bounded worker pool: concurrency limits, timeouts, lease renewal, and outcome recording."""
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -52,11 +52,13 @@ class WorkerPool:
         lease_ttl: timedelta = timedelta(seconds=60),
         renew_interval: float | None = None,
         owner: str = "worker",
+        context_for: Callable[[AgentId], AgentContext] | None = None,
     ) -> None:
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be at least 1")
         self._leases = leases
         self._context = context
+        self._context_for = context_for or (lambda _agent_id: context)
         self._max_concurrent = max_concurrent
         self._per_agent_limit = per_agent_limit
         self._task_timeout = task_timeout
@@ -211,7 +213,9 @@ class WorkerPool:
         timeout = asyncio.timeout(self._task_timeout)
         try:
             async with timeout:
-                result = await running.agent.execute_task(task, self._context)
+                result = await running.agent.execute_task(
+                    task, self._context_for(running.agent.agent_id)
+                )
         except TimeoutError as exc:
             if timeout.expired():
                 return self._failure(
