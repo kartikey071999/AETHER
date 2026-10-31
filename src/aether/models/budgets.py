@@ -34,6 +34,8 @@ class RouteSpend:
 
     max_requests: int | None = None
     max_tokens: int | None = None
+    # Providers whose tokens are not counted against ``max_tokens`` (their calls still count).
+    unmetered_providers: frozenset[str] = frozenset()
     requests: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -43,11 +45,12 @@ class RouteSpend:
     def tokens(self) -> int:
         return self.input_tokens + self.output_tokens
 
-    def check(self, request: CompletionRequest) -> None:
+    def check(self, request: CompletionRequest, provider: str | None = None) -> None:
         if self.max_requests is not None and self.requests + 1 > self.max_requests:
             self.refusal = "objective request budget"
         elif (
             self.max_tokens is not None
+            and provider not in self.unmetered_providers
             and self.tokens + request.input_token_estimate() + request.max_tokens > self.max_tokens
         ):
             self.refusal = "objective token budget"
@@ -55,8 +58,10 @@ class RouteSpend:
             return
         raise BudgetExceeded(f"exceeded {self.refusal}")
 
-    def add(self, input_tokens: int, output_tokens: int) -> None:
+    def add(self, input_tokens: int, output_tokens: int, provider: str | None = None) -> None:
         self.requests += 1
+        if provider in self.unmetered_providers:
+            return
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
 

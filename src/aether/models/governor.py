@@ -121,7 +121,9 @@ class ModelGovernor:
             return
         try:
             requests, tokens = await ProviderUsageRepository(self.sessions).objective_agent_usage(
-                call.objective_id, call.agent
+                call.objective_id,
+                call.agent,
+                token_exempt_providers=self.settings.objective_token_exempt_providers,
             )
             async with self.sessions() as session:
                 latest = (
@@ -182,6 +184,7 @@ class ModelGovernor:
         if ledger.exhausted is not None:
             raise AgentBudgetExceeded([f"{agent}: exceeded {ledger.exhausted}"])
         spend = RouteSpend(
+            unmetered_providers=frozenset(self.settings.objective_token_exempt_providers),
             max_requests=(
                 None
                 if policy.max_requests_per_objective is None

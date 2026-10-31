@@ -264,7 +264,7 @@ class ModelRouter:
         transient_retries = 0
         length_retried = False
         while True:
-            spend.check(request)
+            spend.check(request, provider.name)
             reservation = await self.budgets.reserve(provider.name, request)
             response: CompletionResponse | None = None
             error: BaseException | None = None
@@ -313,7 +313,7 @@ class ModelRouter:
                     attempt=attempt + 1,
                     routing=routing,
                 )
-                spend.add(*charged)
+                spend.add(*charged, provider=provider.name)
             attempt += 1
             if error is None:
                 if response is None:

@@ -317,14 +317,13 @@ apply additionally. Defaults are:
 | Provider | Requests/day | Tokens/day | Estimated USD/day | Tokens/request | Concurrent |
 |---|---:|---:|---:|---:|---:|
 | Groq | 2,000 | 2,000,000 | 10 | 32,768 | 2 |
-| Azure Astra | 1,000 | 3,000,000 | - | 32,768 | 4 |
-| Azure Anthropic | 300 | 1,500,000 | - | 32,768 | 2 |
+| Azure Astra | unlimited | unlimited | - | 32,768 | 8 |
+| Azure Anthropic | unlimited | unlimited | - | 32,768 | 8 |
 | Ollama | unlimited | unlimited | no API cost | 32,768 | 2 |
 
 Override caps with `AETHER_PROVIDER_BUDGETS` (JSON); unspecified fields retain
 their provider defaults. `AETHER_PROVIDER_MODEL_BUDGETS` adds per-model limits.
-The Azure caps are an internal safety net: they are enforced but `aether models status`
-does not display Azure usage or budgets.
+Azure OpenAI and Azure Anthropic have no daily request, token or USD limits;\n`aether models status` does not display Azure usage or budgets. Azure tokens are also\nexempt from the per-objective token allowance (`objective_token_exempt_providers`),\nwhile the per-objective request allowance, replan/task limits and the consecutive-failure\ncircuit breaker still apply as runaway guards.
 PostgreSQL advisory transaction locks serialize admission across processes;
 SQLite uses immediate transactions for offline tests. Successful calls replace
 reservations with measured usage; failed calls retain conservative estimates
@@ -352,7 +351,7 @@ inference. Override any model using `AETHER_PROVIDER_PRICES` JSON, for example
 Both rates must be finite and nonnegative, in USD per million tokens; overrides
 apply to routing, reservations, responses, and final accounting. A provider or model
 USD ceiling refuses unknown-price models unless the provider's budget sets
-`allow_unpriced=true` (both Azure providers do). `allow_unpriced` is only accepted together
+`allow_unpriced=true`. `allow_unpriced` is only accepted together
 with daily request and token caps. Byte-based
 input reservations are conservative estimates, not model-specific tokenizers.
 Timeouts/unknown failure consumption remain estimates, not billing reports.

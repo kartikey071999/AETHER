@@ -46,10 +46,6 @@ def configured(**kwargs):
         ANTHROPIC_API_KEY="test-opus-credential",
         API_VERSION="2023-06-01",
         max_retries=0,
-        budgets={
-            "azure_openai": {"allow_unpriced": True},
-            "azure_anthropic": {"allow_unpriced": True},
-        },
         **kwargs,
     )
 

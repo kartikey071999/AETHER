@@ -1,14 +1,14 @@
 """Model provider usage and cost accounting."""
 
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, text
+from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aether.storage.models import EventCategory, ProviderUsageRecord
@@ -236,13 +236,21 @@ class ProviderUsageRepository:
             for agent, provider, model, requests, tokens in rows
         ]
 
-    async def objective_agent_usage(self, objective_id: UUID, agent: str) -> tuple[int, int]:
-        """(provider calls, tokens) ever attributed to one objective and agent."""
+    async def objective_agent_usage(
+        self, objective_id: UUID, agent: str, *, token_exempt_providers: Collection[str] = ()
+    ) -> tuple[int, int]:
+        """(provider calls, tokens) ever attributed to one objective and agent.
+
+        Tokens of ``token_exempt_providers`` are not counted; their calls are.
+        """
+        tokens = ProviderUsageRecord.input_tokens + ProviderUsageRecord.output_tokens
+        if token_exempt_providers:
+            tokens = case(
+                (ProviderUsageRecord.provider.in_(tuple(token_exempt_providers)), 0), else_=tokens
+            )
         statement = select(
             func.coalesce(func.sum(ProviderUsageRecord.request_count), 0),
-            func.coalesce(
-                func.sum(ProviderUsageRecord.input_tokens + ProviderUsageRecord.output_tokens), 0
-            ),
+            func.coalesce(func.sum(tokens), 0),
         ).where(
             ProviderUsageRecord.objective_id == objective_id, ProviderUsageRecord.agent == agent
         )

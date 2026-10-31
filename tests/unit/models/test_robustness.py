@@ -362,7 +362,17 @@ async def test_overrides_apply_to_routing_reservation_response_and_ledger(usage,
 @pytest.mark.parametrize("provider", ["azure_openai", "azure_anthropic", "groq"])
 @pytest.mark.parametrize("allow", [False, True])
 async def test_unknown_price_usd_ceiling_requires_provider_opt_in(usage, database, provider, allow):
-    settings = ProviderSettings(_env_file=None, budgets={provider: {"allow_unpriced": allow}})
+    settings = ProviderSettings(
+        _env_file=None,
+        budgets={
+            provider: {
+                "allow_unpriced": allow,
+                "max_requests_per_day": 100,
+                "max_tokens_per_day": 1_000_000,
+                "max_cost_usd_per_day": 1,
+            }
+        },
+    )
     guard = BudgetGuard(usage, settings)
     req = request(provider=provider, model="unpriced")
     if allow:
@@ -401,7 +411,15 @@ async def test_unknown_price_without_any_usd_ceiling_is_allowed(usage):
 )
 async def test_allow_unpriced_never_bypasses_token_or_request_caps(usage, cap):
     settings = ProviderSettings(
-        _env_file=None, budgets={"azure_openai": {"allow_unpriced": True, **cap}}
+        _env_file=None,
+        budgets={
+            "azure_openai": {
+                "allow_unpriced": True,
+                "max_requests_per_day": 100,
+                "max_tokens_per_day": 1_000_000,
+                **cap,
+            }
+        },
     )
     with pytest.raises(BudgetExceeded, match="exceeded"):
         await BudgetGuard(usage, settings).reserve("azure_openai", request(model="unpriced"))
@@ -601,7 +619,17 @@ async def test_reconciliation_preserves_finalized_rows_and_rolls_back_failed_eve
 
 @pytest.mark.parametrize("allow", [False, True])
 async def test_router_unknown_azure_price_is_fail_closed_unless_allowed(usage, database, allow):
-    settings = ProviderSettings(_env_file=None, budgets={"azure_openai": {"allow_unpriced": allow}})
+    settings = ProviderSettings(
+        _env_file=None,
+        budgets={
+            "azure_openai": {
+                "allow_unpriced": allow,
+                "max_requests_per_day": 100,
+                "max_tokens_per_day": 1_000_000,
+                "max_cost_usd_per_day": 1,
+            }
+        },
+    )
     provider = MockProvider(
         name="azure_openai",
         models=[ModelInfo(name="gpt-6-astra", tiers={ModelTier.PREMIUM}, min_max_tokens=128)],
