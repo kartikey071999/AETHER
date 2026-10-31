@@ -41,7 +41,7 @@ from aether.tools import ExecutionFailed, ToolCallContext, ToolInputError, Unkno
 @dataclass(frozen=True, slots=True)
 class MuseSettings:
     data_dir: Path = Path("data")
-    dedupe_window: timedelta = timedelta(minutes=5)
+    dedupe_window: timedelta = timedelta(hours=1)
     polish: bool = False
 
     def __post_init__(self) -> None:
@@ -127,10 +127,12 @@ class MuseAgent(BaseAgent):
                 now=ctx.clock(),
                 dedupe_window=settings.dedupe_window,
                 suppress=routine_notification(request, options),
+                notice_kind=options.notice_kind,
             )
         if stored is None:
             return TaskResult(
-                status=TaskResultStatus.COMPLETED, summary="Routine notification suppressed"
+                status=TaskResultStatus.COMPLETED,
+                summary="Notification suppressed (routine or duplicate)",
             )
         return await self._deliver(stored, ctx)
 

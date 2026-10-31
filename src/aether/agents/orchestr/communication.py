@@ -101,6 +101,8 @@ def build_handoff(
         authorization_required=authorization_request_id is not None,
         authorization_request_id=authorization_request_id,
         urgency=urgency_for(event),
+        # MUSE deduplicates per (audience, objective, notice kind, content).
+        personalization_context={"notice_kind": event.kind.value},
         objective_id=objective_id,
         task_id=task_id,
     )

@@ -210,6 +210,7 @@ def test_handoff_is_structured_clipped_and_marks_authorization() -> None:
     assert payload.authorization_required
     assert payload.authorization_request_id == request_id
     assert payload.urgency is Urgency.HIGH
+    assert payload.personalization_context == {"notice_kind": "authorization_required"}
 
 
 # --- planner -----------------------------------------------------------------------------

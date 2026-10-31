@@ -39,7 +39,12 @@ Questions, excerpts and candidate proposals are quoted `UntrustedContent`.
 Instruction-like source content is quarantined, never used for model decisions,
 and cannot change permissions. Models cannot assert verified classification or
 invent evidence indices. Summaries and rankings are JSON-schema validated;
-unavailable, over-budget or invalid responses use deterministic fallbacks.
+unavailable, over-budget or invalid responses use deterministic fallbacks. When
+no model answers, conventional (SCOUT) research still adopts a
+"Standard-library implementation" at confidence 0.65 if all evidence is clean,
+at least one source is local (`file:`), and the approach is clearly sufficient:
+a capability template is named by the question/scope, or the question/scope or
+evidence says the standard library is enough. Otherwise the 0.4 fallback stands.
 
 SCOUT consolidates the **persisted** finding and evidence, not mutable wire
 claims: adopt an evidence-linked proposal at confidence >= 0.6, request evidence

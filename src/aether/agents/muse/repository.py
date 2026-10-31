@@ -141,6 +141,118 @@ def _interaction_event(session: AsyncSession, interaction: InteractionRecord, co
     )
 
 
+def notice_hash(request: CommunicationRequestPayload) -> str:
+    """Hash of what a notice tells the user, independent of correlation, task and presentation.
+
+    The rendered text is not used: it carries task-specific references, so identical escalations
+    raised from different tasks of one objective would never compare equal.
+    """
+    content = {
+        "what_happened": request.what_happened,
+        "results": request.results,
+        "verified": request.verified,
+        "uncertain": request.uncertain,
+        "blockers": request.blockers,
+        "decisions_required": request.decisions_required,
+        "authorization_required": request.authorization_required,
+        "authorization_request_id": request.authorization_request_id,
+        "urgency": request.urgency.value,
+    }
+    return text_hash(json.dumps(content, sort_keys=True, default=str))
+
+
+async def _serialize_notice(
+    session: AsyncSession, audience: UUID | None, objective_id: UUID | None, kind: str
+) -> None:
+    """Postgres: serialize dedupe checks per (audience, objective, kind) across correlations.
+
+    Always taken after the correlation lock, so lock order is consistent. SQLite already holds
+    the database write lock from ``_serialize``.
+    """
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    digest = hashlib.sha256(f"notice:{audience}:{objective_id}:{kind}".encode()).digest()
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:key)"),
+        {"key": int.from_bytes(digest[:8], "big") % (2**63 - 1)},
+    )
+
+
+async def _recent_notice(
+    session: AsyncSession,
+    request: CommunicationRequestPayload,
+    kind: str,
+    dedupe_hash: str,
+    *,
+    now: datetime,
+    window: timedelta,
+) -> OutboxCheckpoint | None:
+    """The staged notice this request duplicates within ``window``, if any."""
+    if window <= timedelta(0):
+        return None
+    objective_filter = (
+        EventRecord.objective_id.is_(None)
+        if request.objective_id is None
+        else EventRecord.objective_id == request.objective_id
+    )
+    candidates = await session.scalars(
+        select(EventRecord)
+        .where(
+            EventRecord.source == _SOURCE,
+            EventRecord.event_type == "decision.recorded",
+            objective_filter,
+            EventRecord.payload["decision"].as_string() == "muse.outbox",
+        )
+        .order_by(EventRecord.created_at.desc())
+    )
+    for candidate in candidates:
+        if not candidate.payload["evidence"]:
+            continue
+        saved = OutboxCheckpoint.model_validate_json(candidate.payload["evidence"][0])
+        age = now - saved.prepared_at
+        if (
+            timedelta(0) <= age <= window
+            and saved.audience == request.audience
+            and saved.objective_id == request.objective_id
+            and saved.notice_kind == kind
+            and saved.dedupe_hash == dedupe_hash
+        ):
+            return saved
+    return None
+
+
+def _suppressed_event(
+    session: AsyncSession,
+    message: AgentMessage,
+    request: CommunicationRequestPayload,
+    original: OutboxCheckpoint,
+    kind: str,
+    dedupe_hash: str,
+) -> None:
+    add_event(
+        session,
+        event_type="communication.suppressed",
+        aggregate_type="muse_workflow",
+        aggregate_id=message.message_id,
+        actor="MUSE",
+        payload={
+            "request_message_id": message.message_id,
+            "duplicate_of_message_id": original.request_message_id,
+            "duplicate_of_interaction_id": original.interaction_id,
+            "audience": request.audience,
+            "notice_kind": kind,
+            "dedupe_hash": dedupe_hash,
+            "reason": "duplicate_notice",
+        },
+        category="decision",
+        source=_SOURCE,
+        correlation_id=message.correlation_id,
+        objective_id=request.objective_id,
+        task_id=request.task_id,
+        idempotency_key=_key("suppressed", message.message_id),
+    )
+
+
 async def _stored_outbox(session: AsyncSession, event: EventRecord) -> StoredOutbox | None:
     if not event.payload["evidence"]:
         return None
@@ -242,10 +354,21 @@ class MuseRepository(PersonRepository):
         now: datetime,
         dedupe_window: timedelta,
         suppress: bool = False,
+        notice_kind: str | None = None,
     ) -> StoredOutbox | None:
+        """Stage one outbox message, or ``None`` when it is suppressed.
+
+        A notice is a duplicate when the same audience already got a notice of the same kind with
+        the same content for the same objective within ``dedupe_window`` — whatever its
+        correlation, task or message id. The check and the staging share one serialized
+        transaction, so concurrent duplicates stage exactly one message.
+        """
+        kind = notice_kind or request.urgency.value
+        dedupe_hash = notice_hash(request)
         try:
             async with self._sessions() as session, session.begin():
                 await _serialize(session, message.correlation_id, request.audience)
+                await _serialize_notice(session, request.audience, request.objective_id, kind)
                 await _person(session, request.audience)
                 existing = await _event(session, "outbox", message.message_id)
                 if existing is not None:
@@ -263,37 +386,20 @@ class MuseRepository(PersonRepository):
                 await self._validate_links(
                     session, request.objective_id, request.task_id, request.authorization_request_id
                 )
-                candidates = await session.scalars(
-                    select(EventRecord).where(
-                        EventRecord.source == _SOURCE,
-                        EventRecord.correlation_id == message.correlation_id,
-                        EventRecord.payload["decision"].as_string() == "muse.outbox",
-                    )
+                duplicate = await _recent_notice(
+                    session, request, kind, dedupe_hash, now=now, window=dedupe_window
                 )
-                for candidate in candidates:
-                    if not candidate.payload["evidence"]:
-                        continue
-                    saved = OutboxCheckpoint.model_validate_json(candidate.payload["evidence"][0])
-                    age = now - saved.prepared_at
-                    if (
-                        timedelta(0) <= age <= dedupe_window
-                        and saved.audience == request.audience
-                        and saved.channel == channel
-                        and saved.content_hash == text_hash(canonical_text)
-                        and saved.objective_id == request.objective_id
-                        and saved.task_id == request.task_id
-                        and saved.requirement_id == message.requirement_id
-                    ):
-                        _decision(
-                            session,
-                            "outbox",
-                            message.message_id,
-                            correlation_id=message.correlation_id,
-                            evidence=[saved.model_dump_json()],
-                            objective_id=request.objective_id,
-                            task_id=request.task_id,
-                        )
-                        return await _stored_outbox(session, candidate)
+                if duplicate is not None:
+                    _decision(
+                        session,
+                        "outbox",
+                        message.message_id,
+                        correlation_id=message.correlation_id,
+                        objective_id=request.objective_id,
+                        task_id=request.task_id,
+                    )
+                    _suppressed_event(session, message, request, duplicate, kind, dedupe_hash)
+                    return None
                 interaction_id = uuid5(message.message_id, "muse.outbox")
                 checkpoint = OutboxCheckpoint(
                     request_message_id=message.message_id,
@@ -310,6 +416,8 @@ class MuseRepository(PersonRepository):
                     task_id=request.task_id,
                     requirement_id=message.requirement_id,
                     prepared_at=now,
+                    notice_kind=kind,
+                    dedupe_hash=dedupe_hash,
                 )
                 interaction = InteractionRecord(
                     id=interaction_id,

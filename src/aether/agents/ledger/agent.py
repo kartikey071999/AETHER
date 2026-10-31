@@ -161,6 +161,7 @@ class LedgerAgent(BaseAgent):
     """Records keeper and independent verifier; registers capabilities only on evidence."""
 
     agent_id = AgentId.LEDGER
+    guard_terminal_objectives = True
     accepted_message_types = receivable_types(AgentId.LEDGER)
 
     def __init__(

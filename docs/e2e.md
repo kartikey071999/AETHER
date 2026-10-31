@@ -108,7 +108,9 @@ addition applies to the demo process only.
 ## Known limitations
 
 - A consolidated objective's FORGE tasks are held until the objective has an approved
-  requirement. If no requirement is ever approved, the build stays held.
+  requirement. After `requirement_wait_minutes` (default 10; the scenario harness uses 30 s via
+  `ScenarioTiming.requirement_wait_seconds`) ORCHESTR escalates the objective once (kind
+  `requirement`); the build stays held until a requirement is approved or a person acts.
 - LEDGER's verification task waits for the real test run. It reuses `WAITING_FOR_APPROVAL` as its
   waiting state and waits indefinitely if FORGE never requests verification.
 - An inconclusive verdict is stored as a `CANCELLED` test run.
@@ -148,3 +150,17 @@ addition applies to the demo process only.
 - **ROGUE research budget:** the per-objective LLM allowance is split between generation and
   critique by `ResearchLimits.llm_critique_share` (default 0.5), so repeated work cannot use up
   the critique calls.
+- **No-model research:** when every model call fails (for example all providers over budget),
+  SCOUT still adopts the standard-library approach (confidence 0.65) if the evidence is local
+  (`file:` sources), nothing is quarantined, and either a capability template is named by the
+  question/scope or the evidence says the standard library is enough. Otherwise the 0.4
+  fallback is kept and the requirement wait above bounds the stall.
+- **Terminal objectives:** ORCHESTR and the worker agents (SCOUT, ROGUE, FORGE, LEDGER, WARDEN)
+  acknowledge work messages for cancelled, completed or failed objectives and record an
+  `ignored_terminal_objective` decision: no escalation, replanning or user update.
+- **No notification storms:** ORCHESTR sends at most one escalation and user update per
+  (objective, kind) per `escalation_window_hours` (default 1); later triggers are recorded as
+  `escalation_aggregated`. MUSE suppresses a notice that matches an earlier one by audience,
+  objective, notice kind and content hash within `AETHER_MUSE_DEDUPE_WINDOW_MINUTES`
+  (default 60), independent of correlation id and task, and emits `communication.suppressed`.
+  `tests/e2e/test_budget_exhausted.py` runs the scenario with every provider over budget.

@@ -1,6 +1,7 @@
 """Blocker handling, escalation, and the user's authorization answers."""
 
 import re
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from aether.agents.orchestr.assignment import publish_assignment
@@ -12,7 +13,8 @@ from aether.agents.orchestr.planner import (
     kind_of_idempotency_key,
 )
 from aether.agents.orchestr.routing import DEFAULT_ASSIGNEE, infer_kind, route_blocker
-from aether.agents.orchestr.store import ACTOR, stable_id
+from aether.agents.orchestr.store import ACTOR, DecisionView, stable_id
+from aether.agents.terminal import IGNORED_DECISION, TERMINAL_OBJECTIVE_STATES
 from aether.communication.contracts import (
     AuthorizationRequestPayload,
     BlockerKind,
@@ -42,6 +44,12 @@ _CANCELLABLE = (
 _MAX_TEXT = 2000
 _RESOLVE_PREFIX = re.compile(r"^(?:Resolve [a-z_]+ blocker: )+")
 
+# Escalation kinds that are not a BlockerKind.
+TASK_FAILURE = "task_failure"
+VERIFICATION = "verification"
+PLAN = "plan"
+REQUIREMENT = "requirement"
+
 
 async def escalate_objective(
     env: Env,
@@ -49,25 +57,100 @@ async def escalate_objective(
     *,
     key: str,
     reason: str,
+    kind: str,
     task_id: UUID | None = None,
-) -> None:
-    """Stop work on an objective that cannot proceed unaided and tell the user once."""
+) -> bool:
+    """Stop work on an objective that cannot proceed unaided and tell the user once.
+
+    ``key`` identifies the trigger (one blocker, one failed task, ...): each trigger is handled
+    once. ``kind`` groups triggers: at most one escalation and one user update is sent per
+    (objective, kind) per ``limits.escalation_window_hours``; later triggers in the window are
+    recorded as ``escalation_aggregated`` against the open escalation. Finished objectives are
+    never escalated. True when a new escalation (and user update) was issued.
+    """
     current = await env.store.get_objective(objective.id) or objective
+    if current.status in TERMINAL_OBJECTIVE_STATES:
+        await env.store.record_decision(
+            IGNORED_DECISION,
+            f"objective is {current.status}; escalation not raised: {reason[:200]}",
+            key=f"orchestr:ignored-terminal:escalation:{key}",
+            evidence=[kind, current.status],
+            objective_id=objective.id,
+            task_id=task_id,
+        )
+        return False
+    claimed = await env.store.record_decision(
+        "escalation_requested",
+        reason[:300],
+        key=f"orchestr:escalation-trigger:{key}",
+        evidence=[kind],
+        objective_id=objective.id,
+        task_id=task_id,
+    )
+    if not claimed:
+        return False
+    prefix = f"orchestr:escalated:{objective.id}:{kind}:"
+    previous = await env.store.keyed_decisions(prefix)
+    now = env.now()
+    open_escalation = _open_escalation(previous, now, env.limits.escalation_window_hours)
+    if open_escalation is None:
+        open_key = f"{prefix}{len(previous)}"
+        if await env.store.record_decision(
+            "escalated",
+            reason[:300],
+            key=open_key,
+            evidence=[kind, now.isoformat(), key],
+            objective_id=objective.id,
+            task_id=task_id,
+        ):
+            await _escalate_now(env, current, objective.id, reason, kind, len(previous), task_id)
+            return True
+    else:
+        open_key = open_escalation.key or prefix
+    await env.store.record_decision(
+        "escalation_aggregated",
+        f"aggregated into the open {kind} escalation: {reason[:250]}",
+        key=f"orchestr:aggregated:{key}",
+        evidence=[kind, open_key],
+        objective_id=objective.id,
+        task_id=task_id,
+    )
+    return False
+
+
+def _open_escalation(
+    previous: list[DecisionView], now: datetime, window_hours: float
+) -> DecisionView | None:
+    window = timedelta(hours=window_hours)
+    for view in reversed(previous):
+        try:
+            raised = datetime.fromisoformat(view.evidence[1])
+        except (IndexError, ValueError):
+            continue
+        if raised.tzinfo is None:
+            raised = raised.replace(tzinfo=UTC)
+        if now - raised < window:
+            return view
+    return None
+
+
+async def _escalate_now(
+    env: Env,
+    current: ObjectiveRecord,
+    objective_id: UUID,
+    reason: str,
+    kind: str,
+    number: int,
+    task_id: UUID | None,
+) -> None:
     if current.status == "active":
         await env.store.objectives.set_status(
             current.id, "blocked", actor=ACTOR, reason=reason[:300]
         )
-        current = await env.store.get_objective(objective.id) or current
-    await env.store.record_decision(
-        "escalated",
-        reason[:300],
-        key=f"orchestr:escalated:{key}",
-        objective_id=objective.id,
-        task_id=task_id,
-    )
+        current = await env.store.get_objective(objective_id) or current
     await env.send_user_update(
         UpdateEvent(UpdateKind.ESCALATION),
-        key=f"escalation:{key}",
+        key=f"escalation:{objective_id}:{kind}:{number}",
         what_happened=f"Work on '{current.title}' is blocked and needs your input.",
         objective=current,
         task_id=task_id,
@@ -122,6 +205,7 @@ async def handle_blocker(env: Env, payload: BlockerPayload, message: AgentMessag
             objective,
             key=f"blocker:{payload.blocker_id}",
             reason=reason,
+            kind=payload.kind.value,
             task_id=task.id,
         )
     elif payload.kind is BlockerKind.AUTHORIZATION:
@@ -294,6 +378,7 @@ async def handle_task_result(env: Env, payload: TaskResultPayload, message: Agen
                 key=f"task:{task.id}",
                 reason=f"task '{task.title}' failed and cannot be retried: "
                 f"{(payload.error or '')[:200]}",
+                kind=TASK_FAILURE,
                 task_id=task.id,
             )
 

@@ -101,9 +101,11 @@ async def test_idempotent_redelivery_and_dedupe_window(agent, ctx, request_messa
     await agent.dispatch_message(duplicate, ctx)
     assert len(await rows(ctx, InteractionRecord)) == 1
     assert len(await rows(ctx, MessageRecord)) == 2
-    clock.advance(301)
+    clock.advance(3599)
     await agent.dispatch_message(duplicate, ctx)
+    await agent.dispatch_message(request_message(), ctx)
     assert len(await rows(ctx, InteractionRecord)) == 1
+    clock.advance(2)
     outside_window = request_message(envelope={"correlation_id": message.correlation_id})
     await agent.dispatch_message(outside_window, ctx)
     assert len(await rows(ctx, InteractionRecord)) == 2
@@ -116,7 +118,15 @@ async def test_parallel_duplicate_requests_create_one_artifact(agent, ctx, reque
     assert len(list(ctx.services["muse_settings"].data_dir.joinpath("outbox").glob("*.md"))) == 1
 
 
-async def test_different_correlation_or_content_not_suppressed(agent, ctx, request_message):
+async def test_parallel_distinct_duplicate_notices_stage_one(agent, ctx, request_message):
+    first, second = request_message(), request_message()
+    await asyncio.gather(agent.communicate(first, ctx), MuseAgent().communicate(second, ctx))
+    assert len(await rows(ctx, InteractionRecord)) == 1
+
+
+async def test_same_notice_suppressed_regardless_of_correlation_new_content_delivered(
+    agent, ctx, request_message
+):
     first = request_message()
     await agent.dispatch_message(first, ctx)
     await agent.dispatch_message(request_message(), ctx)
@@ -126,7 +136,7 @@ async def test_different_correlation_or_content_not_suppressed(agent, ctx, reque
         ),
         ctx,
     )
-    assert len(await rows(ctx, InteractionRecord)) == 3
+    assert len(await rows(ctx, InteractionRecord)) == 2
 
 
 async def test_routine_suppressed_but_decisions_not_suppressed(agent, ctx, request_message):

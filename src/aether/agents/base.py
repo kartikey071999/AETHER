@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aether.agents.registry import AgentDefinition, get_agent
+from aether.agents.terminal import ignore_if_terminal
 from aether.communication.bus import MessageBus
 from aether.communication.messages import AgentId, AgentMessage, MessageType
 from aether.storage.models import TaskRecord
@@ -114,6 +115,7 @@ class UnsupportedMessageType(Exception):
 class BaseAgent(ABC):
     agent_id: ClassVar[AgentId]
     accepted_message_types: ClassVar[frozenset[MessageType]] = frozenset()
+    guard_terminal_objectives: ClassVar[bool] = False
 
     def __init__(self) -> None:
         self._started = False
@@ -134,8 +136,24 @@ class BaseAgent(ABC):
             )
 
     async def dispatch_message(self, message: AgentMessage, ctx: AgentContext) -> None:
-        """Validate the message type, then hand it to the role-specific handler."""
+        """Validate the message type, then hand it to the role-specific handler.
+
+        Agents that create work from messages set ``guard_terminal_objectives``: work messages
+        for a cancelled/completed/failed objective are then acknowledged and recorded only.
+        """
         self.ensure_accepts(message)
+        if self.guard_terminal_objectives and await ignore_if_terminal(
+            self.agent_id, message, ctx.sessions
+        ):
+            ctx.logger.info(
+                "message ignored: objective is terminal",
+                extra={
+                    "agent": self.agent_id.value,
+                    "message_type": message.message_type.value,
+                    "message_id": str(message.message_id),
+                },
+            )
+            return
         await self.handle_message(message, ctx)
 
     @abstractmethod

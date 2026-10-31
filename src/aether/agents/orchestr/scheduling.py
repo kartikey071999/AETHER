@@ -1,10 +1,11 @@
 """The scheduling tick: promote, re-prioritize, reconcile, release, detect completion."""
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from aether.agents.orchestr.assignment import release_task
-from aether.agents.orchestr.blockers import escalate_objective
+from aether.agents.orchestr.blockers import REQUIREMENT, TASK_FAILURE, escalate_objective
 from aether.agents.orchestr.communication import UpdateEvent, UpdateKind
 from aether.agents.orchestr.completion import evaluate_completion
 from aether.agents.orchestr.env import Env, as_utc
@@ -95,6 +96,7 @@ async def _reconcile(env: Env, objective: ObjectiveRecord, report: TickReport) -
                 key=f"task:{task.id}",
                 reason=f"task '{task.title}' failed after {task.attempt} attempts: "
                 f"{(task.last_error or 'no error recorded')[:200]}",
+                kind=TASK_FAILURE,
                 task_id=task.id,
             )
             return
@@ -111,6 +113,50 @@ async def _reconcile(env: Env, objective: ObjectiveRecord, report: TickReport) -
                 await _transition(
                     env, task, TaskStatus.PENDING, "resource blocker requeued", report
                 )
+
+
+async def _escalate_requirement_waits(
+    env: Env, objectives: dict[UUID, ObjectiveRecord], held: list[TaskRecord]
+) -> None:
+    """A FORGE task held for a requirement escalates once it waited ``requirement_wait_minutes``.
+
+    Each wait round starts when the task is first seen held and ends with one escalation
+    trigger; the escalation itself is deduplicated per (objective, kind) window.
+    """
+    if not held:
+        return
+    now = env.now()
+    timeout = timedelta(minutes=env.limits.requirement_wait_minutes)
+    for task in held:
+        trigger = f"requirement-wait:{task.id}:"
+        rounds = len(await env.store.keyed_decisions(f"orchestr:escalation-trigger:{trigger}"))
+        marker = f"orchestr:requirement-wait:{task.id}:{rounds}"
+        started = await env.store.get_decision(marker)
+        if started is None:
+            await env.store.record_decision(
+                "requirement_wait",
+                f"task '{task.title[:120]}' waits for an approved requirement",
+                key=marker,
+                evidence=[now.isoformat()],
+                objective_id=task.objective_id,
+                task_id=task.id,
+            )
+            continue
+        try:
+            since = as_utc(datetime.fromisoformat(started.evidence[0]))
+        except (IndexError, ValueError):
+            continue
+        if now - since < timeout:
+            continue
+        await escalate_objective(
+            env,
+            objectives[task.objective_id],
+            key=f"{trigger}{rounds}",
+            reason=f"task '{task.title[:120]}' waited {env.limits.requirement_wait_minutes:g} "
+            "minutes for an approved requirement; research found no adoptable approach",
+            kind=REQUIREMENT,
+            task_id=task.id,
+        )
 
 
 async def _requeue_resource_block(env: Env, task: TaskRecord) -> bool:
@@ -155,6 +201,7 @@ async def _release(env: Env, active: list[ObjectiveRecord], report: TickReport) 
         if all(dep_states.get(dep) == TaskStatus.COMPLETED.value for dep in dependencies[task.id])
     ]
     held = await held_for_requirement(env, ready)
+    await _escalate_requirement_waits(env, objectives, [task for task in ready if task.id in held])
     ready = [task for task in ready if task.id not in held]
     if not ready:
         return

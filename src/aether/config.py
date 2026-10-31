@@ -98,6 +98,9 @@ class AetherSettings(BaseSettings):
     research: ResearchLimits = Field(default_factory=ResearchLimits)
     # FORGE asks the LLM first even for known capability templates (the template is the fallback).
     forge_llm_refine_templates: bool = False
+    # MUSE suppresses a notice repeating one the same audience got for the same objective and
+    # notice kind within this many minutes (0 disables duplicate suppression).
+    muse_dedupe_window_minutes: float = Field(default=60.0, ge=0, allow_inf_nan=False)
 
     @field_validator("agent_tick_overrides")
     @classmethod
