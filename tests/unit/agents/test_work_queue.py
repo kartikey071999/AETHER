@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, update
+from sqlalchemy import inspect, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlite_schema import schema_database
 
@@ -17,10 +17,11 @@ from aether.agents.work_queue import (
     TaskAccessDenied,
     WorkQueueService,
     queue_order,
+    task_ref_in,
     work_queue,
 )
 from aether.communication.bus import MessageBus
-from aether.communication.messages import AgentId
+from aether.communication.messages import AgentId, AgentMessage, MessageType
 from aether.runtime.scheduler import SchedulerPolicy, effective_priority
 from aether.storage.database import Database
 from aether.storage.models import EventRecord, TaskRecord, TaskStatus
@@ -267,6 +268,102 @@ async def test_own_and_privileged_detail_is_allowed(sessions, service, objective
         assert detail is not None and detail.id == task_id
     assert await service.task_detail(AgentId.FORGE, uuid4()) is None
     assert await denial_events(sessions) == []
+
+
+def message_to(agent: AgentId, *, task_id: UUID | None = None, payload_task: UUID | None = None):
+    return AgentMessage(
+        source_agent=AgentId.ORCHESTR,
+        target_agent=agent,
+        message_type=MessageType.BLOCKER,
+        task_id=task_id,
+        payload={"task_id": str(payload_task)} if payload_task else {},
+    )
+
+
+async def test_message_relation_grants_the_referenced_task_only_to_its_addressee(
+    sessions, service, objective_id
+) -> None:
+    theirs = await make_task(sessions, objective_id, AgentId.FORGE, title="blocked work")
+    other = await make_task(sessions, objective_id, AgentId.FORGE)
+
+    by_envelope = message_to(AgentId.SCOUT, task_id=theirs)
+    detail = await service.task_detail(AgentId.SCOUT, theirs, message=by_envelope)
+    assert detail is not None and detail.title == "blocked work"
+    by_payload = message_to(AgentId.SCOUT, payload_task=theirs)
+    assert await service.task_detail(AgentId.SCOUT, theirs, message=by_payload)
+    assert await denial_events(sessions) == []
+
+    # A message for someone else, or about another task, grants nothing.
+    for message, task_id in (
+        (message_to(AgentId.ROGUE, task_id=theirs), theirs),
+        (by_envelope, other),
+    ):
+        with pytest.raises(TaskAccessDenied):
+            await service.task_detail(AgentId.SCOUT, task_id, message=message)
+    assert len(await denial_events(sessions)) == 2
+
+
+async def test_parent_and_dependency_of_an_own_task_are_readable(
+    sessions, service, objective_id
+) -> None:
+    parent = await make_task(sessions, objective_id, AgentId.ORCHESTR, title="parent")
+    upstream = await make_task(sessions, objective_id, AgentId.SCOUT, title="upstream")
+    stranger = await make_task(sessions, objective_id, AgentId.SCOUT, title="stranger")
+    child = await TaskRepository(sessions).create(
+        objective_id=objective_id,
+        title="child",
+        assigned_agent=AgentId.FORGE.value,
+        parent_task_id=parent,
+    )
+    await TaskDependencyRepository(sessions).add(child, upstream, actor="test")
+
+    for related in (parent, upstream):
+        detail = await service.task_detail(AgentId.FORGE, related, related_to=child)
+        assert detail is not None and detail.id == related
+    with pytest.raises(TaskAccessDenied):
+        await service.task_detail(AgentId.FORGE, stranger, related_to=child)
+    # The anchor must be the caller's own task.
+    with pytest.raises(TaskAccessDenied):
+        await service.task_detail(AgentId.ROGUE, upstream, related_to=child)
+    with pytest.raises(TaskAccessDenied):
+        await service.task_detail(AgentId.ROGUE, parent, related_to=uuid4())
+
+
+async def test_task_ref_is_identity_only_and_open_to_every_agent(
+    sessions, service, objective_id
+) -> None:
+    task_id = await make_task(sessions, objective_id, AgentId.SCOUT, title="secret plan")
+
+    ref = await service.task_ref(task_id)
+    assert ref is not None
+    assert (ref.id, ref.objective_id, ref.assigned_agent) == (task_id, objective_id, "SCOUT")
+    assert ref.state is TaskStatus.READY
+    assert not hasattr(ref, "title") and not hasattr(ref, "description")
+    assert await service.task_ref(uuid4()) is None
+    async with sessions() as session:
+        assert (await task_ref_in(session, task_id)) == ref
+    assert await denial_events(sessions) == []
+
+
+async def test_task_record_is_a_detached_snapshot_with_the_same_rights(
+    sessions, service, objective_id
+) -> None:
+    theirs = await make_task(sessions, objective_id, AgentId.SCOUT, title="research")
+    unassigned = await make_task(sessions, objective_id, None)
+
+    record = await service.task_record(AgentId.SCOUT, theirs)
+    assert record is not None and record.title == "research"
+    assert inspect(record).detached
+    with pytest.raises(TaskAccessDenied):
+        await service.task_record(AgentId.FORGE, theirs)
+    with pytest.raises(TaskAccessDenied):
+        await service.task_record(AgentId.FORGE, unassigned)
+    executing = await service.task_record(AgentId.FORGE, unassigned, executing=True)
+    assert executing is not None and executing.id == unassigned
+    with pytest.raises(TaskAccessDenied):
+        await service.task_record(AgentId.FORGE, theirs, executing=True)
+    message = message_to(AgentId.FORGE, task_id=theirs)
+    assert await service.task_record(AgentId.FORGE, theirs, message=message)
 
 
 async def test_task_by_key_finds_own_and_denies_foreign(sessions, service, objective_id) -> None:

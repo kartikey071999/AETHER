@@ -5,11 +5,13 @@ bound to one agent identity that the runtime injects as ``AgentContext.work`` (l
 and ``AgentModels``). By default an agent sees only its *own open* tasks, ordered by effective
 priority (the scheduler's formula) and then age, each with its dependency status precomputed.
 Finished tasks are an explicit, bounded opt-in. Reading another agent's task is refused and the
-denial is recorded, unless the caller is ORCHESTR (the coordinator) or LEDGER (the record keeper).
-No LLM is involved anywhere in this module.
+denial is recorded, unless the caller is ORCHESTR (the coordinator) or LEDGER (the record keeper)
+or reads it through an explicit relation: the task a message addressed to it refers to, or the
+parent/dependency of one of its own tasks. ``task_ref`` is identity-only (ids, state, owner; never
+content) and open to every agent. No LLM is involved anywhere in this module.
 """
 
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import Awaitable, Callable, Collection, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -18,7 +20,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from aether.communication.messages import AgentId
+from aether.communication.messages import AgentId, AgentMessage
 from aether.observability.recorder import stage_event
 from aether.runtime.scheduler import SchedulerPolicy, effective_priority
 from aether.storage.models import TaskDependencyRecord, TaskRecord, TaskStatus
@@ -61,6 +63,18 @@ class TaskAccessDenied(PermissionError):
         self.operation = operation
         self.reason = reason
         super().__init__(f"{agent_id.value} may not {operation}: {reason}")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRef:
+    """A task's identity and links only (no title, description, result or error)."""
+
+    id: UUID
+    objective_id: UUID
+    state: TaskStatus
+    assigned_agent: str | None
+    requirement_id: UUID | None
+    parent_task_id: UUID | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +135,48 @@ def as_utc(value: datetime) -> datetime:
 
 def _optional_utc(value: datetime | None) -> datetime | None:
     return as_utc(value) if value is not None else None
+
+
+def _uuid(value: object) -> UUID | None:
+    if isinstance(value, UUID):
+        return value
+    if isinstance(value, str):
+        try:
+            return UUID(value)
+        except ValueError:
+            return None
+    return None
+
+
+def message_refers_to(message: AgentMessage, task_id: UUID) -> bool:
+    """The message names ``task_id`` in its envelope or payload."""
+    return task_id in (message.task_id, _uuid(message.payload.get("task_id")))
+
+
+async def task_ref_in(session: AsyncSession, task_id: UUID) -> TaskRef | None:
+    """Identity-only lookup inside the caller's own session/transaction (see ``task_ref``)."""
+    row = (
+        await session.execute(
+            select(
+                TaskRecord.id,
+                TaskRecord.objective_id,
+                TaskRecord.state,
+                TaskRecord.assigned_agent,
+                TaskRecord.requirement_id,
+                TaskRecord.parent_task_id,
+            ).where(TaskRecord.id == task_id)
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    return TaskRef(
+        id=row.id,
+        objective_id=row.objective_id,
+        state=TaskStatus(row.state),
+        assigned_agent=row.assigned_agent,
+        requirement_id=row.requirement_id,
+        parent_task_id=row.parent_task_id,
+    )
 
 
 def _bounded(limit: int) -> int:
@@ -283,37 +339,82 @@ class WorkQueueService:
     # -- single tasks --------------------------------------------------------------------------
 
     async def task_detail(
-        self, agent_id: AgentId, task_id: UUID, *, correlation_id: UUID | None = None
+        self,
+        agent_id: AgentId,
+        task_id: UUID,
+        *,
+        correlation_id: UUID | None = None,
+        related_to: UUID | None = None,
+        message: AgentMessage | None = None,
     ) -> TaskDetail | None:
         """One task with content; ``None`` if it does not exist.
 
-        Raises ``TaskAccessDenied`` (after recording ``task.access_denied``) when the task
-        belongs to another agent and the caller is neither ORCHESTR nor LEDGER.
+        Readable by its owner, ORCHESTR and LEDGER, or through a relation: ``message`` is a
+        message addressed to the caller that refers to the task, ``related_to`` is one of the
+        caller's own tasks of which this task is the parent or a dependency. Anything else raises
+        ``TaskAccessDenied`` (after recording ``task.access_denied``).
         """
-        agent = AgentId(agent_id)
-        async with self._sessions() as session:
-            row = await session.get(TaskRecord, task_id)
-            if row is None:
-                return None
-            if self._may_read(agent, row):
-                dependencies = await self._dependencies(session, [row.id])
-                item = self._item(row, dependencies.get(row.id, ()), as_utc(self._clock()))
-                return TaskDetail(
-                    **{name: getattr(item, name) for name in WorkItem.__dataclass_fields__},
-                    description=row.description,
-                    result=row.result,
-                    last_error=row.last_error,
-                )
-            owner, objective = row.assigned_agent, row.objective_id
-        await self._deny(
-            agent,
-            "read_task",
-            f"task belongs to {owner or 'no agent'}",
-            task_id=task_id,
-            objective_id=objective,
-            owner=owner,
+
+        async def build(session: AsyncSession, row: TaskRecord) -> TaskDetail:
+            dependencies = await self._dependencies(session, [row.id])
+            item = self._item(row, dependencies.get(row.id, ()), as_utc(self._clock()))
+            return TaskDetail(
+                **{name: getattr(item, name) for name in WorkItem.__dataclass_fields__},
+                description=row.description,
+                result=row.result,
+                last_error=row.last_error,
+            )
+
+        return await self._read(
+            AgentId(agent_id),
+            task_id,
+            build,
+            related_to=related_to,
+            message=message,
             correlation_id=correlation_id,
         )
+
+    async def task_record(
+        self,
+        agent_id: AgentId,
+        task_id: UUID,
+        *,
+        correlation_id: UUID | None = None,
+        related_to: UUID | None = None,
+        message: AgentMessage | None = None,
+        executing: bool = False,
+    ) -> TaskRecord | None:
+        """A fresh, detached snapshot of the stored row, for code that runs or reports the task.
+
+        Same rights as ``task_detail``. ``executing`` is for a task the runtime handed to the
+        caller to run: an unassigned task is then readable too.
+        """
+
+        async def build(session: AsyncSession, row: TaskRecord) -> TaskRecord:
+            session.expunge(row)
+            return row
+
+        return await self._read(
+            AgentId(agent_id),
+            task_id,
+            build,
+            related_to=related_to,
+            message=message,
+            correlation_id=correlation_id,
+            executing=executing,
+        )
+
+    async def task_ref(
+        self, task_id: UUID, *, session: AsyncSession | None = None
+    ) -> TaskRef | None:
+        """Identity and links of a task (never its content); open to every agent.
+
+        Pass ``session`` to read inside the caller's open transaction.
+        """
+        if session is not None:
+            return await task_ref_in(session, task_id)
+        async with self._sessions() as own:
+            return await task_ref_in(own, task_id)
 
     async def task_by_key(self, agent_id: AgentId, idempotency_key: str) -> WorkItem | None:
         """The caller's own task with ``idempotency_key`` (any state); ``None`` if absent."""
@@ -359,6 +460,61 @@ class WorkQueueService:
     @staticmethod
     def _may_read(agent: AgentId, row: TaskRecord) -> bool:
         return agent in PRIVILEGED_READERS or row.assigned_agent == agent.value
+
+    async def _read[T](
+        self,
+        agent: AgentId,
+        task_id: UUID,
+        build: Callable[[AsyncSession, TaskRecord], Awaitable[T]],
+        *,
+        related_to: UUID | None,
+        message: AgentMessage | None,
+        correlation_id: UUID | None,
+        executing: bool = False,
+    ) -> T | None:
+        async with self._sessions() as session:
+            row = await session.get(TaskRecord, task_id, populate_existing=True)
+            if row is None:
+                return None
+            if (
+                self._may_read(agent, row)
+                or (executing and row.assigned_agent is None)
+                or (
+                    message is not None
+                    and message.target_agent is agent
+                    and message_refers_to(message, row.id)
+                )
+                or (related_to is not None and await self._related(session, agent, row, related_to))
+            ):
+                return await build(session, row)
+            owner, objective = row.assigned_agent, row.objective_id
+        await self._deny(
+            agent,
+            "read_task",
+            f"task belongs to {owner or 'no agent'}",
+            task_id=task_id,
+            objective_id=objective,
+            owner=owner,
+            correlation_id=correlation_id,
+        )
+
+    @staticmethod
+    async def _related(
+        session: AsyncSession, agent: AgentId, row: TaskRecord, own_task_id: UUID
+    ) -> bool:
+        """``row`` is the parent or a dependency of ``agent``'s own task ``own_task_id``."""
+        own = await session.get(TaskRecord, own_task_id)
+        if own is None or own.assigned_agent != agent.value:
+            return False
+        if own.parent_task_id == row.id:
+            return True
+        linked = await session.scalar(
+            select(TaskDependencyRecord.task_id).where(
+                TaskDependencyRecord.task_id == own_task_id,
+                TaskDependencyRecord.depends_on_task_id == row.id,
+            )
+        )
+        return linked is not None
 
     def _effective(self, row: TaskRecord, now: datetime) -> float:
         return effective_priority(
@@ -523,11 +679,41 @@ class AgentWorkQueue:
         return await self._service.waiting_for_approval(self.agent_id, limit=limit)
 
     async def task_detail(
-        self, task_id: UUID, *, correlation_id: UUID | None = None
+        self,
+        task_id: UUID,
+        *,
+        correlation_id: UUID | None = None,
+        related_to: UUID | None = None,
+        message: AgentMessage | None = None,
     ) -> TaskDetail | None:
         return await self._service.task_detail(
-            self.agent_id, task_id, correlation_id=correlation_id
+            self.agent_id,
+            task_id,
+            correlation_id=correlation_id,
+            related_to=related_to,
+            message=message,
         )
+
+    async def task_record(
+        self,
+        task_id: UUID,
+        *,
+        correlation_id: UUID | None = None,
+        related_to: UUID | None = None,
+        message: AgentMessage | None = None,
+        executing: bool = False,
+    ) -> TaskRecord | None:
+        return await self._service.task_record(
+            self.agent_id,
+            task_id,
+            correlation_id=correlation_id,
+            related_to=related_to,
+            message=message,
+            executing=executing,
+        )
+
+    async def task_ref(self, task_id: UUID) -> TaskRef | None:
+        return await self._service.task_ref(task_id)
 
     async def task_by_key(self, idempotency_key: str) -> WorkItem | None:
         return await self._service.task_by_key(self.agent_id, idempotency_key)
@@ -564,10 +750,13 @@ __all__ = [
     "DependencyStatus",
     "TaskAccessDenied",
     "TaskDetail",
+    "TaskRef",
     "WorkItem",
     "WorkQueueService",
     "blocked_by",
     "is_ready_to_run",
+    "message_refers_to",
     "queue_order",
+    "task_ref_in",
     "work_queue",
 ]

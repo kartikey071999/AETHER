@@ -9,7 +9,7 @@ import sys
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -18,6 +18,7 @@ from sqlalchemy.exc import ArgumentError
 
 from aether import __version__
 from aether.agents import AGENT_DEFINITIONS
+from aether.communication.messages import AgentId
 from aether.config import load_settings
 from aether.storage import bootstrap
 from aether.storage.database import Database
@@ -47,6 +48,14 @@ def _positive_seconds(value: str) -> float:
     return seconds
 
 
+def _agent_id(value: str) -> AgentId:
+    try:
+        return AgentId(value.upper())
+    except ValueError:
+        known = ", ".join(agent.value for agent in AgentId)
+        raise argparse.ArgumentTypeError(f"unknown agent {value!r}; choose from {known}") from None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aether",
@@ -54,7 +63,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"AETHER {__version__}")
     commands = parser.add_subparsers(dest="command")
-    commands.add_parser("agents", help="list the configured agent responsibilities")
+    agents = commands.add_parser("agents", help="list the configured agent responsibilities")
+    agents_commands = agents.add_subparsers(dest="agents_command")
+    queue = agents_commands.add_parser(
+        "queue", help="show one agent's work queue (read-only): its open tasks by priority"
+    )
+    queue.add_argument(
+        "agent", type=_agent_id, metavar="AGENT", help="agent name, e.g. FORGE (case-insensitive)"
+    )
+    queue.add_argument(
+        "--finished",
+        action="store_true",
+        help="list the agent's finished (completed, failed, cancelled) tasks instead",
+    )
+    queue.add_argument(
+        "--limit", type=_positive_int, default=50, help="number of tasks to show (default: 50)"
+    )
     commands.add_parser(
         "check-config", help="validate configuration without connecting to services"
     )
@@ -211,6 +235,26 @@ def _tail_command(limit: int) -> int:
         print(f"Reading events failed: {type(error).__name__}", file=sys.stderr)
         return 1
     for line in lines:
+        print(line)
+    return 0
+
+
+def _queue_command(agent: AgentId, *, finished: bool, limit: int) -> int:
+    from aether.agents.queue_view import agent_queue_panel, format_queue_lines
+
+    async def read() -> dict[str, Any]:
+        database = Database.from_settings(load_settings())
+        try:
+            return await agent_queue_panel(database.sessions, agent, finished=finished, limit=limit)
+        finally:
+            await database.close()
+
+    try:
+        panel = asyncio.run(read())
+    except Exception as error:  # noqa: BLE001 - report any failure without a traceback
+        print(f"Reading the queue failed: {type(error).__name__}", file=sys.stderr)
+        return 1
+    for line in format_queue_lines(panel):
         print(line)
     return 0
 
@@ -446,6 +490,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             port=settings.api_port,
             access_log=False,
         )
+        return
+
+    if arguments.command == "agents" and arguments.agents_command == "queue":
+        status = _queue_command(arguments.agent, finished=arguments.finished, limit=arguments.limit)
+        if status:
+            raise SystemExit(status)
         return
 
     if arguments.command == "agents":

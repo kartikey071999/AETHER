@@ -1,5 +1,4 @@
 import asyncio
-from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -266,13 +265,9 @@ async def test_review_waits_and_only_retries_matching_approved_operation(
     )
 
 
-@pytest.mark.parametrize("polish", [False, True])
-async def test_opening_is_deterministic_and_never_calls_a_model(
-    agent, ctx, request_message, polish
-):
+async def test_opening_is_deterministic_and_never_calls_a_model(agent, ctx, request_message):
     provider = MockProvider(['{"opening":"99 invented facts"}'])
     ctx.models = AgentModels(AgentId.MUSE, provider.complete)
-    ctx.services["muse_settings"] = replace(ctx.services["muse_settings"], polish=polish)
     await agent.dispatch_message(request_message(), ctx)
     text = (await rows(ctx, InteractionRecord))[0].summary
     assert "12 tests passed." in text

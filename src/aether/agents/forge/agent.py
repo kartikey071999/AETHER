@@ -68,8 +68,7 @@ class ForgeAgent(BaseAgent):
     async def _task(self, message: AgentMessage, ctx: AgentContext) -> TaskRecord | None:
         if message.task_id is None:
             return None
-        async with ctx.sessions() as session:
-            return await session.get(TaskRecord, message.task_id)
+        return await self.work_queue(ctx).task_record(message.task_id, message=message)
 
     async def _report(
         self,

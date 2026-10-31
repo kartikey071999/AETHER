@@ -19,7 +19,7 @@ EMPTY_STATES = {
     "/dashboard/tasks": ["No tasks match."],
     "/dashboard/security": ["Nothing is waiting for approval.", "No security decisions"],
     "/dashboard/resources": ["No resource measurements"],
-    "/dashboard/providers": ["Today&#x27;s usage vs budgets", "<progress"],
+    "/dashboard/providers": ["Today&#x27;s usage vs budgets", '<svg class="bar t-'],
     "/dashboard/events": ["No events match."],
 }
 SCRIPT = "<script>alert('xss')</script>"
@@ -78,7 +78,7 @@ def test_pages_render_real_rows(seeded, path):
         "/dashboard/tasks": ["Actual ready task", "Completed prerequisite", "Live worker task"],
         "/dashboard/security": ["Allow this input?", "file_read", "Allowed input", "data-respond"],
         "/dashboard/resources": ["12.5%", "<svg", "Recent measurements"],
-        "/dashboard/providers": ["groq", "model-a", "<progress"],
+        "/dashboard/providers": ["groq", "model-a", '<svg class="bar t-'],
         "/dashboard/events": ["scheduler.decision", "task.", "FORGE"],
     }[path]
     for text in expected:
