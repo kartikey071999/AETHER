@@ -3,6 +3,7 @@
 The task ORCHESTR plans ("Verify independently") depends on the FORGE implementation task. FORGE
 sends LEDGER a ``verification.request`` carrying that task's id, so the run it opens is recorded
 against the FORGE task. The verification task is finished only once such a run has a verdict.
+Task lookups go through LEDGER's work queue; only the test-run read is LEDGER's own table.
 """
 
 from dataclasses import dataclass
@@ -11,14 +12,9 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from aether.agents.work_queue import MAX_LIMIT, AgentWorkQueue, WorkItem
 from aether.communication.messages import AgentId
-from aether.storage.models import (
-    RunStatus,
-    TaskDependencyRecord,
-    TaskRecord,
-    TaskStatus,
-    TestRunRecord,
-)
+from aether.storage.models import RunStatus, TaskStatus, TestRunRecord
 
 _OPEN = (RunStatus.PENDING.value, RunStatus.RUNNING.value)
 
@@ -35,27 +31,21 @@ class VerificationProgress:
         return self.run is not None
 
 
-async def forge_dependencies(
-    sessions: async_sessionmaker[AsyncSession], task_id: UUID
-) -> tuple[UUID, ...]:
-    statement = (
-        select(TaskRecord.id)
-        .join(TaskDependencyRecord, TaskDependencyRecord.depends_on_task_id == TaskRecord.id)
-        .where(
-            TaskDependencyRecord.task_id == task_id,
-            TaskRecord.assigned_agent == AgentId.FORGE.value,
-        )
-        .order_by(TaskRecord.created_at, TaskRecord.id)
+async def forge_dependencies(work: AgentWorkQueue, task_id: UUID) -> tuple[UUID, ...]:
+    """The FORGE tasks ``task_id`` depends on, oldest first."""
+    detail = await work.task_detail(task_id)
+    if detail is None:
+        return ()
+    return tuple(
+        item.task_id for item in detail.depends_on if item.assigned_agent == AgentId.FORGE.value
     )
-    async with sessions() as session:
-        return tuple(await session.scalars(statement))
 
 
 async def verification_progress(
-    sessions: async_sessionmaker[AsyncSession], task: TaskRecord
+    sessions: async_sessionmaker[AsyncSession], work: AgentWorkQueue, task_id: UUID
 ) -> VerificationProgress | None:
-    """None when ``task`` is not a verification of FORGE work (it then completes as before)."""
-    forge_ids = await forge_dependencies(sessions, task.id)
+    """None when the task is not a verification of FORGE work (it then completes as before)."""
+    forge_ids = await forge_dependencies(work, task_id)
     if not forge_ids:
         return None
     statement = (
@@ -69,12 +59,6 @@ async def verification_progress(
     return VerificationProgress(forge_task_ids=forge_ids, run=run)
 
 
-async def waiting_verification_tasks(
-    sessions: async_sessionmaker[AsyncSession],
-) -> list[TaskRecord]:
-    statement = select(TaskRecord).where(
-        TaskRecord.assigned_agent == AgentId.LEDGER.value,
-        TaskRecord.state == TaskStatus.WAITING_FOR_VERIFICATION.value,
-    )
-    async with sessions() as session:
-        return list(await session.scalars(statement))
+async def waiting_verification_tasks(work: AgentWorkQueue) -> list[WorkItem]:
+    """LEDGER's own tasks parked until their independent test run has a verdict."""
+    return await work.open_tasks(states={TaskStatus.WAITING_FOR_VERIFICATION}, limit=MAX_LIMIT)

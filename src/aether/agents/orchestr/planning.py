@@ -105,9 +105,18 @@ async def build_objective_plan(env: Env, objective: ObjectiveRecord) -> PlanDocu
     if refined is None:
         return PlanDocument(kind=kind, tasks=tuple(base))
     _, refinement = refined
-    candidate_kind = parse_kind(refinement.kind) or kind
+    # The plan kind (which routes the whole template) is decided by the deterministic classifier;
+    # a model suggestion is only recorded, so the same objective always gets the same plan shape.
+    suggested = parse_kind(refinement.kind)
+    if suggested is not None and suggested is not kind:
+        await env.store.record_decision(
+            "plan_kind_suggestion_ignored",
+            f"kept deterministic kind {kind.value}; model suggested {suggested.value}",
+            key=f"orchestr:plan-kind:{objective.id}",
+            objective_id=objective.id,
+        )
     try:
-        merged = apply_refinement(template(candidate_kind), refinement, env.limits)
+        merged = apply_refinement(template(kind), refinement, env.limits)
     except PlanError as error:
         await env.store.record_decision(
             "plan_refinement_rejected",
@@ -116,7 +125,7 @@ async def build_objective_plan(env: Env, objective: ObjectiveRecord) -> PlanDocu
             objective_id=objective.id,
         )
         return PlanDocument(kind=kind, tasks=tuple(base))
-    return PlanDocument(kind=candidate_kind, tasks=tuple(merged), source="template+llm")
+    return PlanDocument(kind=kind, tasks=tuple(merged), source="template+llm")
 
 
 async def load_plan(env: Env, objective: ObjectiveRecord) -> PlanDocument | None:

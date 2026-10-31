@@ -30,15 +30,29 @@ Supply trusted `default_sources`, or encode explicit sources in the request's
 Each source is a bounded investigation with an optional `purpose`. Free-text
 scope describes research; it never grants network/device authorization or
 generates arbitrary tool commands. With no sources configured, findings remain
-untested. Tools are limited to `read_file` and GET `http_request`, using their
-existing confined-file and allowlisted-network policies. Approval waits stop
+untested. Tools are limited to `read_file`, GET `http_request` and the read-only
+web research tools, using their existing confined-file and allowlisted-network
+policies. Approval waits stop
 work; a matching, persisted, current WARDEN decision makes a waiting task ready
 for the scheduler, without executing it inline.
+
+Web source kinds (`web`, `pypi`, `github`, `github_search`, `docs` with a `query`)
+map to `web.extract`, `pypi.package`, `github.repo`, `github.search` and
+`docs.search`. These are `web_fetch` operations, limited to `AETHER_WEB_ALLOWED_HOSTS`,
+that honour robots.txt and are rate-limited and cached. With
+`ResearchLimits.web_research` enabled and no scoped or default sources, SCOUT
+and ROGUE derive a documentation search and a GitHub repository search from the
+question's keywords. ROGUE reads the GitHub search first and follows up on up to
+`web_follow_ups` validated `owner/repo` names; each follow-up consumes source
+budget. Unavailable web sources (robots.txt, policy, HTTP errors) are skipped
+with `research.source_skipped` instead of failing the task. Evidence cites the
+source URL and the hash of the returned text. See `docs/web-research.md`.
 
 Questions, excerpts and candidate proposals are quoted `UntrustedContent`.
 Instruction-like source content is quarantined, never used for model decisions,
 and cannot change permissions. Models cannot assert verified classification or
-invent evidence indices. Summaries and rankings are JSON-schema validated;
+invent evidence indices; a hypothesis that cites no evidence is stored as untested
+(`settle_classification`). Summaries and rankings are JSON-schema validated;
 unavailable, over-budget or invalid responses use deterministic fallbacks. When
 no model answers, conventional (SCOUT) research still adopts a
 "Standard-library implementation" at confidence 0.65 if all evidence is clean,

@@ -205,7 +205,7 @@ class LedgerAgent(BaseAgent):
 
     async def execute_task(self, task: TaskRecord, ctx: AgentContext) -> TaskResult:
         """Answer the operational snapshot; a verification task first needs a real test run."""
-        progress = await verification_progress(ctx.sessions, task)
+        progress = await verification_progress(ctx.sessions, self.work_queue(ctx), task.id)
         if progress is not None and not progress.finished and task.requirement_id is not None:
             return TaskResult(
                 status=TaskResultStatus.WAITING_FOR_VERIFICATION,
@@ -227,8 +227,9 @@ class LedgerAgent(BaseAgent):
 
     async def _resume_verification_tasks(self, ctx: AgentContext) -> list[UUID]:
         resumed: list[UUID] = []
-        for task in await waiting_verification_tasks(ctx.sessions):
-            progress = await verification_progress(ctx.sessions, task)
+        work = self.work_queue(ctx)
+        for task in await waiting_verification_tasks(work):
+            progress = await verification_progress(ctx.sessions, work, task.id)
             if progress is None or not progress.finished:
                 continue
             try:

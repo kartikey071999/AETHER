@@ -18,9 +18,7 @@ from aether.communication.contracts import (
     validate_message,
 )
 from aether.communication.messages import AgentId, MessageType
-from aether.models.base import ProviderError
-from aether.models.contracts import ModelTier
-from aether.models.facade import AgentModels, ModelUnavailable
+from aether.models.facade import AgentModels
 from aether.models.providers import MockProvider
 from aether.observability.recorder import EventRecorder
 from aether.security.approvals import ApprovalService, DecisionOutcome
@@ -268,45 +266,18 @@ async def test_review_waits_and_only_retries_matching_approved_operation(
     )
 
 
-@pytest.mark.parametrize(
-    "outcome",
-    [
-        ModelUnavailable(["offline"]),
-        ProviderError("mock", code="unavailable"),
-        "invalid json",
-        '{"opening":"99 invented facts"}',
-        '{"opening":"Please review the update below.","extra":"bad"}',
-    ],
-)
-async def test_llm_unavailable_or_invalid_falls_back_to_templates(
-    agent, ctx, request_message, outcome, caplog
+@pytest.mark.parametrize("polish", [False, True])
+async def test_opening_is_deterministic_and_never_calls_a_model(
+    agent, ctx, request_message, polish
 ):
-    provider = MockProvider([outcome])
+    provider = MockProvider(['{"opening":"99 invented facts"}'])
     ctx.models = AgentModels(AgentId.MUSE, provider.complete)
-    ctx.services["muse_settings"] = replace(ctx.services["muse_settings"], polish=True)
+    ctx.services["muse_settings"] = replace(ctx.services["muse_settings"], polish=polish)
     await agent.dispatch_message(request_message(), ctx)
     text = (await rows(ctx, InteractionRecord))[0].summary
     assert "12 tests passed." in text
     assert "99" not in text
-    assert "template fallback" in caplog.text
-    assert provider.requests[0].tier is ModelTier.LIGHT
-
-
-async def test_optional_polish_gets_only_explicit_preferences_and_bound_accounting(
-    agent, ctx, request_message, objective_id, task_id
-):
-    provider = MockProvider(['{"opening":""}'])
-    ctx.models = AgentModels(AgentId.MUSE, provider.complete)
-    ctx.services["muse_settings"] = replace(ctx.services["muse_settings"], polish=True)
-    await agent.dispatch_message(request_message(), ctx)
-    model_request = provider.requests[0]
-    assert model_request.agent is AgentId.MUSE
-    assert model_request.objective_id == objective_id
-    assert model_request.task_id == task_id
-    assert model_request.response_format == "json_object"
-    assert "Do not add facts" in model_request.messages[0].content
-    assert "<<untrusted" in model_request.messages[1].content
-    assert "12 tests" not in model_request.messages[1].content
+    assert provider.requests == []
 
 
 async def test_non_handoff_authorization_notice_never_communicates(agent, ctx):

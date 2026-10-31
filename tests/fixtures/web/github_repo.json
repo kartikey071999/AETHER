@@ -1,0 +1,17 @@
+{
+  "full_name": "example/http",
+  "description": "A small, typed HTTP client (offline test fixture).",
+  "html_url": "https://github.com/example/http",
+  "homepage": "https://docs.example.org/",
+  "language": "Python",
+  "license": {"key": "bsd-3-clause", "name": "BSD 3-Clause License", "spdx_id": "BSD-3-Clause"},
+  "stargazers_count": 1234,
+  "forks_count": 56,
+  "open_issues_count": 7,
+  "default_branch": "main",
+  "archived": false,
+  "fork": false,
+  "created_at": "2019-01-01T00:00:00Z",
+  "pushed_at": "2026-09-30T12:00:00Z",
+  "topics": ["http", "client", "asyncio"]
+}

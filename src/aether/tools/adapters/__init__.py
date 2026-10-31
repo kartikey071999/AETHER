@@ -1,5 +1,7 @@
 """Safe execution adapters. Each refuses to act without a matching single-use Authorization."""
 
+from collections.abc import Awaitable, Callable
+
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -18,6 +20,7 @@ from aether.tools.adapters.subprocess import (
     scrub_environment,
 )
 from aether.tools.registry import Tool, ToolRegistry
+from aether.tools.web import SafeWeb, WebSettings, register_web_tools
 
 
 def build_default_registry(
@@ -27,9 +30,12 @@ def build_default_registry(
     *,
     http_transport: httpx.AsyncBaseTransport | None = None,
     http_resolver: Resolver | None = None,
+    web_settings: WebSettings | None = None,
+    web_sleep: Callable[[float], Awaitable[None]] | None = None,
 ) -> ToolRegistry:
-    """Registry with the standard tools: run_process, http_request, read_file, write_file and
-    deliver_outbox_message."""
+    """Registry with the standard tools: run_process, http_request, read_file, write_file,
+    deliver_outbox_message and the read-only web research tools (web.fetch, web.extract,
+    web.links, pypi.package, github.repo, github.search and docs.search)."""
     registry = ToolRegistry(permissions)
     files = SafeFiles(permissions)
     registry.register(
@@ -72,6 +78,18 @@ def build_default_registry(
             OutboxDelivery(permissions),
             "Create one new markdown message file directly in the data outbox (never overwrites).",
         )
+    )
+    register_web_tools(
+        registry,
+        SafeWeb(
+            permissions,
+            sessions,
+            recorder,
+            web_settings,
+            transport=http_transport,
+            **({"resolver": http_resolver} if http_resolver is not None else {}),
+            **({"sleep": web_sleep} if web_sleep is not None else {}),
+        ),
     )
     return registry
 

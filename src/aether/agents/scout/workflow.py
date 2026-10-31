@@ -20,6 +20,7 @@ from aether.agents.scout.schemas import (
     ResearchWork,
     SourceSpec,
 )
+from aether.agents.work_queue import MAX_LIMIT, work_queue
 from aether.communication.bus import MessageBus
 from aether.communication.contracts import (
     CandidateApproach,
@@ -175,10 +176,16 @@ async def _enqueue(
     ctx: AgentContext,
 ) -> UUID:
     key = f"research:{agent.value}:{message.message_id}"
+    queue = work_queue(ctx, agent)
+    existing = await queue.task_by_key(key)
+    if existing is not None:
+        return existing.id
+    # FAILED tasks may still be retried, so they keep occupying the research queue.
+    tasks = [
+        *await queue.open_tasks(limit=MAX_LIMIT),
+        *await queue.finished_tasks(states={TaskStatus.FAILED}, limit=MAX_LIMIT),
+    ]
     async with ctx.sessions() as session:
-        existing = await session.scalar(select(TaskRecord).where(TaskRecord.idempotency_key == key))
-        if existing is not None:
-            return existing.id
         objective = await session.get(ObjectiveRecord, request.objective_id)
         if objective is None:
             raise LookupError("research objective does not exist")
@@ -192,17 +199,12 @@ async def _enqueue(
             if parent is None or parent.objective_id != request.objective_id:
                 raise ValueError("research parent task must belong to the owning objective")
         investigations(request, limits)
-        active = select(TaskRecord).where(
-            TaskRecord.assigned_agent == agent.value,
-            TaskRecord.state.not_in([TaskStatus.COMPLETED, TaskStatus.CANCELLED]),
-        )
-        tasks = list(await session.scalars(active))
         expired_ids: set[UUID] = set()
         for task in tasks:
             if (
                 task.deadline
-                and as_utc(task.deadline) <= ctx.clock()
-                and TaskStatus.CANCELLED in ALLOWED_TASK_TRANSITIONS[TaskStatus(task.state)]
+                and task.deadline <= ctx.clock()
+                and TaskStatus.CANCELLED in ALLOWED_TASK_TRANSITIONS[task.state]
             ):
                 expired_ids.add(task.id)
         generated = list(
@@ -291,15 +293,13 @@ async def generate_objective(
 ) -> UUID:
     async with atomic_research(ctx) as transaction:
         now = ctx.clock()
+        if origin_message_id is not None:
+            existing = await work_queue(transaction, agent).task_by_key(
+                f"research:{agent.value}:{origin_message_id}"
+            )
+            if existing is not None:
+                return existing.objective_id
         async with transaction.sessions() as session:
-            if origin_message_id is not None:
-                existing = await session.scalar(
-                    select(TaskRecord).where(
-                        TaskRecord.idempotency_key == f"research:{agent.value}:{origin_message_id}"
-                    )
-                )
-                if existing is not None:
-                    return existing.objective_id
             count = await session.scalar(
                 select(func.count())
                 .select_from(ObjectiveRecord)
@@ -355,13 +355,16 @@ async def generate_objective(
 
 def investigations(request: ResearchRequestPayload, limits: ResearchLimits) -> list[SourceSpec]:
     scope = request.scope.strip()
-    sources = (
-        ResearchScope.model_validate_json(scope).sources
-        if scope.startswith("{")
-        else list(limits.default_sources)
-    )
+    if scope.startswith("{"):
+        sources = ResearchScope.model_validate_json(scope).sources
+    elif limits.default_sources:
+        sources = list(limits.default_sources)
+    elif limits.web_research:
+        sources = web_sources(request.question, limits)
+    else:
+        sources = []
     unique = {
-        (source.kind, source.location): source
+        (source.kind, source.location, source.query): source
         for source in sources
         if source.perspective in {"both", request.mode.value}
     }
@@ -369,6 +372,141 @@ def investigations(request: ResearchRequestPayload, limits: ResearchLimits) -> l
     if request.mode is ResearchMode.UNCONVENTIONAL:
         selected.reverse()
     return selected[: request.budget.max_sources]
+
+
+_STOPWORDS = frozenset(
+    [
+        "about",
+        "after",
+        "also",
+        "and",
+        "any",
+        "are",
+        "best",
+        "between",
+        "can",
+        "could",
+        "does",
+        "each",
+        "for",
+        "from",
+        "have",
+        "how",
+        "into",
+        "its",
+        "library",
+        "libraries",
+        "more",
+        "most",
+        "new",
+        "not",
+        "our",
+        "should",
+        "than",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "use",
+        "used",
+        "using",
+        "want",
+        "what",
+        "when",
+        "where",
+        "which",
+        "while",
+        "who",
+        "why",
+        "will",
+        "with",
+        "would",
+        "you",
+        "your",
+        "python",
+        "package",
+        "packages",
+        "tool",
+        "tools",
+        "way",
+        "ways",
+    ]
+)
+_SEARCH_WORD = re.compile(r"[a-z0-9][a-z0-9_+.-]*")
+_GITHUB_FULL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$")
+
+
+def search_terms(question: str, limit: int = 6) -> str:
+    """Distinctive keywords of ``question`` for documentation and repository searches."""
+    words = (word.strip(".-+") for word in _SEARCH_WORD.findall(question.lower()))
+    kept = [word for word in words if len(word) > 2 and word not in _STOPWORDS]
+    return " ".join(list(dict.fromkeys(kept))[:limit])[:200]
+
+
+def web_sources(question: str, limits: ResearchLimits) -> list[SourceSpec]:
+    """Derived web sources: documentation (conventional) and GitHub (unconventional) searches."""
+    terms = search_terms(question)
+    if not terms:
+        return []
+    return [
+        SourceSpec(
+            kind="docs",
+            location=limits.docs_base_url,
+            query=terms,
+            purpose="Search reference documentation",
+        ),
+        SourceSpec(
+            kind="github_search",
+            location=terms,
+            purpose="Find existing implementations",
+        ),
+    ]
+
+
+def tool_request(source: SourceSpec, question: str) -> tuple[str, dict[str, object]]:
+    """The registry tool and arguments that read ``source``."""
+    if source.kind == "http":
+        return "http_request", {"url": source.location, "method": "GET"}
+    if source.kind == "file":
+        return "read_file", {"path": source.location, "max_bytes": 16384}
+    if source.kind == "web":
+        return "web.extract", {"url": source.location}
+    if source.kind == "pypi":
+        return "pypi.package", {"name": source.location}
+    if source.kind == "github":
+        owner, _, repo = source.location.partition("/")
+        return "github.repo", {"owner": owner, "repo": repo}
+    if source.kind == "github_search":
+        return "github.search", {"query": source.location}
+    return "docs.search", {
+        "base_url": source.location,
+        "query": source.query or search_terms(question) or question[:200],
+    }
+
+
+def github_follow_ups(facts: object, limit: int) -> list[SourceSpec]:
+    """``github`` sources for the top repositories of a github.search result.
+
+    The names come from untrusted search data, so they only ever become validated
+    ``owner/repo`` arguments of the read-only github.repo tool, never free-form requests.
+    """
+    if not isinstance(facts, dict) or not isinstance(facts.get("repositories"), list):
+        return []
+    follow_ups: list[SourceSpec] = []
+    for hit in facts["repositories"]:
+        name = hit.get("full_name") if isinstance(hit, dict) else None
+        if isinstance(name, str) and _GITHUB_FULL_NAME.match(name):
+            follow_ups.append(
+                SourceSpec(kind="github", location=name, purpose="Inspect a candidate repository")
+            )
+        if len(follow_ups) >= limit:
+            break
+    return follow_ups
 
 
 async def reserve_budget(
@@ -528,6 +666,17 @@ async def stored_finding(
         )
 
 
+def settle_classification(draft: FindingDraft) -> FindingDraft:
+    """Code, not the model, decides evidence-dependent labels.
+
+    A hypothesis must rest on cited evidence; one that cites nothing is recorded as untested.
+    (``VERIFIED`` is already refused by ``FindingDraft`` itself.)
+    """
+    if draft.classification is FindingClassification.HYPOTHESIS and not draft.evidence_indices:
+        return draft.model_copy(update={"classification": FindingClassification.UNTESTED})
+    return draft
+
+
 async def save_finding(
     agent: AgentId,
     work: ResearchWork,
@@ -539,6 +688,7 @@ async def save_finding(
         raise ValueError("a persisted research task is required to save a finding")
     if any(index < 0 or index >= len(contents) for index in draft.evidence_indices):
         raise ValueError("model cited evidence that was not collected")
+    draft = settle_classification(draft)
     async with atomic_research(ctx) as transaction:
         existing = await stored_finding(agent, work.request.task_id, transaction)
         if existing is not None:

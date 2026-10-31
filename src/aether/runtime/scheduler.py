@@ -169,18 +169,34 @@ class Scheduler:
         return None
 
     def _score(self, candidate: SchedulingCandidate, now: datetime) -> float:
-        age_hours = max(0.0, (now - candidate.waiting_since).total_seconds() / 3600)
-        aging = min(
-            age_hours * self._policy.priority_aging_points_per_hour,
-            self._policy.max_aging_points,
+        return effective_priority(
+            candidate.priority,
+            waiting_since=candidate.waiting_since,
+            deadline=candidate.deadline,
+            now=now,
+            policy=self._policy,
         )
-        urgency = 0.0
-        if candidate.deadline is not None:
-            hours_until_deadline = (candidate.deadline - now).total_seconds() / 3600
-            if hours_until_deadline <= 0:
-                urgency = 50.0
-            elif hours_until_deadline <= 1:
-                urgency = 30.0
-            elif hours_until_deadline <= 24:
-                urgency = 10.0
-        return candidate.priority + aging + urgency
+
+
+def effective_priority(
+    priority: int,
+    *,
+    waiting_since: datetime,
+    now: datetime,
+    deadline: datetime | None = None,
+    policy: SchedulerPolicy | None = None,
+) -> float:
+    """Base priority plus capped wait-time aging plus deadline urgency (pure, deterministic)."""
+    rules = policy or SchedulerPolicy()
+    age_hours = max(0.0, (now - waiting_since).total_seconds() / 3600)
+    aging = min(age_hours * rules.priority_aging_points_per_hour, rules.max_aging_points)
+    urgency = 0.0
+    if deadline is not None:
+        hours_until_deadline = (deadline - now).total_seconds() / 3600
+        if hours_until_deadline <= 0:
+            urgency = 50.0
+        elif hours_until_deadline <= 1:
+            urgency = 30.0
+        elif hours_until_deadline <= 24:
+            urgency = 10.0
+    return priority + aging + urgency

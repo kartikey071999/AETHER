@@ -235,6 +235,21 @@ async def test_valid_llm_refinement_adds_tasks(harness: Harness) -> None:
     assert len(provider.requests) == 1
 
 
+async def test_llm_cannot_change_the_deterministic_plan_kind(harness: Harness) -> None:
+    models, provider = _models('{"kind": "research", "extra_tasks": []}')
+    harness.ctx.models = models
+    objective_id = await harness.objective()
+    tasks = await harness.tasks(objective_id)
+    assert len(provider.requests) == 1
+    # Still the capability template the classifier chose, not the research one suggested.
+    assert len(tasks) == 6
+    assert "security_review" in tasks
+    ignored = await harness.store.get_decision(f"orchestr:plan-kind:{objective_id}")
+    assert ignored is not None
+    sent = " ".join(message.content for message in provider.requests[0].messages)
+    assert 'leave "kind" null' in sent
+
+
 async def test_prompt_marks_objective_text_untrusted(harness: Harness) -> None:
     models, provider = _models('{"extra_tasks": []}')
     harness.ctx.models = models

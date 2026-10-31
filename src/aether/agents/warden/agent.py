@@ -401,14 +401,8 @@ class WardenAgent(BaseAgent):
         await AuthorizationRequestRepository(ctx.sessions).expire_overdue(
             actor=_ACTOR, now=ctx.clock()
         )
-        async with ctx.sessions() as session:
-            waiting = list(
-                await session.scalars(
-                    select(TaskRecord.id).where(
-                        TaskRecord.state == TaskStatus.WAITING_FOR_APPROVAL.value
-                    )
-                )
-            )
+        # Oldest first and bounded; a periodic sweep picks up any remainder next tick.
+        waiting = [item.id for item in await self.work_queue(ctx).waiting_for_approval()]
         for task_id in waiting:
             async with ctx.sessions() as session:
                 decision = await session.scalar(
