@@ -469,14 +469,18 @@ def restrictions_for(
         restrictions.append(f"max_output_bytes={policy.max_output_bytes}")
     elif kind in (_K.PACKAGE_INSTALL, _K.REPO_CLONE):
         restrictions.append(f"max_runtime_seconds={_seconds(policy.subprocess_timeout_seconds)}")
-    elif kind is _K.HTTP_REQUEST:
+    elif kind in (_K.HTTP_REQUEST, _K.WEB_FETCH):
         restrictions.append(f"max_runtime_seconds={_seconds(policy.http_timeout_seconds)}")
         restrictions.append(f"max_output_bytes={policy.max_response_bytes}")
     elif kind is _K.FILE_READ:
         restrictions.append("read_only")
         restrictions.append(f"max_output_bytes={policy.max_output_bytes}")
     hosts = _hosts(operation)
-    if kind in NETWORK_KINDS and hosts and all(policy.is_host_allowed(host) for host in hosts):
+    if (
+        kind in NETWORK_KINDS
+        and hosts
+        and all(policy.host_allowed_for(kind, host) for host in hosts)
+    ):
         restrictions.append(f"allowed_hosts={','.join(hosts)}")
     return tuple(restrictions)
 

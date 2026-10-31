@@ -278,7 +278,7 @@ class PermissionService:
             return checked
         limits = parse_restrictions(checked.restrictions)
         if limits.allowed_hosts is not None and any(
-            not policy.is_host_allowed(host) for host in limits.allowed_hosts
+            not policy.host_allowed_for(operation.kind, host) for host in limits.allowed_hosts
         ):
             return _Block(
                 BlockReason.POLICY_VIOLATION,
