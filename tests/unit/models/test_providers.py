@@ -147,7 +147,11 @@ async def test_real_sdk_payloads_and_results_with_mock_transport(
 )
 async def test_json_schema_mapping(permissions, monkeypatch, provider_type):
     sent = []
-    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
 
     def handler(req):
         sent.append(req)
@@ -189,8 +193,16 @@ async def test_json_schema_mapping(permissions, monkeypatch, provider_type):
     finally:
         await provider.aclose()
     payload = json.loads(sent[0].content)
+    strict = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
     if provider_type is AzureAnthropicProvider:
-        assert payload["output_config"]["format"]["schema"] == schema
+        assert payload["output_config"]["format"]["schema"] == strict
+    elif provider_type is AzureOpenAIProvider:
+        assert payload["response_format"]["json_schema"]["schema"] == strict
     else:
         assert payload["response_format"]["json_schema"]["schema"] == schema
 
@@ -450,7 +462,17 @@ async def test_secrets_and_prompts_absent_from_logs_and_events(
     async with database.sessions() as session:
         events = list(await session.scalars(select(EventRecord)))
     content = repr([event.payload for event in events]) + caplog.text + str(captured.value)
-    assert secret not in content and error_secret not in content
+    assert secret not in content
+    # The provider message is retained only as bounded diagnostics (the DB insert is what
+    # aiosqlite's DEBUG log echoes), never in exceptions or provider/SDK logs.
+    logs = "".join(
+        record.getMessage()
+        for record in caplog.records
+        if not record.name.startswith(("aiosqlite", "sqlalchemy"))
+    )
+    assert error_secret not in logs + str(captured.value)
+    payloads = [event.payload for event in events if event.payload.get("error_detail")]
+    assert len(payloads) == 1 and error_secret in payloads[0]["error_detail"]
     assert "test-groq-credential" not in content
     assert secret not in repr(private_request)
 

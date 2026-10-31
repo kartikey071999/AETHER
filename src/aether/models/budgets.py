@@ -9,7 +9,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from aether.models.base import EmptyCompletion
+from aether.models.base import EmptyCompletion, ProviderError
 from aether.models.contracts import CompletionRequest, CompletionResponse, ModelInfo
 from aether.models.costs import estimate_cost
 from aether.models.settings import BudgetPolicy, ProviderSettings
@@ -287,6 +287,9 @@ class BudgetGuard:
                         "status": status,
                         "attempt": attempt,
                         "error_type": type(error).__name__ if error else None,
+                        "error_detail": (
+                            error.detail if isinstance(error, ProviderError) else None
+                        ),
                         "usage_estimated": estimated,
                         "cost_estimate_unknown": unknown,
                         **(routing or {}),

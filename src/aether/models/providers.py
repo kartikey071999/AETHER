@@ -1,5 +1,6 @@
 """Async SDK integrations. Construction does not contact a provider."""
 
+import json
 from collections import deque
 from typing import Any
 
@@ -16,6 +17,7 @@ from aether.models.contracts import (
     ModelTier,
     ProviderHealth,
 )
+from aether.models.schemas import Flavour, strict_json_schema
 from aether.models.settings import ProviderSettings
 from aether.models.transport import (
     HttpResponse,
@@ -30,15 +32,45 @@ _REASONING = frozenset({ModelTier.STANDARD, ModelTier.REASONING, ModelTier.PREMI
 _LIGHT = frozenset({ModelTier.LIGHT, ModelTier.STANDARD})
 
 
-def _response_format(request: CompletionRequest) -> dict[str, Any]:
+def _response_format(
+    request: CompletionRequest, *, flavour: Flavour | None = None
+) -> dict[str, Any]:
     if request.json_schema is not None:
+        schema = (
+            strict_json_schema(request.json_schema, flavour=flavour)
+            if flavour is not None
+            else request.json_schema
+        )
         return {
             "type": "json_schema",
-            "json_schema": {"name": "completion", "strict": True, "schema": request.json_schema},
+            "json_schema": {"name": "completion", "strict": True, "schema": schema},
         }
     if request.response_format == "json_schema":
         raise ProviderError(request.provider or "unknown", code="json_schema_required")
     return {"type": request.response_format}
+
+
+def _schema_instruction(request: CompletionRequest) -> str:
+    return (
+        "Respond with a single JSON object and nothing else (no prose, no code fences) "
+        "that conforms to this JSON schema:\n"
+        + json.dumps(request.json_schema, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+def _json_text(provider: str, text: str) -> str:
+    """The completion's JSON object, tolerating a code fence; anything else is unusable."""
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        candidate = candidate.removeprefix("```json").removeprefix("```").removesuffix("```")
+        candidate = candidate.strip()
+    try:
+        parsed = json.loads(candidate)
+    except ValueError:
+        raise ProviderError(provider, code="invalid_json") from None
+    if not isinstance(parsed, dict):
+        raise ProviderError(provider, code="invalid_json")
+    return candidate
 
 
 class _ChatMessage(BaseModel):
@@ -188,13 +220,30 @@ class AzureOpenAIProvider(RemoteProvider):
         if self.client is None:
             raise ProviderError(self.name, code="unavailable")
         options = {"temperature": request.temperature} if request.temperature is not None else {}
-        result = await self.client.chat.completions.create(
-            model=request.model,
-            messages=[message.model_dump() for message in request.messages],
-            max_completion_tokens=request.max_tokens,
-            response_format=_response_format(request),
-            **options,
-        )
+        messages = [message.model_dump() for message in request.messages]
+        try:
+            result = await self.client.chat.completions.create(
+                model=request.model,
+                messages=messages,
+                max_completion_tokens=request.max_tokens,
+                response_format=_response_format(request, flavour="openai"),
+                **options,
+            )
+        except openai.BadRequestError:
+            if request.json_schema is None:
+                raise
+            # The schema was rejected: one retry in plain JSON mode; the caller validates locally.
+            result = await self.client.chat.completions.create(
+                model=request.model,
+                messages=[{"role": "system", "content": _schema_instruction(request)}, *messages],
+                max_completion_tokens=request.max_tokens,
+                response_format={"type": "json_object"},
+                **options,
+            )
+            response = _chat_response(request, self.name, result.model_dump())
+            if not response.text.strip():
+                return response
+            return response.model_copy(update={"text": _json_text(self.name, response.text)})
         return _chat_response(request, self.name, result.model_dump())
 
     async def _probe(self) -> object:
@@ -267,29 +316,49 @@ class AzureAnthropicProvider(RemoteProvider):
         if request.temperature is not None:
             raise ProviderError(self.name, code="temperature_unsupported")
         options: dict[str, Any] = {}
+        system = "\n\n".join(
+            message.content for message in request.messages if message.role == "system"
+        )
         if request.json_schema is not None:
             options["output_config"] = {
-                "format": {"type": "json_schema", "schema": request.json_schema}
+                "format": {
+                    "type": "json_schema",
+                    "schema": strict_json_schema(request.json_schema, flavour="anthropic"),
+                }
             }
         elif request.response_format != "text":
             raise ProviderError(self.name, code="json_schema_required")
-        result = await self.client.messages.create(
-            model=request.model,
-            messages=[
-                message.model_dump() for message in request.messages if message.role != "system"
-            ],
-            system="\n\n".join(
-                message.content for message in request.messages if message.role == "system"
-            ),
-            max_tokens=request.max_tokens,
-            **options,
-        )
+        messages = [
+            message.model_dump() for message in request.messages if message.role != "system"
+        ]
+        try:
+            result = await self.client.messages.create(
+                model=request.model,
+                messages=messages,
+                system=system,
+                max_tokens=request.max_tokens,
+                **options,
+            )
+        except anthropic.BadRequestError:
+            if request.json_schema is None:
+                raise
+            # The schema was rejected: one retry with prompt-level JSON instructions.
+            result = await self.client.messages.create(
+                model=request.model,
+                messages=messages,
+                system=f"{system}\n\n{_schema_instruction(request)}".strip(),
+                max_tokens=request.max_tokens,
+            )
+            fallback = True
+        else:
+            fallback = False
         try:
             data = _AnthropicResult.model_validate(result.model_dump())
         except ValidationError:
             raise ProviderError(self.name, code="invalid_response") from None
+        text = "".join(block.text for block in data.content if block.type == "text")
         return CompletionResponse(
-            text="".join(block.text for block in data.content if block.type == "text"),
+            text=_json_text(self.name, text) if fallback and text.strip() else text,
             model=request.model,
             provider=self.name,
             input_tokens=data.usage.input_tokens,
