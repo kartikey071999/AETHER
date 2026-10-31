@@ -104,9 +104,7 @@ class ModelServices:
         except NoModelAvailable as error:
             raise ModelUnavailable(error.reasons) from None
 
-    async def _report_unusable(
-        self, agent_id: AgentId, ctx: ModelCallContext, reason: str
-    ) -> None:
+    async def _report_unusable(self, agent_id: AgentId, ctx: ModelCallContext, reason: str) -> None:
         await self.governor.report_unusable(agent_id, ctx, reason)
 
     def contexts_for(
