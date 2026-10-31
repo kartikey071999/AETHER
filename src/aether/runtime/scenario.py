@@ -38,7 +38,6 @@ from aether.models.contracts import CompletionRequest, CompletionResponse
 from aether.observability.recorder import split_legacy_payload
 from aether.runtime.bootstrap import Runtime, build_runtime
 from aether.runtime.engine import EngineLimits
-from aether.runtime.settings import AgentRuntimeSettings
 from aether.security.policy import SecuritySettings
 from aether.storage.models import (
     Base,
@@ -331,9 +330,9 @@ def scenario_security(base: SecuritySettings | None = None) -> SecuritySettings:
 
 
 def scenario_runtime_settings(
-    *, timing: ScenarioTiming, max_replans: int = 2, base: AgentRuntimeSettings | None = None
-) -> AgentRuntimeSettings:
-    base = base or AgentRuntimeSettings(_env_file=None)
+    *, timing: ScenarioTiming, max_replans: int = 2, base: AetherSettings
+) -> AetherSettings:
+    """Return ``base`` with fast agent timing and scenario agent limits (runtime settings live on it)."""
     return base.model_copy(
         update={
             "agent_tick_seconds": timing.tick_seconds,
@@ -355,10 +354,8 @@ def scenario_runtime_settings(
     )
 
 
-def scenario_engine_limits(
-    settings: AetherSettings, runtime_settings: AgentRuntimeSettings, timing: ScenarioTiming
-) -> EngineLimits:
-    return EngineLimits.from_settings(settings, runtime_settings).model_copy(
+def scenario_engine_limits(settings: AetherSettings, timing: ScenarioTiming) -> EngineLimits:
+    return EngineLimits.from_settings(settings).model_copy(
         update={
             "scheduler_interval_seconds": timing.poll_seconds,
             "message_poll_seconds": timing.poll_seconds,
@@ -396,18 +393,17 @@ class CapabilityScenario:
     runtime: Runtime | None = None
 
     async def start(self) -> Runtime:
-        runtime_settings = scenario_runtime_settings(
-            timing=self.timing, max_replans=self.max_replans
+        settings = scenario_runtime_settings(
+            timing=self.timing, max_replans=self.max_replans, base=self.settings
         )
-        write_reference_source(self.settings)
+        write_reference_source(settings)
         runtime = build_runtime(
-            self.settings,
+            settings,
             security_settings=scenario_security(self.security_settings),
             provider_settings=self.provider_settings
             or ProviderSettings(_env_file=None, mock=True, max_retries=0),
             model_providers=self.model_providers,
-            runtime_settings=runtime_settings,
-            engine_limits=scenario_engine_limits(self.settings, runtime_settings, self.timing),
+            engine_limits=scenario_engine_limits(settings, self.timing),
         )
         self.runtime = runtime
         try:

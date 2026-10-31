@@ -25,4 +25,11 @@ class OrchestrLimits(BaseModel):
     max_agent_boost_points: float = Field(default=15.0, ge=0.0)
     llm_refinement: bool = True
     deadline_escalation_hours: float = Field(default=24.0, gt=0)
+    # Resource pressure: after `pressure_pause_after_ticks` consecutive pressured ticks ORCHESTR
+    # requests a pause of up to `pressure_max_pauses_per_tick` interruptible running tasks (0
+    # disables it); after `pressure_resume_after_ticks` calm ticks it resumes one of them.
+    pressure_pause_after_ticks: int = Field(default=3, ge=1)
+    pressure_resume_after_ticks: int = Field(default=2, ge=1)
+    pressure_max_pauses_per_tick: int = Field(default=1, ge=0)
+    pressure_min_available_ram_mb: int = Field(default=512, ge=0)
     priority: PriorityPolicy = Field(default_factory=PriorityPolicy)

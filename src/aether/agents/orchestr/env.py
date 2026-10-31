@@ -13,6 +13,7 @@ from aether.agents.orchestr.limits import LIMITS_SERVICE, OrchestrLimits
 from aether.agents.orchestr.store import OrchestrStore, stable_id
 from aether.communication.contracts import build_message
 from aether.communication.messages import AgentId, AgentMessage
+from aether.runtime.control import TASK_CONTROL_SERVICE, TaskControl
 from aether.runtime.resource_monitor import HostResources, ResourceMonitor
 from aether.runtime.scheduler import Scheduler, SchedulerPolicy
 from aether.storage.models import ObjectiveRecord
@@ -28,9 +29,14 @@ def as_utc(value: datetime) -> datetime:
 
 @dataclass(slots=True)
 class TickState:
-    """In-memory dedup for scheduler-decision events; losing it only repeats one event."""
+    """In-memory dedup for scheduler decisions and pressure streak counters.
+
+    Losing it (a restart) only repeats one decision event and restarts the streaks.
+    """
 
     last_signature: str | None = None
+    pressured_ticks: int = 0
+    calm_ticks: int = 0
 
 
 @dataclass(slots=True)
@@ -41,6 +47,7 @@ class Env:
     scheduler: Scheduler
     monitor: Monitor
     disk_path: Path
+    control: TaskControl | None = None
     state: TickState = field(default_factory=TickState)
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("aether.orchestr"))
 
@@ -114,6 +121,7 @@ def build_env(ctx: AgentContext, state: TickState | None = None) -> Env:
     services = ctx.services
     limits = services.get(LIMITS_SERVICE)
     policy = services.get("scheduler_policy")
+    control = services.get(TASK_CONTROL_SERVICE)
     return Env(
         ctx=ctx,
         store=OrchestrStore(ctx.sessions),
@@ -123,5 +131,6 @@ def build_env(ctx: AgentContext, state: TickState | None = None) -> Env:
         ),
         monitor=services.get("resource_monitor") or ResourceMonitor(),
         disk_path=Path(services.get("disk_path", ".")),
+        control=control if isinstance(control, TaskControl) else None,
         state=state or TickState(),
     )

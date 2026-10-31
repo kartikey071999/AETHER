@@ -21,7 +21,6 @@ from aether.runtime.models import ModelServices, allowlist_hosts, build_model_se
 from aether.runtime.resource_monitor import ResourceMonitor
 from aether.runtime.scheduler import Scheduler, SchedulerPolicy
 from aether.runtime.security import SecurityServices, build_security_services
-from aether.runtime.settings import AgentRuntimeSettings
 from aether.security.policy import SecuritySettings
 from aether.storage.database import Database
 from aether.storage.repositories.provider_usage import ProviderUsageRepository
@@ -35,7 +34,6 @@ def spool_path(settings: AetherSettings) -> Path:
 
 def agent_services(
     settings: AetherSettings,
-    runtime_settings: AgentRuntimeSettings,
     scheduler_policy: SchedulerPolicy,
     monitor: ResourceMonitor,
     agent_ids: Iterable[AgentId],
@@ -53,7 +51,7 @@ def agent_services(
             "resource_monitor": monitor,
             "scheduler_policy": scheduler_policy,
             "disk_path": settings.data_dir,
-            LIMITS_SERVICE: runtime_settings.orchestr,
+            LIMITS_SERVICE: settings.orchestr,
         },
         AgentId.MUSE: {"muse_settings": MuseSettings(data_dir=settings.data_dir)},
     }
@@ -140,19 +138,17 @@ def build_runtime(
     security_settings: SecuritySettings | None = None,
     provider_settings: ProviderSettings | None = None,
     model_providers: Sequence[ModelProvider] | None = None,
-    runtime_settings: AgentRuntimeSettings | None = None,
     engine_limits: EngineLimits | None = None,
 ) -> Runtime:
     """Construct the runtime; nothing touches the database until `Runtime.start`.
 
     ``model_providers`` replaces the providers built from ``provider_settings`` (used by tests).
-    ``runtime_settings`` holds agent tick intervals, task-control timing and agent limits.
+    Agent tick intervals, task-control timing and agent limits come from ``settings``.
     ``engine_limits`` replaces the limits derived from the settings (e.g. faster polling in
     end-to-end scenarios).
     """
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     provider_settings = provider_settings or ProviderSettings()
-    runtime_settings = runtime_settings or AgentRuntimeSettings()
     database = Database.from_settings(settings)
     recorder = EventRecorder(EventSpool(spool_path(settings)))
     # The only security services of the process; provider hosts join the allowlist before the
@@ -172,7 +168,7 @@ def build_runtime(
         recorder,
         providers=model_providers,
     )
-    limits = engine_limits or EngineLimits.from_settings(settings, runtime_settings)
+    limits = engine_limits or EngineLimits.from_settings(settings)
     scheduler_policy = SchedulerPolicy(
         max_concurrent_tasks=settings.max_concurrent_tasks,
         max_concurrent_builds=settings.max_concurrent_builds,
@@ -183,7 +179,7 @@ def build_runtime(
     if agents is None:
         agents = build_agents(
             options=runtime_agent_options(
-                data_dir=settings.data_dir, research_limits=runtime_settings.research
+                data_dir=settings.data_dir, research_limits=settings.research
             )
         )
     engine = Engine(
@@ -195,7 +191,7 @@ def build_runtime(
         security=security,
         models=models,
         agent_services=agent_services(
-            settings, runtime_settings, scheduler_policy, monitor, [a.agent_id for a in agents]
+            settings, scheduler_policy, monitor, [a.agent_id for a in agents]
         ),
     )
     return Runtime(

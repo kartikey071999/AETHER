@@ -165,8 +165,11 @@ async def _apply_status(
     tasks = await env.store.tasks_of(objective.id)
     if wanted is ObjectiveState.CANCELLED:
         for task in tasks:
-            if TaskStatus(task.state) in _CANCELLABLE:
+            state = TaskStatus(task.state)
+            if state in _CANCELLABLE:
                 await _move(env, task, TaskStatus.CANCELLED, "objective cancelled")
+            elif state is TaskStatus.RUNNING:
+                await _request_cancel(env, task, payload.reason)
     elif wanted in (ObjectiveState.PAUSED, ObjectiveState.DEFERRED):
         for task in tasks:
             if TaskStatus(task.state) is TaskStatus.READY:
@@ -179,6 +182,33 @@ async def _apply_status(
         if fresh is not None:
             await plan_objective(env, fresh)
     return f"status changed to {wanted.value}"
+
+
+async def _request_cancel(env: Env, task: TaskRecord, reason: str) -> None:
+    """Running work cannot be moved directly: ask the runtime to stop it cooperatively."""
+    detail = f"objective cancelled: {reason}"[:300]
+    if env.control is None:
+        await env.store.record_decision(
+            "task_cancel_unavailable",
+            "no task control service; running task left to finish",
+            key=f"orchestr:cancel-unavailable:{task.id}",
+            evidence=[detail],
+            objective_id=task.objective_id,
+            task_id=task.id,
+        )
+        return
+    try:
+        result = await env.control.request_cancel(task.id, reason=detail)
+    except LookupError:
+        return
+    await env.store.record_decision(
+        "task_cancel_requested",
+        detail,
+        key=f"orchestr:cancel-requested:{task.id}",
+        evidence=[result.outcome, result.state.value],
+        objective_id=task.objective_id,
+        task_id=task.id,
+    )
 
 
 async def _move(env: Env, task: TaskRecord, status: TaskStatus, reason: str) -> None:
