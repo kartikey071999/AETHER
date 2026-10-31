@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from aether.communication.messages import AgentId
 from aether.models.contracts import CompletionRequest, ModelTier
+from aether.models.facade import ModelCallContext
 from aether.security.untrusted import UntrustedContent
 from aether.skills.base import Skill, SkillContext, SkillError
 
@@ -179,9 +180,9 @@ class Summarise(Skill):
                                 "key_points.",
                             },
                         ],
-                        objective_id=ctx.objective_id,
-                        task_id=ctx.task_id,
-                    )
+                    ),
+                    # The facade attributes the call (budgets, governor) from this context only.
+                    ModelCallContext(task_id=ctx.task_id, objective_id=ctx.objective_id),
                 )
                 draft = _Draft.model_validate(json.loads(response.text))
                 return SummariseOutput(
@@ -201,8 +202,63 @@ class Summarise(Skill):
         )
 
 
+class StructuredInput(_Model):
+    instructions: str = Field(min_length=1, max_length=20_000)
+    data: str = Field(max_length=200_000)
+    json_schema: dict[str, Any]
+    tier: ModelTier = ModelTier.LIGHT
+    max_tokens: int = Field(default=2048, ge=1, le=32_768)
+    max_tokens_cap: int = Field(default=8192, ge=1, le=32_768)
+
+
+class StructuredOutput(_Model):
+    # ``None`` means "no usable model answer": the caller applies its deterministic fallback.
+    value: dict[str, Any] | None
+    reason: str | None = None
+
+
+class Structured(Skill):
+    """One structured-JSON completion through the agent's model facade; never raises on models."""
+
+    name: ClassVar[str] = "llm.structured"
+    description: ClassVar[str] = (
+        "Structured JSON completion via the agent's models (None = fall back)."
+    )
+    input_model: ClassVar[type[BaseModel]] = StructuredInput
+    output_model: ClassVar[type[BaseModel]] = StructuredOutput
+    owners: ClassVar[frozenset[AgentId]] = frozenset(AgentId)
+    side_effects: ClassVar[bool] = True  # spends model budget
+
+    async def run(self, inputs: BaseModel, ctx: SkillContext) -> BaseModel:
+        assert isinstance(inputs, StructuredInput)
+        models = ctx.agent_ctx.models
+        if models is None:
+            return StructuredOutput(value=None, reason="not_configured")
+        try:
+            response = await models.complete(
+                CompletionRequest(
+                    tier=inputs.tier,
+                    response_format="json_schema",
+                    json_schema=inputs.json_schema,
+                    max_tokens=inputs.max_tokens,
+                    max_tokens_cap=inputs.max_tokens_cap,
+                    messages=[
+                        {"role": "system", "content": inputs.instructions},
+                        {"role": "user", "content": inputs.data},
+                    ],
+                ),
+                ModelCallContext(task_id=ctx.task_id, objective_id=ctx.objective_id),
+            )
+            value = json.loads(response.text)
+        except Exception as error:  # noqa: BLE001 - any model problem means "fall back"
+            return StructuredOutput(value=None, reason=type(error).__name__)
+        if not isinstance(value, dict):
+            return StructuredOutput(value=None, reason="not_an_object")
+        return StructuredOutput(value=value)
+
+
 def builtin_skills() -> list[Skill]:
-    return [WebGather(), ScreenUntrusted(), Summarise()]
+    return [WebGather(), ScreenUntrusted(), Summarise(), Structured()]
 
 
 def skill_names(skills: list[Any]) -> list[str]:

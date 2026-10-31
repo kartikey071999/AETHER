@@ -59,9 +59,13 @@ def test_each_agent_sees_only_its_own_skills(registry):
         "web.gather",
         "text.screen_untrusted",
         "llm.summarise",
+        "llm.structured",
     }
-    assert {s.name for s in registry.skills_for(AgentId.WARDEN)} == {"text.screen_untrusted"}
-    assert registry.skills_for(AgentId.FORGE) == ()
+    assert {s.name for s in registry.skills_for(AgentId.WARDEN)} == {
+        "text.screen_untrusted",
+        "llm.structured",
+    }
+    assert {s.name for s in registry.skills_for(AgentId.FORGE)} == {"llm.structured"}
 
 
 def test_duplicate_skill_is_rejected(registry):
@@ -116,9 +120,11 @@ async def test_summarise_without_models_is_deterministic_and_cites_sources(regis
 class FakeModels:
     text: str
     calls: int = 0
+    last_call: object = None
 
-    async def complete(self, request):
+    async def complete(self, request, call=None):
         self.calls += 1
+        self.last_call = call
         return SimpleNamespace(text=self.text)
 
 
@@ -199,3 +205,47 @@ async def test_direct_skill_runs_are_recorded_as_events(registry, database):
         ("text.screen_untrusted", "succeeded"),
         ("web.gather", "failed"),
     ]
+
+
+async def test_model_calls_are_attributed_to_the_objective_and_task(registry, database):
+    # The facade attributes budgets and the per-objective governor from the call context only.
+    from uuid import uuid4
+
+    objective, task = uuid4(), uuid4()
+    models = FakeModels(json.dumps({"summary": "s", "key_points": ["p"]}))
+    await execute_skill(
+        registry.get("llm.summarise"),
+        {"question": "q", "sources": [source()]},
+        context(database, models=models, objective_id=objective, task_id=task),
+    )
+    assert (models.last_call.objective_id, models.last_call.task_id) == (objective, task)
+
+
+async def test_structured_returns_the_models_object_with_attribution(registry, database):
+    from uuid import uuid4
+
+    objective = uuid4()
+    models = FakeModels(json.dumps({"kind": "capability"}))
+    result, _ = await execute_skill(
+        registry.get("llm.structured"),
+        {"instructions": "classify", "data": "x", "json_schema": {"type": "object"}},
+        context(database, AgentId.ORCHESTR, models=models, objective_id=objective),
+    )
+    assert result.value == {"kind": "capability"} and models.last_call.objective_id == objective
+
+
+@pytest.mark.parametrize(
+    ("models", "reason"),
+    [
+        (None, "not_configured"),
+        (FakeModels("not json"), "JSONDecodeError"),
+        (FakeModels("[1, 2]"), "not_an_object"),
+    ],
+)
+async def test_structured_signals_fallback_instead_of_raising(registry, database, models, reason):
+    result, _ = await execute_skill(
+        registry.get("llm.structured"),
+        {"instructions": "i", "data": "d", "json_schema": {"type": "object"}},
+        context(database, AgentId.FORGE, models=models),
+    )
+    assert (result.value, result.reason) == (None, reason)

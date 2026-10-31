@@ -55,9 +55,17 @@ async def runtime(tmp_path: Path) -> AsyncIterator[Runtime]:
 
 async def test_each_agent_context_has_only_its_own_skills(runtime: Runtime) -> None:
     scout = runtime.engine.context_for(AgentId.SCOUT)
-    assert scout.skills.names() == ("llm.summarise", "text.screen_untrusted", "web.gather")
-    assert runtime.engine.context_for(AgentId.WARDEN).skills.names() == ("text.screen_untrusted",)
-    assert runtime.engine.context_for(AgentId.FORGE).skills.names() == ()
+    assert scout.skills.names() == (
+        "llm.structured",
+        "llm.summarise",
+        "text.screen_untrusted",
+        "web.gather",
+    )
+    assert runtime.engine.context_for(AgentId.WARDEN).skills.names() == (
+        "llm.structured",
+        "text.screen_untrusted",
+    )
+    assert runtime.engine.context_for(AgentId.FORGE).skills.names() == ("llm.structured",)
     assert scout.workflows.agent_id is AgentId.SCOUT
 
 
