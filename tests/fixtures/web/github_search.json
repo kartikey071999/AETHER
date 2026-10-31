@@ -1,0 +1,34 @@
+{
+  "total_count": 2,
+  "incomplete_results": false,
+  "items": [
+    {
+      "full_name": "example/http",
+      "description": "A small, typed HTTP client (offline test fixture).",
+      "html_url": "https://github.com/example/http",
+      "language": "Python",
+      "license": {"spdx_id": "BSD-3-Clause"},
+      "stargazers_count": 1234,
+      "forks_count": 56,
+      "open_issues_count": 7,
+      "archived": false,
+      "fork": false,
+      "pushed_at": "2026-09-30T12:00:00Z",
+      "topics": ["http"]
+    },
+    {
+      "full_name": "other/streamer",
+      "description": "Streaming helpers.",
+      "html_url": "https://github.com/other/streamer",
+      "language": "Python",
+      "license": null,
+      "stargazers_count": 12,
+      "forks_count": 1,
+      "open_issues_count": 0,
+      "archived": true,
+      "fork": false,
+      "pushed_at": "2023-01-01T00:00:00Z",
+      "topics": []
+    }
+  ]
+}

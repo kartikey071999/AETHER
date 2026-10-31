@@ -20,6 +20,7 @@ from aether.security.summary import policy_fingerprint
 from aether.tools.adapters import build_default_registry
 from aether.tools.facade import AgentTools
 from aether.tools.registry import ToolRegistry
+from aether.tools.web import WebSettings
 
 APPROVALS_SERVICE = "approvals"
 SECURITY_POLICY_SERVICE = "security_policy"
@@ -60,6 +61,7 @@ class SecurityServices:
             "allowlist_sizes": {
                 "executables": len(policy.allowed_executables),
                 "hosts": len(policy.allowed_hosts),
+                "web_hosts": len(policy.web_allowed_hosts),
                 "filesystem_roots": len(policy.filesystem_roots),
             },
         }
@@ -92,13 +94,16 @@ def build_security_policy(
     security_settings: SecuritySettings | None = None,
     extra_hosts: Iterable[str] = (),
     extra_executables: Iterable[str] | None = None,
+    web_settings: WebSettings | None = None,
 ) -> SecurityPolicy:
     """The effective policy: settings plus provider hosts and the running interpreter.
 
     The single place the runtime and ``aether security show`` build the policy, so the
-    fingerprint they report is identical for identical configuration.
+    fingerprint they report is identical for identical configuration. The web research hosts
+    (``AETHER_WEB_ALLOWED_HOSTS``) form a separate allowlist used only by ``web_fetch``.
     """
     base = security_settings or SecuritySettings()
+    web = web_settings or WebSettings()
     if extra_executables is None:
         extra_executables = default_extra_executables()
     hosts = list(dict.fromkeys([*base.allowed_hosts, *extra_hosts]))
@@ -106,6 +111,7 @@ def build_security_policy(
     return load_security_policy(
         settings,
         base.model_copy(update={"allowed_hosts": hosts, "allowed_executables": executables}),
+        web_allowed_hosts=web.allowed_hosts,
     )
 
 
@@ -118,6 +124,7 @@ def build_security_services(
     extra_hosts: Iterable[str] = (),
     extra_executables: Iterable[str] | None = None,
     http_transport: httpx.AsyncBaseTransport | None = None,
+    web_settings: WebSettings | None = None,
 ) -> SecurityServices:
     """Build the default-deny policy from settings and the services that enforce it.
 
@@ -130,13 +137,20 @@ def build_security_services(
         security_settings=security_settings,
         extra_hosts=extra_hosts,
         extra_executables=extra_executables,
+        web_settings=web_settings,
     )
     # Adapters refuse to run in or write to roots that do not exist yet.
     for directory in (policy.workspace_dir, policy.artifact_dir, policy.data_dir):
         directory.mkdir(parents=True, exist_ok=True)
     permissions = PermissionService(sessions, recorder, policy)
     approvals = ApprovalService(sessions, recorder, policy)
-    tools = build_default_registry(permissions, sessions, recorder, http_transport=http_transport)
+    tools = build_default_registry(
+        permissions,
+        sessions,
+        recorder,
+        http_transport=http_transport,
+        web_settings=web_settings,
+    )
     return SecurityServices(
         policy=policy, permissions=permissions, approvals=approvals, tools=tools
     )
